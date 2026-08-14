@@ -1,12 +1,15 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyEventKind};
-use prtui::app::input::InputRouter;
+use crossterm::event::{Event, EventStream, KeyEventKind};
+use futures_core::Stream;
 use prtui::app::App;
+use prtui::app::input::InputRouter;
 use prtui::model::{self, ChangedFile, PullRequest};
 use prtui::{gh, ui};
-use std::time::{Duration, Instant};
+use std::{future::poll_fn, pin::Pin, time::Instant};
 use tokio::sync::mpsc;
+
+mod terminal;
 
 #[derive(Parser)]
 #[command(name = "prtui", about = "Review GitHub pull requests in the terminal")]
@@ -31,8 +34,10 @@ enum Message {
 /// Highlighting all files costs ~600ms single-threaded but only ~150ms across
 /// cores, which hides entirely inside the network wait.
 fn spawn_highlight_pass(files: &[ChangedFile], tx: mpsc::UnboundedSender<Message>) {
-    let payload: Vec<(String, Vec<prtui::model::DiffLine>)> =
-        files.iter().map(|f| (f.path.clone(), f.lines.clone())).collect();
+    let payload: Vec<(String, Vec<prtui::model::DiffLine>)> = files
+        .iter()
+        .map(|f| (f.path.clone(), f.lines.clone()))
+        .collect();
 
     std::thread::spawn(move || {
         use rayon::prelude::*;
@@ -98,11 +103,7 @@ async fn run(
     tx: mpsc::UnboundedSender<Message>,
     started: Instant,
 ) -> Result<()> {
-    let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut rx, tx, started).await;
-    ratatui::restore();
-
-    result
+    terminal::scope(async |terminal| event_loop(terminal, &mut rx, tx, started).await).await
 }
 
 async fn event_loop(
@@ -113,7 +114,8 @@ async fn event_loop(
 ) -> Result<()> {
     let mut app = App::new();
     let mut input = InputRouter::default();
-    let mut pending = 2;
+    let mut events = EventStream::new();
+    let mut pending: u8 = 2;
     let mut failure: Option<String> = None;
     let mut is_dirty = true;
 
@@ -121,55 +123,67 @@ async fn event_loop(
         if is_dirty {
             app.ensure_highlighted();
             let pending_hint = input.pending_hint();
-            terminal.draw(|frame| ui::draw(frame, &mut app, &pending_hint))?;
+            terminal::draw(terminal, |frame| ui::draw(frame, &mut app, &pending_hint))?;
             is_dirty = false;
         }
 
-        while let Ok(msg) = rx.try_recv() {
-            is_dirty = true;
+        tokio::select! {
+            message = rx.recv() => {
+                let Some(message) = message else {
+                    bail!("application message channel closed");
+                };
 
-            match msg {
-                Message::Highlights(all) => {
-                    app.set_highlights(all);
-                    continue;
+                match message {
+                    Message::Highlights(all) => app.set_highlights(all),
+                    Message::Meta(pr) => {
+                        app.set_meta(*pr);
+                        pending = pending.saturating_sub(1);
+                    }
+                    Message::Files(files) => {
+                        spawn_highlight_pass(&files, tx.clone());
+                        app.files = files;
+                        pending = pending.saturating_sub(1);
+                    }
+                    Message::Failed(err) => {
+                        failure = Some(err);
+                        pending = pending.saturating_sub(1);
+                    }
                 }
-                Message::Meta(pr) => app.set_meta(*pr),
-                Message::Files(files) => {
-                    spawn_highlight_pass(&files, tx.clone());
-                    app.files = files;
+
+                if pending == 0 {
+                    app.load_ms = Some(started.elapsed().as_millis());
+                    app.status = match &failure {
+                        Some(err) => format!("error: {err}"),
+                        None => format!(
+                            "{} threads",
+                            app.threads_by_path.values().flatten().count()
+                        ),
+                    };
                 }
-                Message::Failed(err) => failure = Some(err),
-            }
 
-            pending -= 1;
-            if pending > 0 {
-                continue;
-            }
-
-            app.load_ms = Some(started.elapsed().as_millis());
-            app.status = match &failure {
-                Some(err) => format!("error: {err}"),
-                None => format!("{} threads", app.threads_by_path.values().flatten().count()),
-            };
-        }
-
-        // Idle costs one poll wakeup per tick, not a full repaint.
-        if !event::poll(Duration::from_millis(if pending > 0 { 16 } else { 120 }))? {
-            continue;
-        }
-
-        let height = ui::diff_viewport_height(terminal.get_frame().area());
-        match event::read()? {
-            Event::Resize(_, _) => is_dirty = true,
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                input.dispatch_key(&mut app, key, height);
                 is_dirty = true;
             }
-            Event::Paste(text) => {
-                input.dispatch_paste(&mut app, text);
-                is_dirty = true;
+            event = next_event(&mut events) => {
+                let event = event
+                    .context("terminal event stream closed")?
+                    .context("reading terminal event")?;
+                let height = ui::diff_viewport_height(terminal.get_frame().area());
+
+                match event {
+                    Event::Resize(_, _) => is_dirty = true,
+                    Event::Key(key)
+                        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                    {
+                        input.dispatch_key(&mut app, key, height);
+                        is_dirty = true;
+                    }
+                    Event::Paste(text) => {
+                        input.dispatch_paste(&mut app, text);
+                        is_dirty = true;
+                    }
+                    _ => {}
+                }
             }
-            _ => {}
         }
     }
 
@@ -178,4 +192,8 @@ async fn event_loop(
     }
 
     Ok(())
+}
+
+async fn next_event(events: &mut EventStream) -> Option<std::io::Result<Event>> {
+    poll_fn(|cx| Pin::new(&mut *events).poll_next(cx)).await
 }

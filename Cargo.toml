@@ -6,8 +6,9 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
-crossterm = "0.29.0"
+crossterm = { version = "0.29.0", features = ["bracketed-paste", "event-stream"] }
 edtui = "0.11.6"
+futures-core = { version = "0.3.31", default-features = false }
 ratatui = "0.30.2"
 rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
