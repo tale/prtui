@@ -1,4 +1,3 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use prtui::app::action::{Action, Motion};
 use prtui::app::draft::Side;
 use prtui::app::input::{DispatchResult, InputRouter};
@@ -6,12 +5,12 @@ use prtui::app::keymap::{Keymap, Resolution};
 use prtui::app::mode::Mode;
 use prtui::app::{App, Pane};
 use prtui::model::{parse_files, parse_meta};
+use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 fn load() -> App {
     let files: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
-    let meta: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
+    let meta: serde_json::Value = serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
 
     let mut app = App::new();
     app.files = parse_files(&files).unwrap();
@@ -41,7 +40,7 @@ fn park_on_code(app: &mut App) {
 fn press(app: &mut App, keys: &str) {
     let mut input = InputRouter::default();
     for c in keys.chars() {
-        let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let key = KeyEvent::new(KeyCode::Char(c), Modifiers::NONE);
         input.dispatch_key(app, key, 20);
     }
 }
@@ -78,8 +77,11 @@ fn gg_needs_both_keys() {
 
     // A lone `g` is incomplete and must not move the cursor.
     let mut input = InputRouter::default();
-    let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
-    assert_eq!(input.dispatch_key(&mut app, key, 20), DispatchResult::Pending);
+    let key = KeyEvent::new(KeyCode::Char('g'), Modifiers::NONE);
+    assert_eq!(
+        input.dispatch_key(&mut app, key, 20),
+        DispatchResult::Pending
+    );
     assert_eq!(app.cursor, 9);
     assert_eq!(input.pending_hint(), "g");
 
@@ -95,7 +97,7 @@ fn gg_needs_both_keys() {
 fn leading_zero_is_unbound_and_does_not_start_a_count() {
     let mut app = load();
     let mut keymap = Keymap::default();
-    let key = KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE);
+    let key = KeyEvent::new(KeyCode::Char('0'), Modifiers::NONE);
 
     // Leading zero must not start a count that swallows the next motion.
     assert_eq!(keymap.resolve(Mode::Normal, key), Resolution::Unbound);
@@ -106,7 +108,7 @@ fn leading_zero_is_unbound_and_does_not_start_a_count() {
 #[test]
 fn ctrl_d_is_a_half_page() {
     let mut keymap = Keymap::default();
-    let key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+    let key = KeyEvent::new(KeyCode::Char('d'), Modifiers::CONTROL);
 
     assert_eq!(
         keymap.resolve(Mode::Normal, key),
@@ -165,7 +167,7 @@ fn commenting_a_selection_produces_one_multiline_draft() {
     assert!(app.composer.is_some());
 
     let composer = app.composer.as_mut().unwrap();
-    composer.editor.lines = edtui::Lines::from("this allocates on every call");
+    composer.editor.set_text("this allocates on every call");
 
     app.apply(Action::CommitComment, 20);
 
@@ -199,10 +201,10 @@ fn cancelling_keeps_the_buffer_out_of_the_drafts() {
     press(&mut app, "c");
 
     let composer = app.composer.as_mut().unwrap();
-    composer.editor.lines = edtui::Lines::from("never mind");
+    composer.editor.set_text("never mind");
 
     let mut input = InputRouter::default();
-    let cancel = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let cancel = KeyEvent::new(KeyCode::Char('c'), Modifiers::CONTROL);
     assert_eq!(
         input.dispatch_key(&mut app, cancel, 20),
         DispatchResult::Applied(Action::CancelComment)
@@ -221,25 +223,22 @@ fn insert_mode_reserves_only_the_submit_and_cancel_chords() {
     let mut input = InputRouter::default();
 
     // A bare letter belongs to the editor widget, not the app keymap.
-    let letter = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+    let letter = KeyEvent::new(KeyCode::Char('s'), Modifiers::NONE);
     assert_eq!(
         input.dispatch_key(&mut app, letter, 20),
         DispatchResult::ForwardedToEditor
     );
-    assert_eq!(app.composer.as_ref().unwrap().editor.lines.to_string(), "s");
+    assert_eq!(app.composer.as_ref().unwrap().editor.text(), "s");
 
     // Extra modifiers do not accidentally trigger an application chord.
-    let modified = KeyEvent::new(
-        KeyCode::Char('s'),
-        KeyModifiers::CONTROL | KeyModifiers::ALT,
-    );
+    let modified = KeyEvent::new(KeyCode::Char('s'), Modifiers::CONTROL | Modifiers::ALT);
     assert_eq!(
         input.dispatch_key(&mut app, modified, 20),
         DispatchResult::ForwardedToEditor
     );
     assert!(app.composer.is_some());
 
-    let chord = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let chord = KeyEvent::new(KeyCode::Char('s'), Modifiers::CONTROL);
     assert_eq!(
         input.dispatch_key(&mut app, chord, 20),
         DispatchResult::Applied(Action::CommitComment)
@@ -264,19 +263,19 @@ fn paste_is_routed_only_to_an_open_composer() {
         input.dispatch_paste(&mut app, "pasted text".into()),
         DispatchResult::ForwardedToEditor
     );
-    assert_eq!(
-        app.composer.as_ref().unwrap().editor.lines.to_string(),
-        "pasted text"
-    );
+    assert_eq!(app.composer.as_ref().unwrap().editor.text(), "pasted text");
 }
 
 #[test]
 fn alt_modified_normal_bindings_are_ignored() {
     let mut app = load();
     let mut input = InputRouter::default();
-    let alt_j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT);
+    let alt_j = KeyEvent::new(KeyCode::Char('j'), Modifiers::ALT);
 
-    assert_eq!(input.dispatch_key(&mut app, alt_j, 20), DispatchResult::Ignored);
+    assert_eq!(
+        input.dispatch_key(&mut app, alt_j, 20),
+        DispatchResult::Ignored
+    );
     assert_eq!(app.cursor, 0);
 }
 

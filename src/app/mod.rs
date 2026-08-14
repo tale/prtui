@@ -1,5 +1,6 @@
 pub mod action;
 pub mod draft;
+pub mod editor;
 pub mod input;
 pub mod keymap;
 pub mod mode;
@@ -8,7 +9,7 @@ use crate::model::{ChangedFile, PullRequest, ReviewThread};
 use crate::renderer::{Renderer, Segment, Theme, ThemeMode};
 use action::{Action, Motion};
 use draft::{Anchor, Draft};
-use edtui::{EditorMode, EditorState, Lines};
+use editor::CommentEditor;
 use mode::{Mode, Selection};
 use std::collections::HashMap;
 
@@ -20,7 +21,7 @@ pub enum Pane {
 
 /// An in-progress comment: the editor buffer plus where it will land.
 pub struct Composer {
-    pub editor: EditorState,
+    pub editor: CommentEditor,
     pub anchor: Anchor,
     pub path: String,
 }
@@ -100,7 +101,10 @@ impl App {
     pub fn set_meta(&mut self, pr: PullRequest) {
         let mut by_path: HashMap<String, Vec<ReviewThread>> = HashMap::new();
         for thread in &pr.threads {
-            by_path.entry(thread.path.clone()).or_default().push(thread.clone());
+            by_path
+                .entry(thread.path.clone())
+                .or_default()
+                .push(thread.clone());
         }
 
         self.threads_by_path = by_path;
@@ -116,7 +120,10 @@ impl App {
     }
 
     pub fn drafts_for_current(&self) -> impl Iterator<Item = &Draft> {
-        let path = self.current_file().map(|f| f.path.clone()).unwrap_or_default();
+        let path = self
+            .current_file()
+            .map(|f| f.path.clone())
+            .unwrap_or_default();
 
         self.drafts.iter().filter(move |d| d.path == path)
     }
@@ -127,7 +134,9 @@ impl App {
             return;
         }
 
-        let Some(file) = self.files.get(index) else { return };
+        let Some(file) = self.files.get(index) else {
+            return;
+        };
 
         let styled = self.renderer.highlight_file(&file.path, &file.lines);
         self.highlights.insert(index, styled);
@@ -146,7 +155,9 @@ impl App {
     }
 
     pub fn highlighted(&self) -> Option<&[Vec<Segment>]> {
-        self.highlights.get(&self.selected_file).map(|v| v.as_slice())
+        self.highlights
+            .get(&self.selected_file)
+            .map(|v| v.as_slice())
     }
 
     pub fn apply(&mut self, action: Action, viewport_height: usize) {
@@ -194,23 +205,28 @@ impl App {
             None => self.cursor..=self.cursor,
         };
 
-        let Some(file) = self.current_file() else { return };
+        let Some(file) = self.current_file() else {
+            return;
+        };
         let Some(anchor) = draft::anchor_for(file, rows) else {
             self.status = "cannot comment on that line".into();
             return;
         };
 
-        let mut editor = EditorState::new(Lines::default());
-        editor.mode = EditorMode::Insert;
-
-        self.composer = Some(Composer { editor, anchor, path: file.path.clone() });
+        self.composer = Some(Composer {
+            editor: CommentEditor::default(),
+            anchor,
+            path: file.path.clone(),
+        });
         self.mode = Mode::Insert;
     }
 
     fn commit_comment(&mut self) {
-        let Some(composer) = self.composer.take() else { return };
+        let Some(composer) = self.composer.take() else {
+            return;
+        };
 
-        let body = composer.editor.lines.to_string();
+        let body = composer.editor.text();
         let body = body.trim().to_string();
 
         self.mode = Mode::Normal;
@@ -237,7 +253,11 @@ impl App {
             return;
         }
 
-        self.pane = if self.pane == Pane::Files { Pane::Diff } else { Pane::Files };
+        self.pane = if self.pane == Pane::Files {
+            Pane::Diff
+        } else {
+            Pane::Files
+        };
     }
 
     fn select_file(&mut self, index: usize) {

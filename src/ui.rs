@@ -2,7 +2,6 @@ use crate::app::draft::{Draft, Side};
 use crate::app::mode::Mode;
 use crate::app::{App, Pane};
 use crate::model::LineKind;
-use edtui::{EditorTheme, EditorView};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -318,7 +317,7 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
 /// Floats over the diff so the anchored lines stay visible while typing.
 fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
-    let Some(composer) = app.composer.as_mut() else {
+    let Some(composer) = app.composer.as_ref() else {
         return;
     };
 
@@ -359,26 +358,38 @@ fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
 
-    let editor_theme = EditorTheme::default()
-        .base(Style::default().fg(theme.code))
-        .cursor_style(Style::default().bg(theme.accent).fg(theme.ink))
-        .selection_style(Style::default().bg(theme.selection))
-        .hide_status_line();
+    if inner.is_empty() {
+        return;
+    }
 
-    frame.render_widget(
-        EditorView::new(&mut composer.editor).theme(editor_theme),
-        inner,
-    );
+    let (cursor_row, cursor_byte) = composer.editor.cursor();
+    let lines = composer.editor.lines();
+    let first_row = cursor_row.saturating_sub(inner.height.saturating_sub(1) as usize);
+    let cursor_column = terminal_width(&lines[cursor_row][..cursor_byte]);
+    let first_column = cursor_column.saturating_sub(inner.width.saturating_sub(1) as usize);
+
+    let visible: Vec<Line> = lines
+        .iter()
+        .skip(first_row)
+        .take(inner.height as usize)
+        .map(|line| {
+            Line::styled(
+                clip_window(line, first_column, inner.width as usize),
+                Style::default().fg(theme.code),
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(visible), inner);
+    frame.set_cursor_position((
+        inner.x + cursor_column.saturating_sub(first_column) as u16,
+        inner.y + cursor_row.saturating_sub(first_row) as u16,
+    ));
 }
 
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
     let keys: &[(&str, &str)] = match (app.mode, app.pane) {
-        (Mode::Insert, _) => &[
-            ("^s", "save draft"),
-            ("^c", "cancel"),
-            ("esc", "editor normal"),
-        ],
+        (Mode::Insert, _) => &[("^s", "save draft"), ("^c", "cancel"), ("↵", "newline")],
         (Mode::Visual, _) => &[
             ("j/k", "extend"),
             ("c", "comment selection"),
@@ -527,6 +538,53 @@ fn clip(text: &str, width: usize, column: usize) -> (Cow<'_, str>, usize) {
     }
 
     (Cow::Owned(rendered), used)
+}
+
+fn terminal_width(text: &str) -> usize {
+    text.chars().fold(0, |column, character| {
+        column
+            + if character == '\t' {
+                4 - (column % 4)
+            } else {
+                UnicodeWidthChar::width(character).unwrap_or(0)
+            }
+    })
+}
+
+fn clip_window(text: &str, start: usize, width: usize) -> String {
+    let mut rendered = String::with_capacity(text.len().min(width));
+    let end = start.saturating_add(width);
+    let mut column = 0;
+
+    for character in text.chars() {
+        let character_width = if character == '\t' {
+            4 - (column % 4)
+        } else {
+            UnicodeWidthChar::width(character).unwrap_or(0)
+        };
+        let next = column + character_width;
+
+        if next <= start {
+            column = next;
+            continue;
+        }
+        if column < start || next > end {
+            column = next;
+            if column >= end {
+                break;
+            }
+            continue;
+        }
+
+        if character == '\t' {
+            rendered.extend(std::iter::repeat_n(' ', character_width));
+        } else {
+            rendered.push(character);
+        }
+        column = next;
+    }
+
+    rendered
 }
 
 fn truncate_right(text: &str, width: usize) -> String {

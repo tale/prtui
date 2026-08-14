@@ -1,18 +1,17 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use prtui::app::action::Action;
 use prtui::app::input::InputRouter;
 use prtui::app::{App, Pane};
-use prtui::model::{parse_files, parse_meta, LineKind};
+use prtui::model::{LineKind, parse_files, parse_meta};
 use prtui::renderer::ThemeMode;
 use prtui::ui;
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 fn load() -> App {
     let files: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
-    let meta: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
+    let meta: serde_json::Value = serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
 
     let mut app = App::new();
     app.files = parse_files(&files).unwrap();
@@ -50,22 +49,38 @@ fn hunk_line_numbers_advance_correctly() {
         .filter_map(|l| l.new_line)
         .collect();
 
-    assert!(added.windows(2).all(|w| w[0] < w[1]), "new-side numbers must increase");
+    assert!(
+        added.windows(2).all(|w| w[0] < w[1]),
+        "new-side numbers must increase"
+    );
 }
 
 #[test]
 fn renders_header_and_diff() {
     let mut app = load();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal.draw(|frame| ui::draw(frame, &mut app, "")).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
 
     let rendered = terminal.backend().to_string();
 
-    assert!(rendered.contains("#9000"), "header should show the PR number");
-    assert!(rendered.contains("NORMAL"), "status bar should show the mode");
-    assert!(rendered.contains("files"), "status bar should show the active pane");
     assert!(
-        app.files.iter().any(|f| rendered.contains(f.path.split('/').next_back().unwrap())),
+        rendered.contains("#9000"),
+        "header should show the PR number"
+    );
+    assert!(
+        rendered.contains("NORMAL"),
+        "status bar should show the mode"
+    );
+    assert!(
+        rendered.contains("files"),
+        "status bar should show the active pane"
+    );
+    assert!(
+        app.files
+            .iter()
+            .any(|f| rendered.contains(f.path.split('/').next_back().unwrap())),
         "file list should show at least one changed file"
     );
 }
@@ -74,7 +89,9 @@ fn renders_header_and_diff() {
 fn pending_input_is_visible_in_the_status_line() {
     let mut app = load();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal.draw(|frame| ui::draw(frame, &mut app, "123456")).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, "123456"))
+        .unwrap();
 
     assert!(terminal.backend().to_string().contains("123456"));
 }
@@ -83,7 +100,7 @@ fn pending_input_is_visible_in_the_status_line() {
 fn press(app: &mut App, keys: &str) {
     let mut input = InputRouter::default();
     for c in keys.chars() {
-        let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let key = KeyEvent::new(KeyCode::Char(c), Modifiers::NONE);
         input.dispatch_key(app, key, 20);
     }
 }
@@ -116,7 +133,9 @@ fn renders_large_diff_in_constant_time() {
 
     let started = std::time::Instant::now();
     for _ in 0..500 {
-        terminal.draw(|frame| ui::draw(frame, &mut app, "")).unwrap();
+        terminal
+            .draw(|frame| ui::draw(frame, &mut app, ""))
+            .unwrap();
     }
     let elapsed = started.elapsed();
 
@@ -173,7 +192,9 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
         .position(|line| line.kind == LineKind::Added)
         .unwrap();
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-    terminal.draw(|frame| ui::draw(frame, &mut app, "")).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
 
     assert_eq!(
         terminal
@@ -246,7 +267,9 @@ fn visual_selection_paints_every_row_in_the_span() {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| ui::draw(frame, app, "")).unwrap();
         let buffer = terminal.backend().buffer();
-        (0..30).map(|row| buffer.cell((45, row)).unwrap().style().bg).collect()
+        (0..30)
+            .map(|row| buffer.cell((45, row)).unwrap().style().bg)
+            .collect()
     };
 
     let plain = snapshot(&mut app);
@@ -256,7 +279,8 @@ fn visual_selection_paints_every_row_in_the_span() {
     // Diff row N draws on screen row N+1; the header occupies row 0.
     for row in 3..=7 {
         assert_ne!(
-            plain[row], selected[row],
+            plain[row],
+            selected[row],
             "diff row {} is inside the selection and must change tint",
             row - 1
         );
@@ -264,7 +288,8 @@ fn visual_selection_paints_every_row_in_the_span() {
 
     for row in [2, 8, 9] {
         assert_eq!(
-            plain[row], selected[row],
+            plain[row],
+            selected[row],
             "diff row {} is outside the selection and must not change",
             row - 1
         );
@@ -280,7 +305,9 @@ fn every_selected_row_carries_the_left_bar() {
     app.selection = Some(Selection { anchor: 1, head: 4 });
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal.draw(|frame| ui::draw(frame, &mut app, "")).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
 
     let buffer = terminal.backend().buffer();
     // The tree is 30 columns at this width, so the diff's own gutter starts there.
@@ -309,11 +336,16 @@ fn the_composer_opens_over_the_diff_with_its_anchor_in_the_title() {
     assert!(app.composer.is_some());
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal.draw(|frame| ui::draw(frame, &mut app, "")).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
 
     let rendered = terminal.backend().to_string();
     assert!(rendered.contains("comment ·"), "composer should be titled");
-    assert!(rendered.contains("INSERT"), "status bar should show insert mode");
+    assert!(
+        rendered.contains("INSERT"),
+        "status bar should show insert mode"
+    );
 }
 
 #[test]
@@ -327,12 +359,18 @@ fn a_saved_draft_marks_its_lines_in_the_gutter() {
         .unwrap();
 
     app.apply(Action::StartComment, 20);
-    app.composer.as_mut().unwrap().editor.lines = edtui::Lines::from("needs a guard");
+    app.composer
+        .as_mut()
+        .unwrap()
+        .editor
+        .set_text("needs a guard");
     app.apply(Action::CommitComment, 20);
     assert_eq!(app.drafts.len(), 1);
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal.draw(|frame| ui::draw(frame, &mut app, "")).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
 
     let rendered = terminal.backend().to_string();
     assert!(rendered.contains('✎'), "draft lines carry a pencil marker");

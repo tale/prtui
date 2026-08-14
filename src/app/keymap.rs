@@ -1,6 +1,6 @@
 use super::action::{Action, Motion};
 use super::mode::Mode;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 const MAX_COUNT: usize = 999_999;
 
@@ -48,14 +48,14 @@ impl Keymap {
             return self.resolve_special(key);
         };
 
-        if key.modifiers == KeyModifiers::CONTROL {
+        if key.modifiers == Modifiers::CONTROL {
             return self.resolve_control(c);
         }
 
         // Shift is represented both by the character's case and, depending on
         // the terminal, by this flag. Other modifiers must not trigger a plain
         // application binding.
-        if key.modifiers != KeyModifiers::NONE && key.modifiers != KeyModifiers::SHIFT {
+        if key.modifiers != Modifiers::NONE && key.modifiers != Modifiers::SHIFT {
             self.clear();
             return Resolution::Unbound;
         }
@@ -125,13 +125,13 @@ impl Keymap {
     fn resolve_special(&mut self, key: KeyEvent) -> Resolution {
         self.clear();
 
-        if key.modifiers != KeyModifiers::NONE {
+        if key.modifiers != Modifiers::NONE {
             return Resolution::Unbound;
         }
 
         match key.code {
             KeyCode::Tab => Resolution::Action(Action::TogglePane),
-            KeyCode::Esc => Resolution::Action(Action::LeaveVisual),
+            KeyCode::Escape => Resolution::Action(Action::LeaveVisual),
             KeyCode::Down => Resolution::Action(Action::Move(Motion::Down(1))),
             KeyCode::Up => Resolution::Action(Action::Move(Motion::Up(1))),
             _ => Resolution::Unbound,
@@ -141,7 +141,7 @@ impl Keymap {
     /// While composing, only the submit and cancel chords are ours; every
     /// other key belongs to the editor widget.
     fn resolve_insert(&mut self, key: KeyEvent) -> Resolution {
-        if key.modifiers != KeyModifiers::CONTROL {
+        if key.modifiers != Modifiers::CONTROL {
             return Resolution::Unbound;
         }
 

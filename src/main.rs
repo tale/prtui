@@ -1,8 +1,5 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
-use crossterm::event::{
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-};
 use futures_core::Stream;
 use prtui::app::App;
 use prtui::app::input::InputRouter;
@@ -11,7 +8,8 @@ use prtui::renderer::{Renderer, Segment, ThemeMode};
 use prtui::{gh, ui};
 use std::{future::poll_fn, pin::Pin, time::Instant};
 use termina::escape::csi::{Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode};
-use termina::{Event, EventStream, PlatformTerminal, Terminal};
+use termina::event::KeyEventKind;
+use termina::{Event, EventStream};
 use tokio::sync::mpsc;
 
 mod terminal;
@@ -41,7 +39,7 @@ enum ThemeChoice {
 impl ThemeChoice {
     fn resolve(self) -> ThemeMode {
         match self {
-            Self::Auto => ThemeMode::detect(),
+            Self::Auto => terminal::detect_theme(),
             Self::Dark => ThemeMode::Dark,
             Self::Light => ThemeMode::Light,
         }
@@ -135,9 +133,10 @@ async fn run(
     renderer: Renderer,
     follow_terminal: bool,
 ) -> Result<()> {
-    terminal::scope(follow_terminal, async |terminal| {
+    terminal::scope(follow_terminal, async |terminal, events| {
         event_loop(
             terminal,
+            events,
             &mut rx,
             tx,
             started,
@@ -150,7 +149,8 @@ async fn run(
 }
 
 async fn event_loop(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut terminal::AppTerminal,
+    events: &mut EventStream,
     rx: &mut mpsc::UnboundedReceiver<Message>,
     tx: mpsc::UnboundedSender<Message>,
     started: Instant,
@@ -159,10 +159,6 @@ async fn event_loop(
 ) -> Result<()> {
     let mut app = App::with_renderer(renderer);
     let mut input = InputRouter::default();
-    // Crossterm's renderer remains in place, but Termina is used for input
-    // because it exposes private CSI reports such as the live theme event.
-    let event_terminal = PlatformTerminal::new().context("opening terminal input")?;
-    let mut events = EventStream::new(event_terminal.event_reader(), |_| true);
     let mut pending: u8 = 2;
     let mut failure: Option<String> = None;
     let mut is_dirty = true;
@@ -223,7 +219,7 @@ async fn event_loop(
 
                 is_dirty |= affects_display;
             }
-            event = next_event(&mut events) => {
+            event = next_event(events) => {
                 let event = event
                     .context("terminal event stream closed")?
                     .context("reading terminal event")?;
@@ -232,9 +228,7 @@ async fn event_loop(
                 match event {
                     Event::WindowResized(_) => is_dirty = true,
                     Event::Key(key) => {
-                        if let Some(key) = crossterm_key(key)
-                            && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-                        {
+                        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                             input.dispatch_key(&mut app, key, height);
                             is_dirty = true;
                         }
@@ -278,85 +272,14 @@ async fn next_event(events: &mut EventStream) -> Option<std::io::Result<Event>> 
     poll_fn(|cx| Pin::new(&mut *events).poll_next(cx)).await
 }
 
-fn crossterm_key(key: termina::event::KeyEvent) -> Option<KeyEvent> {
-    use termina::event::KeyCode as TerminaKeyCode;
-
-    let code = match key.code {
-        TerminaKeyCode::Char(c) => KeyCode::Char(c),
-        TerminaKeyCode::Enter => KeyCode::Enter,
-        TerminaKeyCode::Backspace => KeyCode::Backspace,
-        TerminaKeyCode::Tab => KeyCode::Tab,
-        TerminaKeyCode::Escape => KeyCode::Esc,
-        TerminaKeyCode::Left => KeyCode::Left,
-        TerminaKeyCode::Right => KeyCode::Right,
-        TerminaKeyCode::Up => KeyCode::Up,
-        TerminaKeyCode::Down => KeyCode::Down,
-        TerminaKeyCode::Home => KeyCode::Home,
-        TerminaKeyCode::End => KeyCode::End,
-        TerminaKeyCode::BackTab => KeyCode::BackTab,
-        TerminaKeyCode::PageUp => KeyCode::PageUp,
-        TerminaKeyCode::PageDown => KeyCode::PageDown,
-        TerminaKeyCode::Insert => KeyCode::Insert,
-        TerminaKeyCode::Delete => KeyCode::Delete,
-        TerminaKeyCode::KeypadBegin => KeyCode::KeypadBegin,
-        TerminaKeyCode::CapsLock => KeyCode::CapsLock,
-        TerminaKeyCode::ScrollLock => KeyCode::ScrollLock,
-        TerminaKeyCode::NumLock => KeyCode::NumLock,
-        TerminaKeyCode::PrintScreen => KeyCode::PrintScreen,
-        TerminaKeyCode::Pause => KeyCode::Pause,
-        TerminaKeyCode::Menu => KeyCode::Menu,
-        TerminaKeyCode::Null => KeyCode::Null,
-        TerminaKeyCode::Function(n) => KeyCode::F(n),
-        // The application has no bindings for standalone modifier or media
-        // keys, so there is no reason to expand that conversion surface.
-        TerminaKeyCode::Modifier(_) | TerminaKeyCode::Media(_) => return None,
-    };
-
-    let mut modifiers = KeyModifiers::NONE;
-    let source = key.modifiers;
-    for (from, to) in [
-        (termina::event::Modifiers::SHIFT, KeyModifiers::SHIFT),
-        (termina::event::Modifiers::ALT, KeyModifiers::ALT),
-        (termina::event::Modifiers::CONTROL, KeyModifiers::CONTROL),
-        (termina::event::Modifiers::SUPER, KeyModifiers::SUPER),
-        (termina::event::Modifiers::HYPER, KeyModifiers::HYPER),
-        (termina::event::Modifiers::META, KeyModifiers::META),
-    ] {
-        if source.contains(from) {
-            modifiers.insert(to);
-        }
-    }
-
-    let kind = match key.kind {
-        termina::event::KeyEventKind::Press => KeyEventKind::Press,
-        termina::event::KeyEventKind::Repeat => KeyEventKind::Repeat,
-        termina::event::KeyEventKind::Release => KeyEventKind::Release,
-    };
-
-    Some(KeyEvent::new_with_kind(code, modifiers, kind))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use termina::event::{KeyCode as TerminaKeyCode, KeyEvent as TerminaKeyEvent, Modifiers};
 
     #[test]
     fn auto_is_the_only_live_theme_choice() {
         assert!(ThemeChoice::Auto.follows_terminal());
         assert!(!ThemeChoice::Dark.follows_terminal());
         assert!(!ThemeChoice::Light.follows_terminal());
-    }
-
-    #[test]
-    fn termina_keys_keep_bindings_compatible() {
-        let source = TerminaKeyEvent::new(
-            TerminaKeyCode::Char('c'),
-            Modifiers::CONTROL | Modifiers::SHIFT,
-        );
-        let converted = crossterm_key(source).expect("ordinary key converts");
-        assert_eq!(converted.code, KeyCode::Char('c'));
-        assert!(converted.modifiers.contains(KeyModifiers::CONTROL));
-        assert!(converted.modifiers.contains(KeyModifiers::SHIFT));
     }
 }

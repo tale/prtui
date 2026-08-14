@@ -2,8 +2,7 @@ use super::App;
 use super::action::Action;
 use super::keymap::{Keymap, Resolution};
 use super::mode::Mode;
-use crossterm::event::KeyEvent;
-use edtui::EditorEventHandler;
+use termina::event::KeyEvent;
 
 /// What the input router did with an incoming terminal event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +18,6 @@ pub enum DispatchResult {
 #[derive(Default)]
 pub struct InputRouter {
     keymap: Keymap,
-    editor_events: EditorEventHandler,
     mode: Option<Mode>,
 }
 
@@ -49,7 +47,7 @@ impl InputRouter {
                     return DispatchResult::Ignored;
                 };
 
-                self.editor_events.on_key_event(key, &mut composer.editor);
+                composer.editor.handle_key(key);
                 DispatchResult::ForwardedToEditor
             }
             Resolution::Unbound => DispatchResult::Ignored,
@@ -67,8 +65,7 @@ impl InputRouter {
             return DispatchResult::Ignored;
         };
 
-        self.editor_events
-            .on_paste_event(text, &mut composer.editor);
+        composer.editor.insert_text(&text);
         DispatchResult::ForwardedToEditor
     }
 

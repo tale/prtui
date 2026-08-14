@@ -7,17 +7,6 @@ pub enum ThemeMode {
     Light,
 }
 
-impl ThemeMode {
-    /// Ask the terminal for its actual background color. Detection happens
-    /// before the TUI starts so the query cannot leak into the input stream.
-    pub fn detect() -> Self {
-        match terminal_colorsaurus::theme_mode(terminal_colorsaurus::QueryOptions::default()) {
-            Ok(terminal_colorsaurus::ThemeMode::Light) => Self::Light,
-            Ok(terminal_colorsaurus::ThemeMode::Dark) | Err(_) => Self::Dark,
-        }
-    }
-}
-
 /// One coherent palette for the whole renderer. Syntax colors come from a
 /// matching syntect theme; these colors cover diff state and lightweight UI.
 #[derive(Debug, Clone, Copy)]
