@@ -3,33 +3,15 @@ use crate::app::mode::Mode;
 use crate::app::{App, Pane};
 use crate::model::LineKind;
 use edtui::{EditorTheme, EditorView};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
-use ratatui::Frame;
+use std::borrow::Cow;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// The page itself stays on the terminal's own background; only diff state
-/// paints a tint.
-const BG: Color = Color::Reset;
-const BG_ADD: Color = Color::Rgb(29, 51, 41);
-const BG_DEL: Color = Color::Rgb(58, 34, 38);
-const BG_ADD_STRONG: Color = Color::Rgb(46, 92, 68);
-const BG_DEL_STRONG: Color = Color::Rgb(105, 51, 58);
-const BG_CURSOR: Color = Color::Rgb(58, 64, 79);
-const BG_SELECT: Color = Color::Rgb(67, 76, 94);
-const BG_HUNK: Color = Color::Rgb(38, 43, 54);
-
-/// Text drawn on top of an accent pill, which is opaque regardless of theme.
-const INK: Color = Color::Rgb(28, 32, 40);
-const FG_DIM: Color = Color::Rgb(76, 86, 106);
-const FG_MUTED: Color = Color::Rgb(129, 161, 193);
-const FG_CODE: Color = Color::Rgb(216, 222, 233);
-const ACCENT: Color = Color::Rgb(136, 192, 208);
-const PURPLE: Color = Color::Rgb(180, 142, 173);
-const ORANGE: Color = Color::Rgb(208, 135, 112);
-
-const GUTTER: usize = 11;
+const GUTTER: usize = 13;
 
 pub fn draw(frame: &mut Frame, app: &mut App, pending_hint: &str) {
     let rows = Layout::default()
@@ -69,34 +51,42 @@ fn files_width(total: u16) -> u16 {
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
     let spans = match &app.pr {
-        None => vec![Span::styled(" loading…", Style::default().fg(FG_DIM))],
+        None => vec![Span::styled(" loading…", Style::default().fg(theme.dim))],
         Some(pr) => {
             let (label, color) = match pr.state.as_str() {
-                "MERGED" => (" merged ", Color::Rgb(180, 142, 173)),
-                "CLOSED" => (" closed ", Color::Rgb(191, 97, 106)),
-                _ if pr.is_draft => (" draft ", FG_DIM),
-                _ => (" open ", Color::Rgb(163, 190, 140)),
+                "MERGED" => (" merged ", theme.purple),
+                "CLOSED" => (" closed ", theme.danger),
+                _ if pr.is_draft => (" draft ", theme.dim),
+                _ => (" open ", theme.success),
             };
 
             vec![
                 Span::styled(
                     label,
-                    Style::default().bg(color).fg(INK).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .bg(color)
+                        .fg(theme.ink)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!(" #{} ", pr.number),
-                    Style::default().fg(Color::Rgb(235, 203, 139)).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.warning)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     truncate_right(&pr.title, area.width as usize / 2),
-                    Style::default().fg(Color::Rgb(236, 239, 244)).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.heading)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("  {} → {}", pr.head_ref, pr.base_ref),
-                    Style::default().fg(FG_MUTED),
+                    Style::default().fg(theme.muted),
                 ),
-                Span::styled(format!("  @{}", pr.author), Style::default().fg(FG_DIM)),
+                Span::styled(format!("  @{}", pr.author), Style::default().fg(theme.dim)),
             ]
         }
     };
@@ -105,10 +95,11 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
     let is_focused = app.pane == Pane::Files;
     let block = Block::default()
         .borders(Borders::RIGHT)
-        .border_style(Style::default().fg(if is_focused { ACCENT } else { FG_DIM }));
+        .border_style(Style::default().fg(if is_focused { theme.accent } else { theme.dim }));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -134,7 +125,11 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
                 .map(|list| list.iter().filter(|t| !t.is_resolved).count())
                 .unwrap_or(0);
 
-            let marker = if unresolved > 0 { format!(" {unresolved}◆") } else { "  ".into() };
+            let marker = if unresolved > 0 {
+                format!(" {unresolved}◆")
+            } else {
+                "  ".into()
+            };
             let adds = format!("+{}", file.additions);
             let dels = format!("-{}", file.deletions);
 
@@ -142,29 +137,31 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
             let name_width = width.saturating_sub(counts_width + marker.chars().count() + 2);
 
             let base = if is_selected {
-                Style::default().bg(BG_CURSOR).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .bg(theme.cursor)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
 
             let (dir, name) = split_path(&file.path, name_width);
             let status_color = match file.status.as_str() {
-                "added" => Color::Rgb(163, 190, 140),
-                "removed" => Color::Rgb(191, 97, 106),
-                "renamed" => Color::Rgb(235, 203, 139),
-                _ => FG_MUTED,
+                "added" => theme.success,
+                "removed" => theme.danger,
+                "renamed" => theme.warning,
+                _ => theme.muted,
             };
 
             let pad = name_width.saturating_sub(dir.chars().count() + name.chars().count());
 
             Line::from(vec![
-                Span::styled(if is_selected { " ▍" } else { "  " }, base.fg(ACCENT)),
-                Span::styled(dir, base.fg(FG_DIM)),
+                Span::styled(if is_selected { " ▍" } else { "  " }, base.fg(theme.accent)),
+                Span::styled(dir, base.fg(theme.dim)),
                 Span::styled(name, base.fg(status_color)),
                 Span::styled(" ".repeat(pad), base),
-                Span::styled(marker, base.fg(Color::Rgb(180, 142, 173))),
-                Span::styled(format!("{adds:>5}"), base.fg(Color::Rgb(163, 190, 140))),
-                Span::styled(format!(" {dels:>5}"), base.fg(Color::Rgb(191, 97, 106))),
+                Span::styled(marker, base.fg(theme.purple)),
+                Span::styled(format!("{adds:>5}"), base.fg(theme.success)),
+                Span::styled(format!(" {dels:>5}"), base.fg(theme.danger)),
             ])
         })
         .collect();
@@ -173,7 +170,10 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(file) = app.current_file() else { return };
+    let Some(file) = app.current_file() else {
+        return;
+    };
+    let theme = app.theme();
 
     let height = area.height as usize;
     let width = area.width as usize;
@@ -197,49 +197,58 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
 
             if line.kind == LineKind::Hunk {
                 let text = format!("{:<width$}", line.text, width = width);
-                let bg = if is_selected { BG_SELECT } else { BG_HUNK };
+                let bg = if is_selected {
+                    theme.selection
+                } else {
+                    theme.hunk
+                };
 
                 return Line::from(Span::styled(
                     text,
-                    Style::default().bg(bg).fg(FG_MUTED).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .bg(bg)
+                        .fg(theme.muted)
+                        .add_modifier(Modifier::ITALIC),
                 ));
             }
 
             let (base_bg, strong_bg, sigil) = match line.kind {
-                LineKind::Added => (BG_ADD, BG_ADD_STRONG, "+"),
-                LineKind::Removed => (BG_DEL, BG_DEL_STRONG, "-"),
-                _ => (BG, BG, " "),
+                LineKind::Added => (theme.add, theme.add_emphasis, "+"),
+                LineKind::Removed => (theme.delete, theme.delete_emphasis, "-"),
+                _ => (theme.background, theme.background, " "),
             };
 
-            // Selected rows keep their add/remove identity and are lifted instead
+            // Selected rows keep their add/remove identity and are shifted instead
             // of flattened; the left bar is what makes the span read as contiguous.
             let bg = match (is_selected, is_cursor) {
-                (true, _) => lift(base_bg, 34),
-                (false, true) => blend(base_bg),
+                (true, _) => theme.selection_background(base_bg),
+                (false, true) => theme.cursor_background(base_bg),
                 _ => base_bg,
             };
 
             let has_thread = line.new_line.is_some_and(|n| {
-                threads.is_some_and(|list| {
-                    list.iter().any(|t| t.line == Some(n) && !t.is_resolved)
-                })
+                threads.is_some_and(|list| list.iter().any(|t| t.line == Some(n) && !t.is_resolved))
             });
 
             let has_draft = drafts.iter().any(|d| match d.side {
-                Side::Right => line.new_line.is_some_and(|n| d.covers(&file.path, n, Side::Right)),
-                Side::Left => line.old_line.is_some_and(|n| d.covers(&file.path, n, Side::Left)),
+                Side::Right => line
+                    .new_line
+                    .is_some_and(|n| d.covers(&file.path, n, Side::Right)),
+                Side::Left => line
+                    .old_line
+                    .is_some_and(|n| d.covers(&file.path, n, Side::Left)),
             });
 
             let (marker, marker_color) = match (has_draft, has_thread) {
-                (true, _) => (" ✎", ORANGE),
-                (false, true) => (" ◆", PURPLE),
-                _ => ("  ", FG_DIM),
+                (true, _) => (" ✎", theme.orange),
+                (false, true) => (" ◆", theme.purple),
+                _ => ("  ", theme.dim),
             };
 
             let mut spans = vec![
                 Span::styled(
                     if is_cursor || is_selected { "▍" } else { " " },
-                    Style::default().bg(bg).fg(ACCENT),
+                    Style::default().bg(bg).fg(theme.accent),
                 ),
                 Span::styled(
                     format!(
@@ -247,39 +256,50 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
                         line.old_line.map(|n| n.to_string()).unwrap_or_default(),
                         line.new_line.map(|n| n.to_string()).unwrap_or_default(),
                     ),
-                    Style::default().bg(bg).fg(FG_DIM),
+                    Style::default().bg(bg).fg(theme.dim),
                 ),
                 Span::styled(marker, Style::default().bg(bg).fg(marker_color)),
-                Span::styled(sigil, Style::default().bg(bg).fg(FG_DIM)),
+                Span::styled(sigil, Style::default().bg(bg).fg(theme.dim)),
             ];
 
             let mut used = GUTTER;
             match styled.and_then(|s| s.get(index)).filter(|s| !s.is_empty()) {
                 Some(segments) => {
                     for segment in segments {
-                        let text = clip(&segment.text, width.saturating_sub(used));
+                        let Some(source) = line.text.get(segment.range.clone()) else {
+                            continue;
+                        };
+                        let (text, display_width) = clip(
+                            source,
+                            width.saturating_sub(used),
+                            used.saturating_sub(GUTTER),
+                        );
                         if text.is_empty() {
                             break;
                         }
-                        used += text.chars().count();
+                        used += display_width;
 
                         let is_plain = !is_cursor && !is_selected;
-                        let seg_bg = if segment.is_emphasis && is_plain { strong_bg } else { bg };
+                        let seg_bg = if segment.is_emphasis && is_plain {
+                            strong_bg
+                        } else {
+                            bg
+                        };
                         spans.push(Span::styled(
                             text,
-                            Style::default()
-                                .bg(seg_bg)
-                                .fg(Color::Rgb(segment.color.0, segment.color.1, segment.color.2)),
+                            Style::default().bg(seg_bg).fg(Color::Rgb(
+                                segment.color.0,
+                                segment.color.1,
+                                segment.color.2,
+                            )),
                         ));
                     }
                 }
                 None => {
-                    let text = clip(&line.text, width.saturating_sub(used));
-                    used += text.chars().count();
-                    spans.push(Span::styled(
-                        text,
-                        Style::default().bg(bg).fg(Color::Rgb(216, 222, 233)),
-                    ));
+                    let (text, display_width) =
+                        clip(&line.text, width.saturating_sub(used), used - GUTTER);
+                    used += display_width;
+                    spans.push(Span::styled(text, Style::default().bg(bg).fg(theme.code)));
                 }
             }
 
@@ -297,7 +317,10 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Floats over the diff so the anchored lines stay visible while typing.
 fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
-    let Some(composer) = app.composer.as_mut() else { return };
+    let theme = app.theme();
+    let Some(composer) = app.composer.as_mut() else {
+        return;
+    };
 
     let height = 10.min(area.height);
     let rect = Rect {
@@ -315,29 +338,41 @@ fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let name = composer.path.rsplit('/').next().unwrap_or(&composer.path);
-    let title = format!(" comment · {name}:{span} · {} ", anchor.side.as_api().to_lowercase());
+    let title = format!(
+        " comment · {name}:{span} · {} ",
+        anchor.side.as_api().to_lowercase()
+    );
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ORANGE))
-        .title(Span::styled(title, Style::default().fg(ORANGE).add_modifier(Modifier::BOLD)));
+        .border_style(Style::default().fg(theme.orange))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.orange)
+                .add_modifier(Modifier::BOLD),
+        ));
 
     let inner = block.inner(rect);
 
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
 
-    let theme = EditorTheme::default()
-        .base(Style::default().fg(FG_CODE))
-        .cursor_style(Style::default().bg(ACCENT).fg(INK))
-        .selection_style(Style::default().bg(BG_SELECT))
+    let editor_theme = EditorTheme::default()
+        .base(Style::default().fg(theme.code))
+        .cursor_style(Style::default().bg(theme.accent).fg(theme.ink))
+        .selection_style(Style::default().bg(theme.selection))
         .hide_status_line();
 
-    frame.render_widget(EditorView::new(&mut composer.editor).theme(theme), inner);
+    frame.render_widget(
+        EditorView::new(&mut composer.editor).theme(editor_theme),
+        inner,
+    );
 }
 
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
     let keys: &[(&str, &str)] = match (app.mode, app.pane) {
         (Mode::Insert, _) => &[
             ("^s", "save draft"),
@@ -372,19 +407,25 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     for (key, label) in keys {
         spans.push(Span::styled(
             format!(" {key}"),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(format!(" {label}"), Style::default().fg(FG_DIM)));
+        spans.push(Span::styled(
+            format!(" {label}"),
+            Style::default().fg(theme.dim),
+        ));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_status(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect) {
+    let theme = app.theme();
     let mode_bg = match app.mode {
-        Mode::Normal => ACCENT,
-        Mode::Visual => ORANGE,
-        Mode::Insert => Color::Rgb(163, 190, 140),
+        Mode::Normal => theme.accent,
+        Mode::Visual => theme.orange,
+        Mode::Insert => theme.success,
     };
 
     let pane = match app.pane {
@@ -406,77 +447,86 @@ fn draw_status(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect) {
     let mut spans = vec![
         Span::styled(
             app.mode.label(),
-            Style::default().bg(mode_bg).fg(INK).add_modifier(Modifier::BOLD),
+            Style::default()
+                .bg(mode_bg)
+                .fg(theme.ink)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(pane, Style::default().fg(FG_DIM)),
-        Span::styled(position, Style::default().fg(FG_MUTED)),
+        Span::styled(pane, Style::default().fg(theme.dim)),
+        Span::styled(position, Style::default().fg(theme.muted)),
     ];
 
     if let Some(selection) = app.selection {
         spans.push(Span::styled(
             format!("   {} lines", selection.row_count()),
-            Style::default().fg(ORANGE),
+            Style::default().fg(theme.orange),
         ));
     }
 
     if !pending_hint.is_empty() {
         spans.push(Span::styled(
             format!("   {pending_hint}"),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ));
     }
 
     if !app.drafts.is_empty() {
         spans.push(Span::styled(
             format!("   ✎ {}", app.drafts.len()),
-            Style::default().fg(ORANGE),
+            Style::default().fg(theme.orange),
         ));
     }
 
     if let Some(ms) = app.load_ms {
         spans.push(Span::styled(
             format!("   {ms}ms"),
-            Style::default().fg(Color::Rgb(163, 190, 140)),
+            Style::default().fg(theme.success),
         ));
     }
 
-    spans.push(Span::styled(format!("   {}", app.status), Style::default().fg(FG_DIM)));
+    spans.push(Span::styled(
+        format!("   {}", app.status),
+        Style::default().fg(theme.dim),
+    ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Lightens a diff tint so the cursor row reads as selected without losing
-/// its add/remove identity.
-fn blend(color: Color) -> Color {
-    lift(color, 24)
-}
-
-fn lift(color: Color, amount: u8) -> Color {
-    let Color::Rgb(r, g, b) = color else {
-        return match amount {
-            0..=28 => BG_CURSOR,
-            _ => BG_SELECT,
-        };
-    };
-
-    Color::Rgb(
-        r.saturating_add(amount),
-        g.saturating_add(amount),
-        b.saturating_add(amount),
-    )
-}
-
-fn clip(text: &str, width: usize) -> String {
+/// Expand tabs at real tab stops and clip by terminal cells, not scalar count.
+fn clip(text: &str, width: usize, column: usize) -> (Cow<'_, str>, usize) {
     if width == 0 {
-        return String::new();
+        return (Cow::Borrowed(""), 0);
     }
 
-    let expanded = text.replace('\t', "    ");
-    if expanded.chars().count() <= width {
-        return expanded;
+    let display_width = UnicodeWidthStr::width(text);
+    if !text.contains('\t') && display_width <= width {
+        return (Cow::Borrowed(text), display_width);
     }
 
-    expanded.chars().take(width).collect()
+    let mut rendered = String::with_capacity(text.len().min(width));
+    let mut used = 0;
+    for character in text.chars() {
+        if character == '\t' {
+            let tab_width = 4 - ((column + used) % 4);
+            if used + tab_width > width {
+                break;
+            }
+            rendered.extend(std::iter::repeat_n(' ', tab_width));
+            used += tab_width;
+            continue;
+        }
+
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + character_width > width {
+            break;
+        }
+        rendered.push(character);
+        used += character_width;
+    }
+
+    (Cow::Owned(rendered), used)
 }
 
 fn truncate_right(text: &str, width: usize) -> String {
@@ -494,7 +544,10 @@ fn split_path(path: &str, width: usize) -> (String, String) {
     let name = path.rsplit('/').next().unwrap_or(path).to_string();
 
     if name.chars().count() >= width {
-        let tail: String = name.chars().skip(name.chars().count() + 1 - width).collect();
+        let tail: String = name
+            .chars()
+            .skip(name.chars().count() + 1 - width)
+            .collect();
         return (String::new(), format!("…{tail}"));
     }
 
@@ -505,7 +558,10 @@ fn split_path(path: &str, width: usize) -> (String, String) {
         return (dir.to_string(), name);
     }
 
-    let tail: String = dir.chars().skip(dir.chars().count() + 1 - dir_width).collect();
+    let tail: String = dir
+        .chars()
+        .skip(dir.chars().count() + 1 - dir_width)
+        .collect();
     (format!("…{tail}"), name)
 }
 

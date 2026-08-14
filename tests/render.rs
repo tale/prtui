@@ -3,6 +3,7 @@ use prtui::app::action::Action;
 use prtui::app::input::InputRouter;
 use prtui::app::{App, Pane};
 use prtui::model::{parse_files, parse_meta, LineKind};
+use prtui::renderer::ThemeMode;
 use prtui::ui;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -141,13 +142,71 @@ fn word_diff_marks_only_changed_tokens() {
 
     let styled = highlight_file("x.rs", &lines);
 
-    let marked = |row: &Vec<prtui::highlight::Segment>| -> Vec<String> {
-        row.iter().filter(|s| s.is_emphasis).map(|s| s.text.clone()).collect()
+    let marked = |row: &Vec<prtui::highlight::Segment>, source: &str| -> Vec<String> {
+        row.iter()
+            .filter(|segment| segment.is_emphasis)
+            .map(|segment| source[segment.range.clone()].to_string())
+            .collect()
     };
 
     // Whitespace-only tokenization used to flag `compute(alpha,` wholesale.
-    assert_eq!(marked(&styled[0]), vec!["alpha", "10"]);
-    assert_eq!(marked(&styled[1]), vec!["beta", "20"]);
+    assert_eq!(marked(&styled[0], &lines[0].text), vec!["alpha", "10"]);
+    assert_eq!(marked(&styled[1], &lines[1].text), vec!["beta", "20"]);
+}
+
+#[test]
+fn light_mode_uses_light_diff_and_syntax_palettes() {
+    use prtui::renderer::{Renderer, Theme, ThemeMode};
+
+    let mut app = App::with_renderer(Renderer::new(ThemeMode::Light));
+    let files: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
+    app.files = parse_files(&files).unwrap();
+    app.is_files_visible = false;
+    app.ensure_highlighted();
+
+    let added = app
+        .current_file()
+        .unwrap()
+        .lines
+        .iter()
+        .position(|line| line.kind == LineKind::Added)
+        .unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &mut app, "")).unwrap();
+
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((0, (added + 1) as u16))
+            .unwrap()
+            .style()
+            .bg,
+        Some(Theme::light().add),
+    );
+
+    let colors = app.highlighted().unwrap()[added]
+        .iter()
+        .map(|segment| segment.color)
+        .collect::<Vec<_>>();
+    assert!(
+        colors
+            .iter()
+            .all(|&(r, g, b)| u16::from(r) + u16::from(g) + u16::from(b) < 600),
+        "light-mode syntax must use dark foregrounds: {colors:?}",
+    );
+}
+
+#[test]
+fn switching_terminal_appearance_invalidates_old_syntax_colors() {
+    let mut app = load();
+    app.ensure_highlighted();
+    assert!(app.highlighted().is_some());
+
+    assert!(app.set_theme_mode(ThemeMode::Light));
+    assert!(app.highlighted().is_none());
+    assert!(!app.set_theme_mode(ThemeMode::Light));
 }
 
 #[test]

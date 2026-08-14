@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
-crossterm = { version = "0.29.0", features = ["bracketed-paste", "event-stream"] }
+crossterm = { version = "0.29.0", features = ["bracketed-paste"] }
 edtui = "0.11.6"
 futures-core = { version = "0.3.31", default-features = false }
 ratatui = "0.30.2"
@@ -15,8 +15,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 similar = "3.1.2"
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+terminal-colorsaurus = "1.0.3"
+termina = { version = "0.1.1", features = ["event-stream"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process", "sync"] }
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 edtui = "0.11.6"

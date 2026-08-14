@@ -4,8 +4,8 @@ pub mod input;
 pub mod keymap;
 pub mod mode;
 
-use crate::highlight::{self, Segment};
 use crate::model::{ChangedFile, PullRequest, ReviewThread};
+use crate::renderer::{Renderer, Segment, Theme, ThemeMode};
 use action::{Action, Motion};
 use draft::{Anchor, Draft};
 use edtui::{EditorMode, EditorState, Lines};
@@ -44,6 +44,7 @@ pub struct App {
     pub load_ms: Option<u128>,
     pub should_quit: bool,
 
+    renderer: Renderer,
     highlights: HashMap<usize, Vec<Vec<Segment>>>,
 }
 
@@ -55,6 +56,10 @@ impl Default for App {
 
 impl App {
     pub fn new() -> Self {
+        Self::with_renderer(Renderer::default())
+    }
+
+    pub fn with_renderer(renderer: Renderer) -> Self {
         Self {
             pr: None,
             files: Vec::new(),
@@ -71,8 +76,25 @@ impl App {
             status: "loading…".into(),
             load_ms: None,
             should_quit: false,
+            renderer,
             highlights: HashMap::new(),
         }
+    }
+
+    pub const fn theme(&self) -> Theme {
+        self.renderer.theme()
+    }
+
+    /// Swap the complete renderer palette and discard syntax colors produced
+    /// under the previous terminal appearance.
+    pub fn set_theme_mode(&mut self, mode: ThemeMode) -> bool {
+        if self.renderer.theme().mode == mode {
+            return false;
+        }
+
+        self.renderer = Renderer::new(mode);
+        self.highlights.clear();
+        true
     }
 
     pub fn set_meta(&mut self, pr: PullRequest) {
@@ -107,15 +129,19 @@ impl App {
 
         let Some(file) = self.files.get(index) else { return };
 
-        let styled = highlight::highlight_file(&file.path, &file.lines);
+        let styled = self.renderer.highlight_file(&file.path, &file.lines);
         self.highlights.insert(index, styled);
+    }
+
+    pub fn set_highlight(&mut self, index: usize, styled: Vec<Vec<Segment>>) {
+        self.highlights.entry(index).or_insert(styled);
     }
 
     /// Bulk result from the background pass; never clobbers a file that was
     /// already highlighted on demand.
     pub fn set_highlights(&mut self, all: Vec<Vec<Vec<Segment>>>) {
         for (index, styled) in all.into_iter().enumerate() {
-            self.highlights.entry(index).or_insert(styled);
+            self.set_highlight(index, styled);
         }
     }
 
