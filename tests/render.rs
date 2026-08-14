@@ -1,7 +1,7 @@
 use prtui::app::action::Action;
 use prtui::app::input::InputRouter;
 use prtui::app::{App, Pane};
-use prtui::model::{LineKind, parse_files, parse_meta};
+use prtui::model::{LineKind, Side, parse_files, parse_meta};
 use prtui::renderer::ThemeMode;
 use prtui::ui;
 use ratatui::Terminal;
@@ -26,6 +26,240 @@ fn parses_files_and_threads() {
     assert_eq!(app.files.len(), 4);
     assert_eq!(app.pr.as_ref().unwrap().number, 9000);
     assert_eq!(app.pr.as_ref().unwrap().threads.len(), 2);
+
+    let thread = &app.pr.as_ref().unwrap().threads[0];
+    assert_eq!(thread.id, "PRRT_kwDODKw3uc48Rk4m");
+    assert_eq!(thread.side, Side::Right);
+    assert_eq!(thread.line, Some(130));
+    assert_eq!(thread.original_line, Some(130));
+    assert_eq!(thread.comments[0].created_at, "2024-04-29T14:06:54Z");
+}
+
+fn show_thread(app: &mut App, thread: &prtui::model::ReviewThread) {
+    app.selected_file = app
+        .files
+        .iter()
+        .position(|file| file.path == thread.path)
+        .unwrap();
+    app.cursor = app.files[app.selected_file]
+        .lines
+        .iter()
+        .position(|line| thread.anchors_to(line))
+        .unwrap();
+    app.diff_scroll = app.cursor.saturating_sub(3);
+    app.pane = Pane::Diff;
+    app.is_files_visible = false;
+}
+
+#[test]
+fn renders_unresolved_thread_summary_inline() {
+    let mut app = load();
+    let mut thread = app
+        .pr
+        .as_ref()
+        .unwrap()
+        .threads
+        .iter()
+        .find(|thread| !thread.is_resolved)
+        .unwrap()
+        .clone();
+    let mut reply = thread.comments[0].clone();
+    reply.id = "reply".into();
+    reply.author = "andyfeller".into();
+    reply.body = "A reply inside the same review thread.".into();
+    reply.created_at = "2024-04-29T15:01:00Z".into();
+    thread.comments.push(reply);
+    app.threads_by_path
+        .insert(thread.path.clone(), vec![thread.clone()]);
+    show_thread(&mut app, &thread);
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    assert!(rendered.contains("Lol not suspicious of coupling at all."));
+    assert!(rendered.contains("@williammartin"));
+    assert!(rendered.contains("1 reply · open"));
+}
+
+#[test]
+fn focused_thread_expands_into_its_full_conversation() {
+    let mut app = load();
+    let mut thread = app
+        .pr
+        .as_ref()
+        .unwrap()
+        .threads
+        .iter()
+        .find(|thread| !thread.is_resolved)
+        .unwrap()
+        .clone();
+    let mut reply = thread.comments[0].clone();
+    reply.id = "reply".into();
+    reply.author = "andyfeller".into();
+    reply.body = "This is the full reply body.".into();
+    thread.comments.push(reply);
+    app.threads_by_path
+        .insert(thread.path.clone(), vec![thread.clone()]);
+    show_thread(&mut app, &thread);
+    app.focused_thread = Some(thread.id.clone());
+    app.expanded_thread = Some(thread.id.clone());
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+    let focused_row = rendered
+        .lines()
+        .find(|line| line.contains("2 comments"))
+        .expect("expanded thread summary should be visible");
+
+    assert!(focused_row.contains('▍'));
+    assert!(focused_row.contains("◆ ▾ 2 comments · open"));
+    assert!(rendered.contains("Lol not suspicious of coupling at all."));
+    assert!(rendered.contains("This is the full reply body."));
+    assert!(rendered.contains("collapse"));
+}
+
+#[test]
+fn multiple_threads_on_one_line_render_as_one_group() {
+    let mut app = load();
+    let base = app
+        .pr
+        .as_ref()
+        .unwrap()
+        .threads
+        .iter()
+        .find(|thread| !thread.is_resolved)
+        .unwrap()
+        .clone();
+    let mut threads = Vec::new();
+    for index in 1..=4 {
+        let mut thread = base.clone();
+        thread.id = format!("thread-{index}");
+        thread.comments[0].body = format!("Discussion number {index}");
+        threads.push(thread);
+    }
+    app.threads_by_path
+        .insert(base.path.clone(), threads.clone());
+    show_thread(&mut app, &threads[0]);
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    assert!(rendered.contains("◆ 4 open threads"));
+    assert!(rendered.contains("@williammartin  Discussion number 1"));
+    assert!(rendered.contains("@williammartin  Discussion number 4"));
+}
+
+#[test]
+fn resolved_threads_render_as_compact_rows() {
+    let mut app = load();
+    let thread = app
+        .pr
+        .as_ref()
+        .unwrap()
+        .threads
+        .iter()
+        .find(|thread| thread.is_resolved)
+        .unwrap()
+        .clone();
+    show_thread(&mut app, &thread);
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    assert!(rendered.contains("◇ @williammartin"));
+    assert!(rendered.contains("Could I interest you in the following tests:"));
+    assert!(rendered.contains("· resolved"));
+}
+
+#[test]
+fn left_side_threads_anchor_to_removed_lines() {
+    let mut app = load();
+    let (file_index, line_index, old_line) = app
+        .files
+        .iter()
+        .enumerate()
+        .find_map(|(file_index, file)| {
+            file.lines
+                .iter()
+                .enumerate()
+                .find_map(|(line_index, line)| {
+                    (line.kind == LineKind::Removed)
+                        .then(|| (file_index, line_index, line.old_line.unwrap()))
+                })
+        })
+        .unwrap();
+    let path = app.files[file_index].path.clone();
+    let mut thread = app.pr.as_ref().unwrap().threads[1].clone();
+    thread.path = path.clone();
+    thread.line = Some(old_line);
+    thread.original_line = Some(old_line);
+    thread.side = Side::Left;
+    thread.comments[0].body = "This belongs to the removed side.".into();
+    app.threads_by_path.clear();
+    app.threads_by_path.insert(path, vec![thread]);
+    app.selected_file = file_index;
+    app.cursor = line_index;
+    app.diff_scroll = line_index.saturating_sub(2);
+    app.pane = Pane::Diff;
+    app.is_files_visible = false;
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+
+    assert!(
+        terminal
+            .backend()
+            .to_string()
+            .contains("This belongs to the removed side.")
+    );
+}
+
+#[test]
+fn outdated_threads_render_compactly_after_the_diff() {
+    let mut app = load();
+    let file_index = app
+        .files
+        .iter()
+        .position(|file| !file.lines.is_empty())
+        .unwrap();
+    let path = app.files[file_index].path.clone();
+    let mut thread = app.pr.as_ref().unwrap().threads[1].clone();
+    thread.path = path.clone();
+    thread.line = None;
+    thread.original_line = Some(999_999);
+    thread.is_outdated = true;
+    thread.comments[0].body = "Discussion from an earlier diff.".into();
+    app.threads_by_path.clear();
+    app.threads_by_path.insert(path, vec![thread]);
+    app.selected_file = file_index;
+    app.cursor = app.files[file_index].lines.len() - 1;
+    app.diff_scroll = app.cursor.saturating_sub(3);
+    app.pane = Pane::Diff;
+    app.is_files_visible = false;
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    assert!(rendered.contains("◇ @williammartin"));
+    assert!(rendered.contains("Discussion from an earlier diff."));
+    assert!(rendered.contains("· outdated"));
 }
 
 #[test]
@@ -83,6 +317,27 @@ fn renders_header_and_diff() {
             .any(|f| rendered.contains(f.path.split('/').next_back().unwrap())),
         "file list should show at least one changed file"
     );
+}
+
+#[test]
+fn multi_digit_thread_badge_keeps_diff_counts_visible() {
+    let mut app = load();
+    let path = app.files[0].path.clone();
+    let thread = app.pr.as_ref().unwrap().threads[1].clone();
+    app.threads_by_path.insert(path, vec![thread; 10]);
+
+    let mut terminal = Terminal::new(TestBackend::new(52, 12)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    let file_row = rendered
+        .lines()
+        .find(|line| line.contains("◆ 10"))
+        .expect("the complete thread count should be visible");
+    assert!(file_row.contains("+1"));
+    assert!(file_row.contains("-0"));
 }
 
 #[test]

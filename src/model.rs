@@ -9,6 +9,31 @@ pub enum LineKind {
     Hunk,
 }
 
+/// Which side of the diff a review thread is anchored to, matching GitHub's
+/// `PullRequestReviewThreadDiffSide` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+impl Side {
+    pub fn from_api(value: &str) -> Option<Self> {
+        match value {
+            "LEFT" => Some(Self::Left),
+            "RIGHT" => Some(Self::Right),
+            _ => None,
+        }
+    }
+
+    pub const fn as_api(self) -> &'static str {
+        match self {
+            Self::Left => "LEFT",
+            Self::Right => "RIGHT",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DiffLine {
     pub kind: LineKind,
@@ -37,17 +62,40 @@ struct RawFile {
 
 #[derive(Debug, Clone)]
 pub struct Comment {
+    pub id: String,
     pub author: String,
     pub body: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct ReviewThread {
+    pub id: String,
     pub path: String,
     pub line: Option<u32>,
+    pub original_line: Option<u32>,
+    pub side: Side,
     pub is_resolved: bool,
     pub is_outdated: bool,
     pub comments: Vec<Comment>,
+}
+
+impl ReviewThread {
+    /// Current threads use `line`; GitHub clears it when a thread becomes
+    /// outdated, leaving `originalLine` as the only usable display anchor.
+    pub fn anchor_line(&self) -> Option<u32> {
+        self.line.or(self.original_line)
+    }
+
+    pub fn anchors_to(&self, line: &DiffLine) -> bool {
+        let Some(anchor) = self.anchor_line() else {
+            return false;
+        };
+        match self.side {
+            Side::Left => line.old_line == Some(anchor),
+            Side::Right => line.new_line == Some(anchor),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,9 +116,7 @@ fn parse_hunk_header(header: &str) -> Option<(u32, u32)> {
     let inner = header.strip_prefix("@@ ")?.split(" @@").next()?;
     let (old, new) = inner.split_once(' ')?;
 
-    let start = |s: &str| -> Option<u32> {
-        s.get(1..)?.split(',').next()?.parse().ok()
-    };
+    let start = |s: &str| -> Option<u32> { s.get(1..)?.split(',').next()?.parse().ok() };
 
     Some((start(old)?, start(new)?))
 }
@@ -82,7 +128,9 @@ fn parse_patch(patch: &str) -> Vec<DiffLine> {
 
     for raw in patch.lines() {
         if raw.starts_with("@@") {
-            let Some((old, new)) = parse_hunk_header(raw) else { continue };
+            let Some((old, new)) = parse_hunk_header(raw) else {
+                continue;
+            };
 
             old_line = old;
             new_line = new;
@@ -115,7 +163,12 @@ fn parse_patch(patch: &str) -> Vec<DiffLine> {
             new_line += 1;
         }
 
-        lines.push(DiffLine { kind, text: text.to_string(), old_line: old, new_line: new });
+        lines.push(DiffLine {
+            kind,
+            text: text.to_string(),
+            old_line: old,
+            new_line: new,
+        });
     }
 
     lines
@@ -123,7 +176,9 @@ fn parse_patch(patch: &str) -> Vec<DiffLine> {
 
 /// `gh api --paginate --slurp` returns an array of pages, each an array of files.
 pub fn parse_files(val: &serde_json::Value) -> Result<Vec<ChangedFile>> {
-    let pages = val.as_array().context("expected array of pages from /files")?;
+    let pages = val
+        .as_array()
+        .context("expected array of pages from /files")?;
 
     let mut files = Vec::new();
     for page in pages {
@@ -147,7 +202,10 @@ pub fn parse_files(val: &serde_json::Value) -> Result<Vec<ChangedFile>> {
 }
 
 fn text_at(val: &serde_json::Value, ptr: &str) -> String {
-    val.pointer(ptr).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+    val.pointer(ptr)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 pub fn parse_meta(val: &serde_json::Value) -> Result<PullRequest> {
@@ -162,22 +220,36 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<PullRequest> {
             nodes
                 .iter()
                 .map(|t| ReviewThread {
+                    id: text_at(t, "/id"),
                     path: text_at(t, "/path"),
-                    line: t
-                        .get("line")
+                    line: t.get("line").and_then(|v| v.as_u64()).map(|v| v as u32),
+                    original_line: t
+                        .get("originalLine")
                         .and_then(|v| v.as_u64())
-                        .or_else(|| t.get("originalLine").and_then(|v| v.as_u64()))
                         .map(|v| v as u32),
-                    is_resolved: t.get("isResolved").and_then(|v| v.as_bool()).unwrap_or(false),
-                    is_outdated: t.get("isOutdated").and_then(|v| v.as_bool()).unwrap_or(false),
+                    side: t
+                        .get("diffSide")
+                        .and_then(|v| v.as_str())
+                        .and_then(Side::from_api)
+                        .unwrap_or(Side::Right),
+                    is_resolved: t
+                        .get("isResolved")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    is_outdated: t
+                        .get("isOutdated")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                     comments: t
                         .pointer("/comments/nodes")
                         .and_then(|v| v.as_array())
                         .map(|cs| {
                             cs.iter()
                                 .map(|c| Comment {
+                                    id: text_at(c, "/id"),
                                     author: text_at(c, "/author/login"),
                                     body: text_at(c, "/body"),
+                                    created_at: text_at(c, "/createdAt"),
                                 })
                                 .collect()
                         })

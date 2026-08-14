@@ -43,6 +43,8 @@ pub struct App {
     pub file_filter: Option<CommentEditor>,
     pub selected_file: usize,
     pub cursor: usize,
+    pub focused_thread: Option<String>,
+    pub expanded_thread: Option<String>,
     pub diff_scroll: usize,
     pub pane: Pane,
     pub is_files_visible: bool,
@@ -80,6 +82,8 @@ impl App {
             file_filter: None,
             selected_file: 0,
             cursor: 0,
+            focused_thread: None,
+            expanded_thread: None,
             diff_scroll: 0,
             pane: Pane::Files,
             is_files_visible: true,
@@ -182,6 +186,8 @@ impl App {
                     self.pane = Pane::Diff;
                 }
             }
+            Action::Activate => self.activate(),
+            Action::LeaveThread => self.set_focused_thread(None),
             Action::FocusFiles => self.focus_files(),
             Action::FocusDiff => self.focus_diff(),
             Action::StartFileFilter => self.start_file_filter(),
@@ -194,6 +200,7 @@ impl App {
 
             Action::EnterVisual => {
                 if self.pane == Pane::Diff {
+                    self.set_focused_thread(None);
                     self.mode = Mode::Visual;
                     self.selection = Some(Selection::at(self.cursor));
                 }
@@ -215,6 +222,11 @@ impl App {
 
     fn start_comment(&mut self) {
         if self.pane != Pane::Diff {
+            return;
+        }
+
+        if self.focused_thread.is_some() {
+            self.status = "thread replies are not available yet".into();
             return;
         }
 
@@ -356,6 +368,22 @@ impl App {
         }
     }
 
+    fn activate(&mut self) {
+        if self.pane == Pane::Files {
+            self.focus_diff();
+            return;
+        }
+
+        let Some(id) = self.focused_thread.clone() else {
+            return;
+        };
+        self.expanded_thread = (self.expanded_thread.as_deref() != Some(&id)).then_some(id);
+    }
+
+    pub fn is_thread_expanded(&self, id: &str) -> bool {
+        self.expanded_thread.as_deref() == Some(id)
+    }
+
     fn focus_files(&mut self) {
         if self.mode != Mode::Normal {
             return;
@@ -402,6 +430,7 @@ impl App {
 
         self.selected_file = index.min(self.files.len() - 1);
         self.cursor = 0;
+        self.set_focused_thread(None);
         self.diff_scroll = 0;
         self.selection = None;
         if leave_transient_mode {
@@ -446,20 +475,139 @@ impl App {
         }
 
         let last = self.diff_len().saturating_sub(1);
-        self.cursor = match motion {
-            Motion::Down(n) => self.cursor.saturating_add(n).min(last),
-            Motion::Up(n) => self.cursor.saturating_sub(n),
-            Motion::HalfPageDown => self.cursor.saturating_add(viewport_height / 2).min(last),
-            Motion::HalfPageUp => self.cursor.saturating_sub(viewport_height / 2),
-            Motion::Top => 0,
-            Motion::Bottom => last,
-        };
+        if self.mode == Mode::Visual {
+            self.cursor = match motion {
+                Motion::Down(n) => self.cursor.saturating_add(n).min(last),
+                Motion::Up(n) => self.cursor.saturating_sub(n),
+                Motion::HalfPageDown => self.cursor.saturating_add(viewport_height / 2).min(last),
+                Motion::HalfPageUp => self.cursor.saturating_sub(viewport_height / 2),
+                Motion::Top => 0,
+                Motion::Bottom => last,
+            };
+        } else {
+            match motion {
+                Motion::Down(n) => self.move_diff_stops(1, n),
+                Motion::Up(n) => self.move_diff_stops(-1, n),
+                Motion::HalfPageDown => self.move_diff_stops(1, viewport_height / 2),
+                Motion::HalfPageUp => self.move_diff_stops(-1, viewport_height / 2),
+                Motion::Top => {
+                    self.cursor = 0;
+                    self.set_focused_thread(None);
+                }
+                Motion::Bottom => {
+                    self.cursor = last;
+                    self.set_focused_thread(None);
+                }
+            }
+        }
 
         if let Some(selection) = &mut self.selection {
             selection.head = self.cursor;
         }
 
         self.follow_cursor(viewport_height);
+    }
+
+    fn move_diff_stops(&mut self, direction: isize, count: usize) {
+        let max_steps = self.diff_len().saturating_add(
+            self.current_file()
+                .and_then(|file| self.threads_by_path.get(&file.path))
+                .map_or(0, Vec::len),
+        );
+
+        for _ in 0..count.min(max_steps) {
+            if !self.move_diff_stop(direction) {
+                break;
+            }
+        }
+    }
+
+    fn move_diff_stop(&mut self, direction: isize) -> bool {
+        let ids = self.thread_ids_at_row(self.cursor);
+
+        if direction > 0 {
+            if let Some(focused) = self.focused_thread.as_deref() {
+                if let Some(position) = ids.iter().position(|id| id == focused)
+                    && let Some(next) = ids.get(position + 1)
+                {
+                    self.set_focused_thread(Some(next.clone()));
+                    return true;
+                }
+                if self.cursor + 1 < self.diff_len() {
+                    self.cursor += 1;
+                    self.set_focused_thread(None);
+                    return true;
+                }
+                return false;
+            }
+
+            if let Some(first) = ids.first() {
+                self.set_focused_thread(Some(first.clone()));
+                return true;
+            }
+            if self.cursor + 1 < self.diff_len() {
+                self.cursor += 1;
+                return true;
+            }
+            return false;
+        }
+
+        if let Some(focused) = self.focused_thread.as_deref() {
+            if let Some(position) = ids.iter().position(|id| id == focused) {
+                if position > 0 {
+                    self.set_focused_thread(Some(ids[position - 1].clone()));
+                } else {
+                    self.set_focused_thread(None);
+                }
+                return true;
+            }
+            self.set_focused_thread(None);
+            return true;
+        }
+
+        if self.cursor == 0 {
+            return false;
+        }
+        self.cursor -= 1;
+        let previous = self.thread_ids_at_row(self.cursor);
+        self.set_focused_thread(previous.last().cloned());
+        true
+    }
+
+    fn set_focused_thread(&mut self, focused: Option<String>) {
+        if self.focused_thread != focused {
+            self.expanded_thread = None;
+        }
+        self.focused_thread = focused;
+    }
+
+    fn thread_ids_at_row(&self, row: usize) -> Vec<String> {
+        let Some(file) = self.current_file() else {
+            return Vec::new();
+        };
+        let Some(line) = file.lines.get(row) else {
+            return Vec::new();
+        };
+        let is_last = row + 1 == file.lines.len();
+        let mut threads: Vec<&ReviewThread> = self
+            .threads_by_path
+            .get(&file.path)
+            .into_iter()
+            .flatten()
+            .filter(|thread| {
+                (thread.is_outdated && is_last) || (!thread.is_outdated && thread.anchors_to(line))
+            })
+            .collect();
+        threads.sort_by_key(|thread| {
+            if thread.is_outdated {
+                2
+            } else if thread.is_resolved {
+                1
+            } else {
+                0
+            }
+        });
+        threads.iter().map(|thread| thread.id.clone()).collect()
     }
 
     /// Keeps the cursor inside the viewport with a small scroll-off margin.

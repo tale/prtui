@@ -37,6 +37,29 @@ fn park_on_code(app: &mut App) {
         .unwrap();
 }
 
+fn park_on_unresolved_thread(app: &mut App) -> prtui::model::ReviewThread {
+    let thread = app
+        .pr
+        .as_ref()
+        .unwrap()
+        .threads
+        .iter()
+        .find(|thread| !thread.is_resolved)
+        .unwrap()
+        .clone();
+    app.selected_file = app
+        .files
+        .iter()
+        .position(|file| file.path == thread.path)
+        .unwrap();
+    app.cursor = app.files[app.selected_file]
+        .lines
+        .iter()
+        .position(|line| thread.anchors_to(line))
+        .unwrap();
+    thread
+}
+
 fn press(app: &mut App, keys: &str) {
     let mut input = InputRouter::default();
     for c in keys.chars() {
@@ -138,6 +161,92 @@ fn visual_selection_grows_from_its_anchor() {
     let selection = app.selection.unwrap();
     assert_eq!(*selection.range().start(), 1);
     assert_eq!(*selection.range().end(), 3);
+}
+
+#[test]
+fn normal_movement_visits_threads_between_source_lines() {
+    let mut app = load();
+    let first = park_on_unresolved_thread(&mut app);
+    let mut second = first.clone();
+    second.id = "second-thread".into();
+    app.threads_by_path
+        .insert(first.path.clone(), vec![first.clone(), second.clone()]);
+    let anchor = app.cursor;
+
+    press(&mut app, "j");
+    assert_eq!(app.cursor, anchor);
+    assert_eq!(app.focused_thread.as_deref(), Some(first.id.as_str()));
+
+    press(&mut app, "j");
+    assert_eq!(app.cursor, anchor);
+    assert_eq!(app.focused_thread.as_deref(), Some(second.id.as_str()));
+
+    press(&mut app, "j");
+    assert_eq!(app.cursor, anchor + 1);
+    assert!(app.focused_thread.is_none());
+
+    press(&mut app, "k");
+    assert_eq!(app.cursor, anchor);
+    assert_eq!(app.focused_thread.as_deref(), Some(second.id.as_str()));
+}
+
+#[test]
+fn enter_toggles_the_focused_thread() {
+    let mut app = load();
+    let thread = park_on_unresolved_thread(&mut app);
+    press(&mut app, "j");
+    assert_eq!(app.focused_thread.as_deref(), Some(thread.id.as_str()));
+
+    let mut input = InputRouter::default();
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    assert_eq!(app.expanded_thread.as_deref(), Some(thread.id.as_str()));
+
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    assert!(app.expanded_thread.is_none());
+}
+
+#[test]
+fn moving_off_an_expanded_thread_collapses_it() {
+    let mut app = load();
+    park_on_unresolved_thread(&mut app);
+    press(&mut app, "j");
+
+    let mut input = InputRouter::default();
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    assert!(app.expanded_thread.is_some());
+
+    press(&mut app, "j");
+    assert!(app.focused_thread.is_none());
+    assert!(app.expanded_thread.is_none());
+}
+
+#[test]
+fn escape_returns_from_a_thread_to_its_source_line() {
+    let mut app = load();
+    park_on_unresolved_thread(&mut app);
+    press(&mut app, "j");
+    let source_row = app.cursor;
+
+    let mut input = InputRouter::default();
+    assert_eq!(
+        input.dispatch_key(&mut app, KeyCode::Escape.into(), 20),
+        DispatchResult::Applied(Action::LeaveThread)
+    );
+    assert_eq!(app.cursor, source_row);
+    assert!(app.focused_thread.is_none());
+    assert!(!app.should_quit);
+}
+
+#[test]
+fn visual_movement_remains_source_line_only() {
+    let mut app = load();
+    park_on_unresolved_thread(&mut app);
+    let anchor = app.cursor;
+
+    press(&mut app, "Vj");
+
+    assert_eq!(app.cursor, anchor + 1);
+    assert!(app.focused_thread.is_none());
 }
 
 #[test]

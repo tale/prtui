@@ -2,7 +2,7 @@ use super::App;
 use super::action::Action;
 use super::keymap::{Keymap, Resolution};
 use super::mode::Mode;
-use termina::event::KeyEvent;
+use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 /// What the input router did with an incoming terminal event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,18 @@ impl InputRouter {
         let mode = app.mode;
         let filter_active = app.file_filter.is_some();
         self.sync_mode(mode);
+
+        let leaves_thread = mode == Mode::Normal
+            && app.focused_thread.is_some()
+            && matches!(
+                (key.code, key.modifiers),
+                (KeyCode::Escape, Modifiers::NONE) | (KeyCode::Char('['), Modifiers::CONTROL)
+            );
+        if leaves_thread {
+            let action = Action::LeaveThread;
+            app.apply(action.clone(), viewport_height);
+            return DispatchResult::Applied(action);
+        }
 
         match self.keymap.resolve(mode, filter_active, key) {
             Resolution::Action(action) => {

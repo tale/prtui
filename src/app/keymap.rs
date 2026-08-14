@@ -140,9 +140,8 @@ impl Keymap {
         match key.code {
             KeyCode::Tab => Resolution::Action(Action::TogglePane),
             KeyCode::Escape => Self::resolve_escape(mode, filter_active),
-            KeyCode::Enter | KeyCode::Right if mode == Mode::Normal => {
-                Resolution::Action(Action::FocusDiff)
-            }
+            KeyCode::Enter if mode == Mode::Normal => Resolution::Action(Action::Activate),
+            KeyCode::Right if mode == Mode::Normal => Resolution::Action(Action::FocusDiff),
             KeyCode::Left if mode == Mode::Normal => Resolution::Action(Action::FocusFiles),
             KeyCode::Down => Resolution::Action(Action::Move(Motion::Down(1))),
             KeyCode::Up => Resolution::Action(Action::Move(Motion::Up(1))),

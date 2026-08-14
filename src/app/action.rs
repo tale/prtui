@@ -19,6 +19,8 @@ pub enum Action {
     PrevFile,
     TogglePane,
     ToggleTree,
+    Activate,
+    LeaveThread,
     FocusFiles,
     FocusDiff,
     StartFileFilter,

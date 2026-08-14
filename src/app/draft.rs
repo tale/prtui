@@ -1,21 +1,7 @@
 use crate::model::{ChangedFile, LineKind};
 use std::ops::RangeInclusive;
 
-/// Which side of the diff a comment anchors to, matching GitHub's `diffSide`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Side {
-    Left,
-    Right,
-}
-
-impl Side {
-    pub fn as_api(self) -> &'static str {
-        match self {
-            Side::Left => "LEFT",
-            Side::Right => "RIGHT",
-        }
-    }
-}
+pub use crate::model::Side;
 
 /// A review comment written but not yet submitted. Held locally so a whole
 /// review can be composed offline and sent in one request.

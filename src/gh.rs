@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
 const THREADS_QUERY: &str = r#"
@@ -11,7 +11,7 @@ query($owner:String!, $repo:String!, $number:Int!) {
       reviewThreads(first:100) {
         nodes {
           id isResolved isOutdated path line originalLine diffSide
-          comments(first:50) { nodes { author { login } body createdAt } }
+          comments(first:50) { nodes { id author { login } body createdAt } }
         }
       }
       reviews(first:50) { nodes { author { login } state submittedAt } }
@@ -38,7 +38,11 @@ impl Repo {
             _ => bail!("expected [HOST/]OWNER/REPO, got {slug}"),
         };
 
-        Ok(Self { host, owner: owner.to_string(), name: name.to_string() })
+        Ok(Self {
+            host,
+            owner: owner.to_string(),
+            name: name.to_string(),
+        })
     }
 
     fn host_args(&self) -> Vec<String> {
@@ -72,7 +76,12 @@ pub async fn fetch_files(repo: &Repo, number: u32) -> Result<serde_json::Value> 
         repo.owner, repo.name
     );
 
-    let mut args = vec!["api".to_string(), path, "--paginate".into(), "--slurp".into()];
+    let mut args = vec![
+        "api".to_string(),
+        path,
+        "--paginate".into(),
+        "--slurp".into(),
+    ];
     args.extend(repo.host_args());
 
     let raw = run(&args).await?;
