@@ -96,6 +96,44 @@ fn pending_input_is_visible_in_the_status_line() {
     assert!(terminal.backend().to_string().contains("123456"));
 }
 
+#[test]
+fn file_filter_renders_its_query_and_only_the_matching_path() {
+    let mut app = load();
+    press(&mut app, "/auth_check_test");
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    assert!(rendered.contains("FILTER"));
+    assert!(rendered.contains("1/1 matches"));
+    assert!(rendered.contains("/auth_check_test"));
+    // The sidebar deliberately elides the left edge of long basenames.
+    assert!(rendered.contains("heck_test.go"));
+    assert!(!rendered.contains("verify_test.go"));
+}
+
+#[test]
+fn committed_filter_stays_visible_in_normal_tree_mode() {
+    let mut app = load();
+    press(&mut app, "/auth_check");
+    let mut input = InputRouter::default();
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    assert!(rendered.contains("NORMAL"));
+    assert!(rendered.contains("1/2 matches"));
+    assert!(rendered.contains("/auth_check"));
+    assert!(rendered.contains("edit filter"));
+}
+
 /// Drives the app the way the event loop does: raw keys through the keymap.
 fn press(app: &mut App, keys: &str) {
     let mut input = InputRouter::default();
@@ -144,8 +182,8 @@ fn renders_large_diff_in_constant_time() {
 
 #[test]
 fn word_diff_marks_only_changed_tokens() {
-    use prtui::highlight::highlight_file;
     use prtui::model::DiffLine;
+    use prtui::renderer::Renderer;
 
     let line = |kind, text: &str| DiffLine {
         kind,
@@ -159,9 +197,9 @@ fn word_diff_marks_only_changed_tokens() {
         line(LineKind::Added, "let total = compute(beta, 20);"),
     ];
 
-    let styled = highlight_file("x.rs", &lines);
+    let styled = Renderer::default().highlight_file("x.rs", &lines);
 
-    let marked = |row: &Vec<prtui::highlight::Segment>, source: &str| -> Vec<String> {
+    let marked = |row: &Vec<prtui::renderer::Segment>, source: &str| -> Vec<String> {
         row.iter()
             .filter(|segment| segment.is_emphasis)
             .map(|segment| source[segment.range.clone()].to_string())
@@ -240,12 +278,14 @@ fn hiding_the_tree_forces_focus_to_the_diff() {
     assert!(!app.is_files_visible);
     assert_eq!(app.pane, Pane::Diff);
 
-    // Tab must not hand focus back to a pane that is not on screen.
+    // Tab is also the recovery path: it reopens and focuses the tree.
     app.apply(Action::TogglePane, 20);
-    assert_eq!(app.pane, Pane::Diff);
+    assert!(app.is_files_visible);
+    assert_eq!(app.pane, Pane::Files);
 
     press(&mut app, "f");
-    assert!(app.is_files_visible);
+    assert!(!app.is_files_visible);
+    assert_eq!(app.pane, Pane::Diff);
 }
 
 #[test]

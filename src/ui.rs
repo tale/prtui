@@ -103,20 +103,57 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let height = inner.height as usize;
-    let width = inner.width as usize;
-    let start = app
-        .selected_file
-        .saturating_sub(height / 2)
-        .min(app.files.len().saturating_sub(height));
+    let list_area = if let Some(filter) = app.file_filter.as_ref() {
+        if inner.height == 0 {
+            return;
+        }
 
-    let rows: Vec<Line> = app
-        .files
+        let query = &filter.lines()[0];
+        let (_, cursor_byte) = filter.cursor();
+        let prompt_width = inner.width.saturating_sub(2) as usize;
+        let cursor_column = terminal_width(&query[..cursor_byte]);
+        let first_column = cursor_column.saturating_sub(prompt_width.saturating_sub(1));
+        let text = clip_window(query, first_column, prompt_width);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" /", Style::default().fg(theme.accent)),
+                Span::styled(text, Style::default().fg(theme.heading)),
+            ])),
+            Rect { height: 1, ..inner },
+        );
+        if app.mode == Mode::Filter {
+            frame.set_cursor_position((
+                inner.x + 2 + cursor_column.saturating_sub(first_column) as u16,
+                inner.y,
+            ));
+        }
+
+        Rect {
+            y: inner.y + 1,
+            height: inner.height - 1,
+            ..inner
+        }
+    } else {
+        inner
+    };
+
+    let height = list_area.height as usize;
+    let width = list_area.width as usize;
+    let matches = app.filtered_file_indices();
+    let selected_position = matches
         .iter()
-        .enumerate()
+        .position(|&index| index == app.selected_file)
+        .unwrap_or(0);
+    let start = selected_position
+        .saturating_sub(height / 2)
+        .min(matches.len().saturating_sub(height));
+
+    let mut rows: Vec<Line> = matches
+        .iter()
         .skip(start)
         .take(height)
-        .map(|(index, file)| {
+        .map(|&index| {
+            let file = &app.files[index];
             let is_selected = index == app.selected_file;
             let unresolved = app
                 .threads_by_path
@@ -165,7 +202,14 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    frame.render_widget(Paragraph::new(rows), inner);
+    if rows.is_empty() && app.file_filter.is_some() {
+        rows.push(Line::styled(
+            "  no matching files",
+            Style::default().fg(theme.dim),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(rows), list_area);
 }
 
 fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
@@ -388,29 +432,52 @@ fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
-    let keys: &[(&str, &str)] = match (app.mode, app.pane) {
-        (Mode::Insert, _) => &[("^s", "save draft"), ("^c", "cancel"), ("↵", "newline")],
-        (Mode::Visual, _) => &[
+    let keys: &[(&str, &str)] = match (app.mode, app.pane, app.file_filter.is_some()) {
+        (Mode::Filter, _, _) => &[
+            ("type", "filter paths"),
+            ("↑/↓ ^n/^p", "select"),
+            ("↵", "apply"),
+            ("esc", "cancel"),
+            ("^c", "quit"),
+        ],
+        (Mode::Insert, _, _) => &[("^s", "save draft"), ("esc", "cancel"), ("↵", "newline")],
+        (Mode::Visual, _, _) => &[
             ("j/k", "extend"),
             ("c", "comment selection"),
             ("v", "exit visual"),
             ("esc", "cancel"),
+            ("^c/q", "quit"),
         ],
-        (Mode::Normal, Pane::Files) => &[
+        (Mode::Normal, Pane::Files, true) => &[
+            ("j/k", "match"),
+            ("gg/G", "top/end"),
+            ("⇥/l/↵", "diff"),
+            ("/", "edit filter"),
+            ("esc", "clear filter"),
+            ("^c/q", "quit"),
+        ],
+        (Mode::Normal, Pane::Files, false) => &[
             ("j/k", "file"),
-            ("⇥", "diff"),
+            ("⇥/l/↵", "diff"),
+            ("/", "filter"),
             ("f", "hide tree"),
             ("gg/G", "top/end"),
-            ("q", "quit"),
+            ("^c/q", "quit"),
         ],
-        (Mode::Normal, Pane::Diff) => &[
+        (Mode::Normal, Pane::Diff, has_filter) => &[
             ("j/k", "line"),
             ("^d/^u", "half page"),
             ("v", "visual"),
             ("c", "comment"),
-            ("[/]", "file"),
-            ("⇥", "tree"),
-            ("q", "quit"),
+            ("[  ]", "prev/next file"),
+            ("/", "filter files"),
+            ("⇥/h", "tree"),
+            if has_filter {
+                ("esc", "clear filter")
+            } else {
+                ("esc", "quit")
+            },
+            ("^c/q", "quit"),
         ],
     };
 
@@ -437,6 +504,7 @@ fn draw_status(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect) {
         Mode::Normal => theme.accent,
         Mode::Visual => theme.orange,
         Mode::Insert => theme.success,
+        Mode::Filter => theme.purple,
     };
 
     let pane = match app.pane {
@@ -444,15 +512,25 @@ fn draw_status(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect) {
         Pane::Diff => " diff ",
     };
 
-    let position = match app.current_file() {
-        Some(file) => format!(
+    let show_match_position = app.mode == Mode::Filter
+        || (app.mode == Mode::Normal && app.pane == Pane::Files && app.file_filter.is_some());
+    let position = match (show_match_position, app.current_file()) {
+        (true, _) => {
+            let matches = app.filtered_file_indices();
+            let selected = matches
+                .iter()
+                .position(|&index| index == app.selected_file)
+                .map_or(0, |position| position + 1);
+            format!("  {selected}/{} matches", matches.len())
+        }
+        (false, Some(file)) => format!(
             "  {}/{}   ln {}/{}",
             app.selected_file + 1,
             app.files.len(),
             (app.cursor + 1).min(file.lines.len().max(1)),
             file.lines.len()
         ),
-        None => String::new(),
+        (false, None) => String::new(),
     };
 
     let mut spans = vec![

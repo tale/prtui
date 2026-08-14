@@ -26,6 +26,11 @@ pub struct Composer {
     pub path: String,
 }
 
+struct FileFilterSnapshot {
+    query: Option<String>,
+    selected_file: usize,
+}
+
 pub struct App {
     pub pr: Option<PullRequest>,
     pub files: Vec<ChangedFile>,
@@ -35,6 +40,7 @@ pub struct App {
     pub mode: Mode,
     pub selection: Option<Selection>,
     pub composer: Option<Composer>,
+    pub file_filter: Option<CommentEditor>,
     pub selected_file: usize,
     pub cursor: usize,
     pub diff_scroll: usize,
@@ -47,6 +53,7 @@ pub struct App {
 
     renderer: Renderer,
     highlights: HashMap<usize, Vec<Vec<Segment>>>,
+    filter_snapshot: Option<FileFilterSnapshot>,
 }
 
 impl Default for App {
@@ -69,6 +76,7 @@ impl App {
             mode: Mode::Normal,
             selection: None,
             composer: None,
+            file_filter: None,
             selected_file: 0,
             cursor: 0,
             diff_scroll: 0,
@@ -79,6 +87,7 @@ impl App {
             should_quit: false,
             renderer,
             highlights: HashMap::new(),
+            filter_snapshot: None,
         }
     }
 
@@ -119,15 +128,6 @@ impl App {
         self.current_file().map(|f| f.lines.len()).unwrap_or(0)
     }
 
-    pub fn drafts_for_current(&self) -> impl Iterator<Item = &Draft> {
-        let path = self
-            .current_file()
-            .map(|f| f.path.clone())
-            .unwrap_or_default();
-
-        self.drafts.iter().filter(move |d| d.path == path)
-    }
-
     pub fn ensure_highlighted(&mut self) {
         let index = self.selected_file;
         if self.highlights.contains_key(&index) {
@@ -142,16 +142,9 @@ impl App {
         self.highlights.insert(index, styled);
     }
 
+    /// Never clobbers a file that was already highlighted on demand.
     pub fn set_highlight(&mut self, index: usize, styled: Vec<Vec<Segment>>) {
         self.highlights.entry(index).or_insert(styled);
-    }
-
-    /// Bulk result from the background pass; never clobbers a file that was
-    /// already highlighted on demand.
-    pub fn set_highlights(&mut self, all: Vec<Vec<Vec<Segment>>>) {
-        for (index, styled) in all.into_iter().enumerate() {
-            self.set_highlight(index, styled);
-        }
     }
 
     pub fn highlighted(&self) -> Option<&[Vec<Segment>]> {
@@ -166,12 +159,20 @@ impl App {
             Action::TogglePane => self.toggle_pane(),
             Action::ToggleTree => {
                 self.is_files_visible = !self.is_files_visible;
-                if !self.is_files_visible {
+                if self.is_files_visible {
+                    self.pane = Pane::Files;
+                } else {
                     self.pane = Pane::Diff;
                 }
             }
-            Action::NextFile => self.select_file(self.selected_file.saturating_add(1)),
-            Action::PrevFile => self.select_file(self.selected_file.saturating_sub(1)),
+            Action::FocusFiles => self.focus_files(),
+            Action::FocusDiff => self.focus_diff(),
+            Action::StartFileFilter => self.start_file_filter(),
+            Action::AcceptFileFilter => self.accept_file_filter(),
+            Action::CancelFileFilter => self.cancel_file_filter(),
+            Action::ClearFileFilter => self.clear_file_filter(),
+            Action::NextFile => self.step_file(1),
+            Action::PrevFile => self.step_file(-1),
             Action::Move(motion) => self.travel(motion, viewport_height),
 
             Action::EnterVisual => {
@@ -221,6 +222,84 @@ impl App {
         self.mode = Mode::Insert;
     }
 
+    fn start_file_filter(&mut self) {
+        self.is_files_visible = true;
+        self.pane = Pane::Files;
+        let query = self.filter_query();
+        self.filter_snapshot = Some(FileFilterSnapshot {
+            query: query.clone(),
+            selected_file: self.selected_file,
+        });
+        match query {
+            Some(query) => self.file_filter.get_or_insert_default().set_text(query),
+            None => self.file_filter = Some(CommentEditor::default()),
+        }
+        self.mode = Mode::Filter;
+    }
+
+    fn accept_file_filter(&mut self) {
+        if self.mode != Mode::Filter || self.filtered_file_indices().is_empty() {
+            return;
+        }
+
+        self.filter_snapshot = None;
+        if self.filter_query().is_some_and(|query| query.is_empty()) {
+            self.file_filter = None;
+        }
+        self.mode = Mode::Normal;
+        self.pane = Pane::Files;
+    }
+
+    fn cancel_file_filter(&mut self) {
+        let snapshot = self.filter_snapshot.take();
+        self.file_filter = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.query.as_ref())
+            .map(|query| {
+                let mut editor = CommentEditor::default();
+                editor.set_text(query);
+                editor
+            });
+        if let Some(snapshot) = snapshot {
+            self.set_selected_file(snapshot.selected_file, false);
+        }
+        self.mode = Mode::Normal;
+        self.pane = Pane::Files;
+    }
+
+    fn clear_file_filter(&mut self) {
+        self.file_filter = None;
+        self.filter_snapshot = None;
+    }
+
+    pub fn filter_query(&self) -> Option<String> {
+        self.file_filter.as_ref().map(CommentEditor::text)
+    }
+
+    pub fn filtered_file_indices(&self) -> Vec<usize> {
+        let Some(query) = self.filter_query() else {
+            return (0..self.files.len()).collect();
+        };
+        let query = query.to_lowercase();
+
+        self.files
+            .iter()
+            .enumerate()
+            .filter_map(|(index, file)| file.path.to_lowercase().contains(&query).then_some(index))
+            .collect()
+    }
+
+    /// Keep the current file when it still matches; otherwise preview the
+    /// first result as the query changes.
+    pub fn sync_file_filter(&mut self) {
+        let matches = self.filtered_file_indices();
+        if matches.is_empty() || matches.contains(&self.selected_file) {
+            return;
+        }
+
+        self.set_selected_file(matches[0], false);
+    }
+
     fn commit_comment(&mut self) {
         let Some(composer) = self.composer.take() else {
             return;
@@ -249,18 +328,57 @@ impl App {
     }
 
     fn toggle_pane(&mut self) {
-        if !self.is_files_visible || self.mode == Mode::Visual {
+        if self.mode != Mode::Normal {
             return;
         }
 
-        self.pane = if self.pane == Pane::Files {
-            Pane::Diff
+        if self.pane == Pane::Files {
+            self.focus_diff();
         } else {
-            Pane::Files
-        };
+            self.focus_files();
+        }
+    }
+
+    fn focus_files(&mut self) {
+        if self.mode != Mode::Normal {
+            return;
+        }
+
+        self.is_files_visible = true;
+        self.pane = Pane::Files;
+    }
+
+    fn focus_diff(&mut self) {
+        if self.mode == Mode::Normal {
+            self.pane = Pane::Diff;
+        }
     }
 
     fn select_file(&mut self, index: usize) {
+        self.set_selected_file(index, true);
+    }
+
+    fn step_file(&mut self, direction: isize) {
+        if self.file_filter.is_none() {
+            let target = self.selected_file.saturating_add_signed(direction);
+            self.select_file(target);
+            return;
+        }
+
+        let matches = self.filtered_file_indices();
+        let Some(position) = matches
+            .iter()
+            .position(|&index| index == self.selected_file)
+        else {
+            return;
+        };
+        let target = position
+            .saturating_add_signed(direction)
+            .min(matches.len().saturating_sub(1));
+        self.select_file(matches[target]);
+    }
+
+    fn set_selected_file(&mut self, index: usize, leave_transient_mode: bool) {
         if self.files.is_empty() {
             return;
         }
@@ -269,11 +387,34 @@ impl App {
         self.cursor = 0;
         self.diff_scroll = 0;
         self.selection = None;
-        self.mode = Mode::Normal;
+        if leave_transient_mode {
+            self.mode = Mode::Normal;
+        }
     }
 
     fn travel(&mut self, motion: Motion, viewport_height: usize) {
         if self.pane == Pane::Files {
+            if self.file_filter.is_some() {
+                let matches = self.filtered_file_indices();
+                let Some(position) = matches
+                    .iter()
+                    .position(|&index| index == self.selected_file)
+                else {
+                    return;
+                };
+                let target = match motion {
+                    Motion::Down(n) => position.saturating_add(n),
+                    Motion::Up(n) => position.saturating_sub(n),
+                    Motion::HalfPageDown => position.saturating_add(viewport_height / 2),
+                    Motion::HalfPageUp => position.saturating_sub(viewport_height / 2),
+                    Motion::Top => 0,
+                    Motion::Bottom => matches.len().saturating_sub(1),
+                }
+                .min(matches.len().saturating_sub(1));
+                self.set_selected_file(matches[target], false);
+                return;
+            }
+
             let target = match motion {
                 Motion::Down(n) => self.selected_file.saturating_add(n),
                 Motion::Up(n) => self.selected_file.saturating_sub(n),

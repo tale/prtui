@@ -33,9 +33,10 @@ impl InputRouter {
         viewport_height: usize,
     ) -> DispatchResult {
         let mode = app.mode;
+        let filter_active = app.file_filter.is_some();
         self.sync_mode(mode);
 
-        match self.keymap.resolve(mode, key) {
+        match self.keymap.resolve(mode, filter_active, key) {
             Resolution::Action(action) => {
                 app.apply(action.clone(), viewport_height);
                 self.sync_mode(app.mode);
@@ -50,6 +51,15 @@ impl InputRouter {
                 composer.editor.handle_key(key);
                 DispatchResult::ForwardedToEditor
             }
+            Resolution::Unbound if mode == Mode::Filter => {
+                let Some(filter) = app.file_filter.as_mut() else {
+                    return DispatchResult::Ignored;
+                };
+
+                filter.handle_key(key);
+                app.sync_file_filter();
+                DispatchResult::ForwardedToEditor
+            }
             Resolution::Unbound => DispatchResult::Ignored,
         }
     }
@@ -57,16 +67,24 @@ impl InputRouter {
     pub fn dispatch_paste(&mut self, app: &mut App, text: String) -> DispatchResult {
         self.sync_mode(app.mode);
 
-        if app.mode != Mode::Insert {
-            return DispatchResult::Ignored;
+        match app.mode {
+            Mode::Insert => {
+                let Some(composer) = app.composer.as_mut() else {
+                    return DispatchResult::Ignored;
+                };
+                composer.editor.insert_text(&text);
+                DispatchResult::ForwardedToEditor
+            }
+            Mode::Filter => {
+                let Some(filter) = app.file_filter.as_mut() else {
+                    return DispatchResult::Ignored;
+                };
+                filter.insert_text(&text.replace(['\r', '\n'], ""));
+                app.sync_file_filter();
+                DispatchResult::ForwardedToEditor
+            }
+            Mode::Normal | Mode::Visual => DispatchResult::Ignored,
         }
-
-        let Some(composer) = app.composer.as_mut() else {
-            return DispatchResult::Ignored;
-        };
-
-        composer.editor.insert_text(&text);
-        DispatchResult::ForwardedToEditor
     }
 
     fn sync_mode(&mut self, mode: Mode) {

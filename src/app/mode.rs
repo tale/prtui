@@ -8,6 +8,8 @@ pub enum Mode {
     Visual,
     /// Composing a comment body; keys belong to the editor widget.
     Insert,
+    /// Editing the file tree's path filter.
+    Filter,
 }
 
 impl Mode {
@@ -16,6 +18,7 @@ impl Mode {
             Mode::Normal => " NORMAL ",
             Mode::Visual => " VISUAL ",
             Mode::Insert => " INSERT ",
+            Mode::Filter => " FILTER ",
         }
     }
 }
@@ -29,7 +32,10 @@ pub struct Selection {
 
 impl Selection {
     pub fn at(row: usize) -> Self {
-        Self { anchor: row, head: row }
+        Self {
+            anchor: row,
+            head: row,
+        }
     }
 
     pub fn range(&self) -> RangeInclusive<usize> {

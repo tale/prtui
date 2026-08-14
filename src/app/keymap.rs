@@ -39,17 +39,20 @@ impl Keymap {
         self.operator = None;
     }
 
-    pub fn resolve(&mut self, mode: Mode, key: KeyEvent) -> Resolution {
+    pub fn resolve(&mut self, mode: Mode, filter_active: bool, key: KeyEvent) -> Resolution {
         if mode == Mode::Insert {
             return self.resolve_insert(key);
         }
+        if mode == Mode::Filter {
+            return self.resolve_filter(key);
+        }
 
         let KeyCode::Char(c) = key.code else {
-            return self.resolve_special(key);
+            return self.resolve_special(mode, filter_active, key);
         };
 
         if key.modifiers == Modifiers::CONTROL {
-            return self.resolve_control(c);
+            return self.resolve_control(mode, filter_active, c);
         }
 
         // Shift is represented both by the character's case and, depending on
@@ -93,6 +96,9 @@ impl Keymap {
             ']' => Action::NextFile,
             '[' => Action::PrevFile,
             'f' => Action::ToggleTree,
+            '/' if mode == Mode::Normal => Action::StartFileFilter,
+            'h' if mode == Mode::Normal => Action::FocusFiles,
+            'l' if mode == Mode::Normal => Action::FocusDiff,
             'v' | 'V' => {
                 if mode == Mode::Visual {
                     Action::LeaveVisual
@@ -112,17 +118,19 @@ impl Keymap {
         Resolution::Action(action)
     }
 
-    fn resolve_control(&mut self, c: char) -> Resolution {
+    fn resolve_control(&mut self, mode: Mode, filter_active: bool, c: char) -> Resolution {
         self.clear();
 
         match c {
+            'c' => Resolution::Action(Action::Quit),
             'd' => Resolution::Action(Action::Move(Motion::HalfPageDown)),
             'u' => Resolution::Action(Action::Move(Motion::HalfPageUp)),
+            '[' => Self::resolve_escape(mode, filter_active),
             _ => Resolution::Unbound,
         }
     }
 
-    fn resolve_special(&mut self, key: KeyEvent) -> Resolution {
+    fn resolve_special(&mut self, mode: Mode, filter_active: bool, key: KeyEvent) -> Resolution {
         self.clear();
 
         if key.modifiers != Modifiers::NONE {
@@ -131,23 +139,70 @@ impl Keymap {
 
         match key.code {
             KeyCode::Tab => Resolution::Action(Action::TogglePane),
-            KeyCode::Escape => Resolution::Action(Action::LeaveVisual),
+            KeyCode::Escape => Self::resolve_escape(mode, filter_active),
+            KeyCode::Enter | KeyCode::Right if mode == Mode::Normal => {
+                Resolution::Action(Action::FocusDiff)
+            }
+            KeyCode::Left if mode == Mode::Normal => Resolution::Action(Action::FocusFiles),
             KeyCode::Down => Resolution::Action(Action::Move(Motion::Down(1))),
             KeyCode::Up => Resolution::Action(Action::Move(Motion::Up(1))),
             _ => Resolution::Unbound,
         }
     }
 
-    /// While composing, only the submit and cancel chords are ours; every
-    /// other key belongs to the editor widget.
+    fn resolve_escape(mode: Mode, filter_active: bool) -> Resolution {
+        Resolution::Action(match mode {
+            Mode::Normal if filter_active => Action::ClearFileFilter,
+            Mode::Normal => Action::Quit,
+            Mode::Visual => Action::LeaveVisual,
+            Mode::Insert => Action::CancelComment,
+            Mode::Filter => Action::CancelFileFilter,
+        })
+    }
+
+    /// Filtering is an editor state: printable keys and cursor edits are
+    /// forwarded, while navigation and lifecycle keys stay application-level.
+    fn resolve_filter(&mut self, key: KeyEvent) -> Resolution {
+        if key.modifiers == Modifiers::CONTROL {
+            return match key.code {
+                KeyCode::Char('c') => Resolution::Action(Action::Quit),
+                KeyCode::Char('[') => Resolution::Action(Action::CancelFileFilter),
+                KeyCode::Char('n') => Resolution::Action(Action::Move(Motion::Down(1))),
+                KeyCode::Char('p') => Resolution::Action(Action::Move(Motion::Up(1))),
+                _ => Resolution::Unbound,
+            };
+        }
+
+        if key.modifiers != Modifiers::NONE {
+            return Resolution::Unbound;
+        }
+
+        match key.code {
+            KeyCode::Escape => Resolution::Action(Action::CancelFileFilter),
+            KeyCode::Enter => Resolution::Action(Action::AcceptFileFilter),
+            KeyCode::Up => Resolution::Action(Action::Move(Motion::Up(1))),
+            KeyCode::Down => Resolution::Action(Action::Move(Motion::Down(1))),
+            _ => Resolution::Unbound,
+        }
+    }
+
+    /// While composing, only submit, cancel, and the global quit chord are
+    /// ours; every other key belongs to the editor widget. Escape and Ctrl+[
+    /// are the same byte on a legacy terminal but arrive as distinct events
+    /// once the Kitty protocol disambiguates them, so both are bound.
     fn resolve_insert(&mut self, key: KeyEvent) -> Resolution {
+        if key.code == KeyCode::Escape && key.modifiers == Modifiers::NONE {
+            return Self::resolve_escape(Mode::Insert, false);
+        }
+
         if key.modifiers != Modifiers::CONTROL {
             return Resolution::Unbound;
         }
 
         match key.code {
             KeyCode::Char('s') => Resolution::Action(Action::CommitComment),
-            KeyCode::Char('c') => Resolution::Action(Action::CancelComment),
+            KeyCode::Char('c') => Resolution::Action(Action::Quit),
+            KeyCode::Char('[') => Self::resolve_escape(Mode::Insert, false),
             _ => Resolution::Unbound,
         }
     }

@@ -81,7 +81,6 @@ fn spawn_highlight_pass(
 async fn main() -> Result<()> {
     let args = Args::parse();
     let follow_terminal = args.theme.follows_terminal();
-    let renderer = Renderer::new(args.theme.resolve());
 
     let repo = match &args.repo {
         Some(slug) => gh::Repo::parse(slug)?,
@@ -89,9 +88,6 @@ async fn main() -> Result<()> {
             .await
             .context("not inside a GitHub repo; pass -R OWNER/REPO")?,
     };
-
-    // Syntax assets deserialize on a worker so the cost overlaps the fetch.
-    std::thread::spawn(move || renderer.preload());
 
     let started = Instant::now();
     let (tx, rx) = mpsc::unbounded_channel();
@@ -122,6 +118,14 @@ async fn main() -> Result<()> {
         };
         let _ = tx.send(msg);
     });
+
+    // Asking the terminal for its background costs a round trip that can time
+    // out; both fetches are already in flight, so it overlaps the network
+    // instead of delaying it.
+    let renderer = Renderer::new(args.theme.resolve());
+
+    // Syntax assets deserialize on a worker so the cost overlaps the fetch too.
+    std::thread::spawn(move || renderer.preload());
 
     run(rx, tx_ui, started, renderer, follow_terminal).await
 }
@@ -165,6 +169,10 @@ async fn event_loop(
 
     while !app.should_quit {
         if is_dirty {
+            // Covers a file selected before the background pass reached it;
+            // a hit here is a hash lookup, so the common path stays free.
+            app.ensure_highlighted();
+
             let pending_hint = input.pending_hint();
             terminal::draw(terminal, |frame| ui::draw(frame, &mut app, &pending_hint))?;
             is_dirty = false;

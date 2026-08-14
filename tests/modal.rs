@@ -100,7 +100,10 @@ fn leading_zero_is_unbound_and_does_not_start_a_count() {
     let key = KeyEvent::new(KeyCode::Char('0'), Modifiers::NONE);
 
     // Leading zero must not start a count that swallows the next motion.
-    assert_eq!(keymap.resolve(Mode::Normal, key), Resolution::Unbound);
+    assert_eq!(
+        keymap.resolve(Mode::Normal, false, key),
+        Resolution::Unbound
+    );
     press(&mut app, "j");
     assert_eq!(app.cursor, 1);
 }
@@ -111,7 +114,7 @@ fn ctrl_d_is_a_half_page() {
     let key = KeyEvent::new(KeyCode::Char('d'), Modifiers::CONTROL);
 
     assert_eq!(
-        keymap.resolve(Mode::Normal, key),
+        keymap.resolve(Mode::Normal, false, key),
         Resolution::Action(Action::Move(Motion::HalfPageDown))
     );
 }
@@ -204,7 +207,7 @@ fn cancelling_keeps_the_buffer_out_of_the_drafts() {
     composer.editor.set_text("never mind");
 
     let mut input = InputRouter::default();
-    let cancel = KeyEvent::new(KeyCode::Char('c'), Modifiers::CONTROL);
+    let cancel = KeyEvent::new(KeyCode::Escape, Modifiers::NONE);
     assert_eq!(
         input.dispatch_key(&mut app, cancel, 20),
         DispatchResult::Applied(Action::CancelComment)
@@ -215,7 +218,7 @@ fn cancelling_keeps_the_buffer_out_of_the_drafts() {
 }
 
 #[test]
-fn insert_mode_reserves_only_the_submit_and_cancel_chords() {
+fn insert_mode_reserves_app_chords_and_forwards_editor_keys() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
@@ -289,4 +292,293 @@ fn a_hunk_header_is_not_commentable() {
     assert_eq!(app.mode, Mode::Normal);
     assert!(app.composer.is_none());
     assert!(app.status.contains("cannot comment"));
+}
+
+#[test]
+fn escape_and_ctrl_bracket_both_cancel_the_composer() {
+    // The Kitty protocol reports these as distinct events, so each is bound
+    // separately and both must reach the same action.
+    let escape = KeyEvent::new(KeyCode::Escape, Modifiers::NONE);
+    let ctrl_bracket = KeyEvent::new(KeyCode::Char('['), Modifiers::CONTROL);
+
+    for key in [escape, ctrl_bracket] {
+        let mut app = load();
+        park_on_code(&mut app);
+        press(&mut app, "c");
+
+        app.composer
+            .as_mut()
+            .unwrap()
+            .editor
+            .set_text("half-written");
+        assert_eq!(app.mode, Mode::Insert);
+
+        let mut input = InputRouter::default();
+        input.dispatch_key(&mut app, key, 20);
+
+        assert_eq!(app.mode, Mode::Normal, "{key:?} should leave insert mode");
+        assert!(app.composer.is_none(), "{key:?} should close the composer");
+        assert!(app.drafts.is_empty(), "{key:?} must not save the draft");
+    }
+}
+
+#[test]
+fn ctrl_c_quits_from_every_mode() {
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), Modifiers::CONTROL);
+
+    for mode in [Mode::Normal, Mode::Visual, Mode::Insert, Mode::Filter] {
+        let mut app = load();
+        match mode {
+            Mode::Normal => {}
+            Mode::Visual => press(&mut app, "V"),
+            Mode::Insert => {
+                park_on_code(&mut app);
+                press(&mut app, "c");
+            }
+            Mode::Filter => press(&mut app, "/"),
+        }
+        assert_eq!(app.mode, mode);
+
+        let mut input = InputRouter::default();
+        assert_eq!(
+            input.dispatch_key(&mut app, ctrl_c, 20),
+            DispatchResult::Applied(Action::Quit)
+        );
+        assert!(app.should_quit, "Ctrl+C should quit from {mode:?}");
+    }
+}
+
+#[test]
+fn escape_and_ctrl_bracket_quit_from_normal_mode() {
+    for key in [
+        KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
+        KeyEvent::new(KeyCode::Char('['), Modifiers::CONTROL),
+    ] {
+        let mut app = load();
+        let mut input = InputRouter::default();
+        assert_eq!(
+            input.dispatch_key(&mut app, key, 20),
+            DispatchResult::Applied(Action::Quit)
+        );
+        assert!(app.should_quit);
+    }
+}
+
+#[test]
+fn ctrl_bracket_leaves_visual_mode() {
+    let mut app = load();
+    press(&mut app, "V");
+    assert_eq!(app.mode, Mode::Visual);
+
+    let mut input = InputRouter::default();
+    input.dispatch_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('['), Modifiers::CONTROL),
+        20,
+    );
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.selection.is_none());
+}
+
+#[test]
+fn a_bare_bracket_still_navigates_files() {
+    let mut app = load();
+    app.selected_file = 2;
+
+    press(&mut app, "[");
+    assert_eq!(app.selected_file, 1, "unmodified [ is still prev-file");
+}
+
+#[test]
+fn pane_focus_has_tab_directional_and_enter_routes() {
+    let mut app = load();
+    assert_eq!(app.pane, Pane::Diff);
+
+    press(&mut app, "h");
+    assert_eq!(app.pane, Pane::Files);
+    press(&mut app, "l");
+    assert_eq!(app.pane, Pane::Diff);
+
+    app.is_files_visible = false;
+    let mut input = InputRouter::default();
+    input.dispatch_key(&mut app, KeyCode::Tab.into(), 20);
+    assert!(app.is_files_visible);
+    assert_eq!(app.pane, Pane::Files);
+
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    assert_eq!(app.pane, Pane::Diff);
+
+    input.dispatch_key(&mut app, KeyCode::Left.into(), 20);
+    assert_eq!(app.pane, Pane::Files);
+    input.dispatch_key(&mut app, KeyCode::Right.into(), 20);
+    assert_eq!(app.pane, Pane::Diff);
+}
+
+#[test]
+fn committed_filter_keeps_vim_navigation_over_matches() {
+    let mut app = load();
+    let mut input = InputRouter::default();
+
+    input.dispatch_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+        20,
+    );
+    assert_eq!(app.mode, Mode::Filter);
+    assert_eq!(app.pane, Pane::Files);
+
+    for character in "auth_check".chars() {
+        input.dispatch_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(character), Modifiers::NONE),
+            20,
+        );
+    }
+
+    assert_eq!(app.filtered_file_indices(), vec![2, 3]);
+    input.dispatch_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('p'), Modifiers::CONTROL),
+        20,
+    );
+    assert_eq!(app.selected_file, 2);
+    input.dispatch_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('n'), Modifiers::CONTROL),
+        20,
+    );
+    assert_eq!(app.selected_file, 3);
+
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.pane, Pane::Files);
+    assert_eq!(app.filter_query().as_deref(), Some("auth_check"));
+
+    for (keys, selected) in [("k", 2), ("j", 3), ("gg", 2), ("G", 3)] {
+        for character in keys.chars() {
+            input.dispatch_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), Modifiers::NONE),
+                20,
+            );
+        }
+        assert_eq!(
+            app.selected_file, selected,
+            "{keys} should navigate matches"
+        );
+    }
+
+    input.dispatch_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+        20,
+    );
+    assert_eq!(app.mode, Mode::Filter);
+
+    for character in "_test".chars() {
+        input.dispatch_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(character), Modifiers::NONE),
+            20,
+        );
+    }
+
+    assert_eq!(app.filter_query().as_deref(), Some("auth_check_test"));
+    assert_eq!(app.filtered_file_indices(), vec![3]);
+    assert_eq!(app.selected_file, 3);
+
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.pane, Pane::Files);
+    assert!(app.file_filter.is_some());
+    assert_eq!(app.selected_file, 3);
+
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    assert_eq!(app.pane, Pane::Diff);
+}
+
+#[test]
+fn escape_cancels_a_file_filter_and_enter_rejects_no_matches() {
+    let mut app = load();
+    let original_file = app.selected_file;
+    let mut input = InputRouter::default();
+    input.dispatch_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+        20,
+    );
+    input.dispatch_paste(&mut app, "nothing\nwill\rmatch".into());
+    assert!(app.filtered_file_indices().is_empty());
+
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    assert_eq!(app.mode, Mode::Filter);
+
+    input.dispatch_key(&mut app, KeyCode::Escape.into(), 20);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.pane, Pane::Files);
+    assert!(app.file_filter.is_none());
+    assert_eq!(app.filtered_file_indices().len(), app.files.len());
+    assert_eq!(app.selected_file, original_file);
+}
+
+#[test]
+fn cancelling_an_edit_restores_the_committed_filter_and_selection() {
+    let mut app = load();
+    let mut input = InputRouter::default();
+
+    input.dispatch_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+        20,
+    );
+    input.dispatch_paste(&mut app, "auth_check".into());
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    app.selected_file = 2;
+
+    input.dispatch_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+        20,
+    );
+    input.dispatch_paste(&mut app, "_test".into());
+    assert_eq!(app.filter_query().as_deref(), Some("auth_check_test"));
+    assert_eq!(app.selected_file, 3);
+
+    input.dispatch_key(&mut app, KeyCode::Escape.into(), 20);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.filter_query().as_deref(), Some("auth_check"));
+    assert_eq!(app.filtered_file_indices(), vec![2, 3]);
+    assert_eq!(app.selected_file, 2);
+}
+
+#[test]
+fn escape_clears_a_committed_filter_before_quitting() {
+    for clear in [
+        KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
+        KeyEvent::new(KeyCode::Char('['), Modifiers::CONTROL),
+    ] {
+        let mut app = load();
+        let mut input = InputRouter::default();
+        input.dispatch_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+            20,
+        );
+        input.dispatch_paste(&mut app, "auth_check".into());
+        input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+
+        assert_eq!(
+            input.dispatch_key(&mut app, clear, 20),
+            DispatchResult::Applied(Action::ClearFileFilter)
+        );
+        assert!(app.file_filter.is_none());
+        assert!(!app.should_quit);
+
+        assert_eq!(
+            input.dispatch_key(&mut app, clear, 20),
+            DispatchResult::Applied(Action::Quit)
+        );
+        assert!(app.should_quit);
+    }
 }
