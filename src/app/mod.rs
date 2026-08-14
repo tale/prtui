@@ -49,6 +49,7 @@ pub struct App {
 
     pub status: String,
     pub load_ms: Option<u128>,
+    pub loading_frame: usize,
     pub should_quit: bool,
 
     renderer: Renderer,
@@ -82,8 +83,9 @@ impl App {
             diff_scroll: 0,
             pane: Pane::Files,
             is_files_visible: true,
-            status: "loading…".into(),
+            status: String::new(),
             load_ms: None,
+            loading_frame: 0,
             should_quit: false,
             renderer,
             highlights: HashMap::new(),
@@ -93,6 +95,14 @@ impl App {
 
     pub const fn theme(&self) -> Theme {
         self.renderer.theme()
+    }
+
+    pub const fn is_loading(&self) -> bool {
+        self.load_ms.is_none()
+    }
+
+    pub fn advance_loading(&mut self) {
+        self.loading_frame = self.loading_frame.wrapping_add(1);
     }
 
     /// Swap the complete renderer palette and discard syntax colors produced
@@ -324,7 +334,7 @@ impl App {
             body,
         });
 
-        self.status = format!("{} draft comment(s)", self.drafts.len());
+        self.status = "draft saved".into();
     }
 
     fn toggle_pane(&mut self) {

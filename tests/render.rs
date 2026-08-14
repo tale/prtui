@@ -16,6 +16,7 @@ fn load() -> App {
     let mut app = App::new();
     app.files = parse_files(&files).unwrap();
     app.set_meta(parse_meta(&meta).unwrap());
+    app.load_ms = Some(0);
     app
 }
 
@@ -94,6 +95,42 @@ fn pending_input_is_visible_in_the_status_line() {
         .unwrap();
 
     assert!(terminal.backend().to_string().contains("123456"));
+}
+
+#[test]
+fn loading_state_is_centered_once_and_animates() {
+    let mut app = App::new();
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let first = terminal.backend().to_string();
+    assert_eq!(first.matches("loading pull request").count(), 1);
+    assert!(first.contains('⠋'));
+
+    app.advance_loading();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let second = terminal.backend().to_string();
+    assert!(second.contains('⠙'));
+    assert_ne!(first, second, "the loading indicator should advance frames");
+}
+
+#[test]
+fn bottom_bar_keeps_only_contextual_actions() {
+    let mut app = load();
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    assert!(rendered.contains("j/k move"));
+    assert!(rendered.contains("↵ open"));
+    assert!(!rendered.contains("top/end"));
+    assert!(!rendered.contains("half page"));
 }
 
 #[test]
@@ -220,6 +257,7 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
         serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
     app.files = parse_files(&files).unwrap();
     app.is_files_visible = false;
+    app.load_ms = Some(0);
     app.ensure_highlighted();
 
     let added = app
@@ -238,7 +276,7 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
         terminal
             .backend()
             .buffer()
-            .cell((0, (added + 1) as u16))
+            .cell((0, (added + 2) as u16))
             .unwrap()
             .style()
             .bg,
@@ -316,22 +354,22 @@ fn visual_selection_paints_every_row_in_the_span() {
     app.selection = Some(Selection { anchor: 2, head: 6 });
     let selected = snapshot(&mut app);
 
-    // Diff row N draws on screen row N+1; the header occupies row 0.
-    for row in 3..=7 {
+    // Diff row N draws on screen row N+2; the header and pane title occupy two rows.
+    for row in 4..=8 {
         assert_ne!(
             plain[row],
             selected[row],
             "diff row {} is inside the selection and must change tint",
-            row - 1
+            row - 2
         );
     }
 
-    for row in [2, 8, 9] {
+    for row in [3, 9, 10] {
         assert_eq!(
             plain[row],
             selected[row],
             "diff row {} is outside the selection and must not change",
-            row - 1
+            row - 2
         );
     }
 }
@@ -352,12 +390,12 @@ fn every_selected_row_carries_the_left_bar() {
     let buffer = terminal.backend().buffer();
     // The tree is 30 columns at this width, so the diff's own gutter starts there.
     let bar_column = 30;
-    for row in 2..=5 {
+    for row in 3..=6 {
         assert_eq!(
             buffer.cell((bar_column, row)).unwrap().symbol(),
             "▍",
             "selected row {} should show the selection bar",
-            row - 1
+            row - 2
         );
     }
 }

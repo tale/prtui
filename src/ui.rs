@@ -3,7 +3,7 @@ use crate::app::mode::Mode;
 use crate::app::{App, Pane};
 use crate::model::LineKind;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
@@ -19,13 +19,18 @@ pub fn draw(frame: &mut Frame, app: &mut App, pending_hint: &str) {
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
-            Constraint::Length(1),
         ])
         .split(frame.area());
 
     draw_header(frame, app, rows[0]);
 
-    if app.is_files_visible {
+    if app.is_loading() {
+        draw_loading(frame, app, rows[1]);
+        draw_bottom_bar(frame, app, pending_hint, rows[2]);
+        return;
+    }
+
+    let diff_area = if app.is_files_visible {
         let width = files_width(rows[1].width);
         let cols = Layout::default()
             .direction(Direction::Horizontal)
@@ -34,13 +39,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, pending_hint: &str) {
 
         draw_files(frame, app, cols[0]);
         draw_diff(frame, app, cols[1]);
+        cols[1]
     } else {
         draw_diff(frame, app, rows[1]);
-    }
+        rows[1]
+    };
 
-    draw_status(frame, app, pending_hint, rows[2]);
-    draw_help(frame, app, rows[3]);
-    draw_composer(frame, app, rows[1]);
+    draw_bottom_bar(frame, app, pending_hint, rows[2]);
+    draw_composer(frame, app, diff_area);
 }
 
 /// Roughly a quarter of the terminal, clamped so the tree neither crowds the
@@ -52,7 +58,12 @@ fn files_width(total: u16) -> u16 {
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
     let spans = match &app.pr {
-        None => vec![Span::styled(" loading…", Style::default().fg(theme.dim))],
+        None => vec![Span::styled(
+            " prtui ",
+            Style::default()
+                .fg(theme.heading)
+                .add_modifier(Modifier::BOLD),
+        )],
         Some(pr) => {
             let (label, color) = match pr.state.as_str() {
                 "MERGED" => (" merged ", theme.purple),
@@ -96,12 +107,36 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
     let is_focused = app.pane == Pane::Files;
+    let title = if app.files.is_empty() {
+        " Files ".to_string()
+    } else {
+        format!(" Files · {} ", app.files.len())
+    };
     let block = Block::default()
-        .borders(Borders::RIGHT)
-        .border_style(Style::default().fg(if is_focused { theme.accent } else { theme.dim }));
+        .borders(Borders::TOP | Borders::RIGHT)
+        .border_style(Style::default().fg(if is_focused { theme.accent } else { theme.dim }))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(if is_focused {
+                    theme.heading
+                } else {
+                    theme.muted
+                })
+                .add_modifier(if is_focused {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    if app.files.is_empty() {
+        draw_empty_pane(frame, app, inner, "no changed files");
+        return;
+    }
 
     let list_area = if let Some(filter) = app.file_filter.as_ref() {
         if inner.height == 0 {
@@ -162,7 +197,7 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or(0);
 
             let marker = if unresolved > 0 {
-                format!(" {unresolved}◆")
+                format!(" ▤{unresolved}")
             } else {
                 "  ".into()
             };
@@ -213,16 +248,59 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
+    let is_focused = app.pane == Pane::Diff;
+    let title = app.current_file().map_or_else(
+        || " Diff ".to_string(),
+        |file| {
+            let comments = app.threads_by_path.get(&file.path).map_or(0, |threads| {
+                threads.iter().filter(|thread| !thread.is_resolved).count()
+            });
+            let suffix = if comments == 0 {
+                format!("  +{} -{}", file.additions, file.deletions)
+            } else {
+                format!("  ▤ {comments}  +{} -{}", file.additions, file.deletions)
+            };
+            let available = area.width.saturating_sub(4) as usize;
+            format!(
+                " {}{} ",
+                truncate_right(
+                    &file.path,
+                    available.saturating_sub(terminal_width(&suffix)),
+                ),
+                suffix
+            )
+        },
+    );
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(if is_focused { theme.accent } else { theme.dim }))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(if is_focused {
+                    theme.heading
+                } else {
+                    theme.muted
+                })
+                .add_modifier(if is_focused {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
     let Some(file) = app.current_file() else {
+        draw_empty_pane(frame, app, inner, "no diff selected");
         return;
     };
-    let theme = app.theme();
 
-    let height = area.height as usize;
-    let width = area.width as usize;
+    let height = inner.height as usize;
+    let width = inner.width as usize;
     let threads = app.threads_by_path.get(&file.path);
     let styled = app.highlighted();
-    let is_focused = app.pane == Pane::Diff;
 
     let drafts: Vec<&Draft> = app.drafts.iter().filter(|d| d.path == file.path).collect();
 
@@ -355,7 +433,7 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    frame.render_widget(Paragraph::new(rows), area);
+    frame.render_widget(Paragraph::new(rows), inner);
 }
 
 /// Floats over the diff so the anchored lines stay visible while typing.
@@ -430,76 +508,9 @@ fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
     ));
 }
 
-fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_bottom_bar(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect) {
     let theme = app.theme();
-    let keys: &[(&str, &str)] = match (app.mode, app.pane, app.file_filter.is_some()) {
-        (Mode::Filter, _, _) => &[
-            ("type", "filter paths"),
-            ("↑/↓ ^n/^p", "select"),
-            ("↵", "apply"),
-            ("esc", "cancel"),
-            ("^c", "quit"),
-        ],
-        (Mode::Insert, _, _) => &[("^s", "save draft"), ("esc", "cancel"), ("↵", "newline")],
-        (Mode::Visual, _, _) => &[
-            ("j/k", "extend"),
-            ("c", "comment selection"),
-            ("v", "exit visual"),
-            ("esc", "cancel"),
-            ("^c/q", "quit"),
-        ],
-        (Mode::Normal, Pane::Files, true) => &[
-            ("j/k", "match"),
-            ("gg/G", "top/end"),
-            ("⇥/l/↵", "diff"),
-            ("/", "edit filter"),
-            ("esc", "clear filter"),
-            ("^c/q", "quit"),
-        ],
-        (Mode::Normal, Pane::Files, false) => &[
-            ("j/k", "file"),
-            ("⇥/l/↵", "diff"),
-            ("/", "filter"),
-            ("f", "hide tree"),
-            ("gg/G", "top/end"),
-            ("^c/q", "quit"),
-        ],
-        (Mode::Normal, Pane::Diff, has_filter) => &[
-            ("j/k", "line"),
-            ("^d/^u", "half page"),
-            ("v", "visual"),
-            ("c", "comment"),
-            ("[  ]", "prev/next file"),
-            ("/", "filter files"),
-            ("⇥/h", "tree"),
-            if has_filter {
-                ("esc", "clear filter")
-            } else {
-                ("esc", "quit")
-            },
-            ("^c/q", "quit"),
-        ],
-    };
-
-    let mut spans = Vec::new();
-    for (key, label) in keys {
-        spans.push(Span::styled(
-            format!(" {key}"),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!(" {label}"),
-            Style::default().fg(theme.dim),
-        ));
-    }
-
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-fn draw_status(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect) {
-    let theme = app.theme();
+    let bar = Style::default().bg(theme.hunk);
     let mode_bg = match app.mode {
         Mode::Normal => theme.accent,
         Mode::Visual => theme.orange,
@@ -508,8 +519,8 @@ fn draw_status(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect) {
     };
 
     let pane = match app.pane {
-        Pane::Files => " files ",
-        Pane::Diff => " diff ",
+        Pane::Files => " files",
+        Pane::Diff => " diff",
     };
 
     let show_match_position = app.mode == Mode::Filter
@@ -524,7 +535,7 @@ fn draw_status(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect) {
             format!("  {selected}/{} matches", matches.len())
         }
         (false, Some(file)) => format!(
-            "  {}/{}   ln {}/{}",
+            "  {}/{} · {}/{}",
             app.selected_file + 1,
             app.files.len(),
             (app.cursor + 1).min(file.lines.len().max(1)),
@@ -541,46 +552,151 @@ fn draw_status(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect) {
                 .fg(theme.ink)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(pane, Style::default().fg(theme.dim)),
-        Span::styled(position, Style::default().fg(theme.muted)),
+        Span::styled(pane, bar.fg(theme.dim)),
+        Span::styled(position, bar.fg(theme.muted)),
     ];
 
     if let Some(selection) = app.selection {
         spans.push(Span::styled(
             format!("   {} lines", selection.row_count()),
-            Style::default().fg(theme.orange),
+            bar.fg(theme.orange),
         ));
     }
 
     if !pending_hint.is_empty() {
         spans.push(Span::styled(
             format!("   {pending_hint}"),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
+            bar.fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let comments = app
+        .threads_by_path
+        .values()
+        .flatten()
+        .filter(|thread| !thread.is_resolved)
+        .count();
+    if comments > 0 {
+        spans.push(Span::styled(
+            format!("   ▤ {comments}"),
+            bar.fg(theme.purple),
         ));
     }
 
     if !app.drafts.is_empty() {
         spans.push(Span::styled(
             format!("   ✎ {}", app.drafts.len()),
-            Style::default().fg(theme.orange),
+            bar.fg(theme.orange),
         ));
     }
 
-    if let Some(ms) = app.load_ms {
+    if !app.status.is_empty() {
         spans.push(Span::styled(
-            format!("   {ms}ms"),
-            Style::default().fg(theme.success),
+            format!("   {}", app.status),
+            bar.fg(if app.status.starts_with("error:") {
+                theme.danger
+            } else {
+                theme.dim
+            }),
         ));
     }
 
-    spans.push(Span::styled(
-        format!("   {}", app.status),
-        Style::default().fg(theme.dim),
-    ));
+    frame.render_widget(
+        Paragraph::new(Span::styled(" ".repeat(area.width as usize), bar)),
+        area,
+    );
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    let left = Line::from(spans);
+    let left_width = left.width();
+    frame.render_widget(Paragraph::new(left), area);
+
+    let keys: &[(&str, &str)] = match (app.mode, app.pane) {
+        (Mode::Filter, _) => &[("↑↓", "select"), ("↵", "apply"), ("esc", "cancel")],
+        (Mode::Insert, _) => &[("^s", "save"), ("esc", "cancel")],
+        (Mode::Visual, _) => &[("j/k", "extend"), ("c", "comment"), ("esc", "cancel")],
+        (Mode::Normal, Pane::Files) => &[
+            ("j/k", "move"),
+            ("↵", "open"),
+            if app.file_filter.is_some() {
+                ("/", "edit filter")
+            } else {
+                ("/", "filter")
+            },
+        ],
+        (Mode::Normal, Pane::Diff) => &[("j/k", "move"), ("c", "comment"), ("⇥", "files")],
+    };
+
+    let available = (area.width as usize).saturating_sub(left_width + 2);
+    let mut hint_spans = Vec::new();
+    let mut hint_width = 0;
+    for &(key, label) in keys {
+        let pair_width = terminal_width(key) + terminal_width(label) + 3;
+        if hint_width + pair_width > available {
+            break;
+        }
+        hint_spans.push(Span::styled(
+            format!(" {key}"),
+            bar.fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+        hint_spans.push(Span::styled(format!(" {label} "), bar.fg(theme.dim)));
+        hint_width += pair_width;
+    }
+
+    if hint_width > 0 {
+        let hint_area = Rect {
+            x: area.x + area.width.saturating_sub(hint_width as u16),
+            width: hint_width as u16,
+            ..area
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(hint_spans)).alignment(Alignment::Right),
+            hint_area,
+        );
+    }
+}
+
+fn draw_loading(frame: &mut Frame, app: &App, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+
+    let theme = app.theme();
+    const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let line = Line::from(vec![
+        Span::styled(
+            SPINNER[app.loading_frame % SPINNER.len()],
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  loading pull request", Style::default().fg(theme.dim)),
+    ]);
+    let y = area.y + area.height.saturating_sub(1) / 2;
+    frame.render_widget(
+        Paragraph::new(line).alignment(Alignment::Center),
+        Rect {
+            y,
+            height: 1,
+            ..area
+        },
+    );
+}
+
+fn draw_empty_pane(frame: &mut Frame, app: &App, area: Rect, message: &str) {
+    if area.is_empty() {
+        return;
+    }
+
+    let y = area.y + area.height.saturating_sub(1) / 2;
+    frame.render_widget(
+        Paragraph::new(Line::styled(message, Style::default().fg(app.theme().dim)))
+            .alignment(Alignment::Center),
+        Rect {
+            y,
+            height: 1,
+            ..area
+        },
+    );
 }
 
 /// Expand tabs at real tab stops and clip by terminal cells, not scalar count.
@@ -702,5 +818,6 @@ fn split_path(path: &str, width: usize) -> (String, String) {
 }
 
 pub fn diff_viewport_height(area: Rect) -> usize {
-    area.height.saturating_sub(2) as usize
+    // Header, pane title rule, and the compact bottom bar each consume a row.
+    area.height.saturating_sub(3) as usize
 }

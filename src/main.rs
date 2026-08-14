@@ -6,7 +6,11 @@ use prtui::app::input::InputRouter;
 use prtui::model::{self, ChangedFile, PullRequest};
 use prtui::renderer::{Renderer, Segment, ThemeMode};
 use prtui::{gh, ui};
-use std::{future::poll_fn, pin::Pin, time::Instant};
+use std::{
+    future::poll_fn,
+    pin::Pin,
+    time::{Duration, Instant},
+};
 use termina::escape::csi::{Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode};
 use termina::event::KeyEventKind;
 use termina::{Event, EventStream};
@@ -166,19 +170,21 @@ async fn event_loop(
     let mut pending: u8 = 2;
     let mut failure: Option<String> = None;
     let mut is_dirty = true;
+    let mut animation = tokio::time::interval(Duration::from_millis(90));
+    animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     while !app.should_quit {
         if is_dirty {
-            // Covers a file selected before the background pass reached it;
-            // a hit here is a hash lookup, so the common path stays free.
-            app.ensure_highlighted();
-
             let pending_hint = input.pending_hint();
             terminal::draw(terminal, |frame| ui::draw(frame, &mut app, &pending_hint))?;
             is_dirty = false;
         }
 
         tokio::select! {
+            _ = animation.tick(), if pending != 0 => {
+                app.advance_loading();
+                is_dirty = true;
+            }
             message = rx.recv() => {
                 let Some(message) = message else {
                     bail!("application message channel closed");
@@ -218,10 +224,7 @@ async fn event_loop(
                     app.load_ms = Some(started.elapsed().as_millis());
                     app.status = match &failure {
                         Some(err) => format!("error: {err}"),
-                        None => format!(
-                            "{} threads",
-                            app.threads_by_path.values().flatten().count()
-                        ),
+                        None => String::new(),
                     };
                 }
 
