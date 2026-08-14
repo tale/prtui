@@ -1,4 +1,5 @@
 mod highlight;
+pub mod markdown;
 mod theme;
 
 pub use highlight::Segment;

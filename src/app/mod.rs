@@ -45,6 +45,8 @@ pub struct App {
     pub cursor: usize,
     pub focused_thread: Option<String>,
     pub expanded_thread: Option<String>,
+    pub thread_scroll: usize,
+    pub thread_scroll_limit: usize,
     pub diff_scroll: usize,
     pub pane: Pane,
     pub is_files_visible: bool,
@@ -84,6 +86,8 @@ impl App {
             cursor: 0,
             focused_thread: None,
             expanded_thread: None,
+            thread_scroll: 0,
+            thread_scroll_limit: 0,
             diff_scroll: 0,
             pane: Pane::Files,
             is_files_visible: true,
@@ -378,6 +382,8 @@ impl App {
             return;
         };
         self.expanded_thread = (self.expanded_thread.as_deref() != Some(&id)).then_some(id);
+        self.thread_scroll = 0;
+        self.thread_scroll_limit = 0;
     }
 
     pub fn is_thread_expanded(&self, id: &str) -> bool {
@@ -484,6 +490,17 @@ impl App {
                 Motion::Top => 0,
                 Motion::Bottom => last,
             };
+        } else if self.expanded_thread.is_some() {
+            self.thread_scroll = match motion {
+                Motion::Down(n) => self.thread_scroll.saturating_add(n),
+                Motion::Up(n) => self.thread_scroll.saturating_sub(n),
+                Motion::HalfPageDown => self.thread_scroll.saturating_add(viewport_height / 2),
+                Motion::HalfPageUp => self.thread_scroll.saturating_sub(viewport_height / 2),
+                Motion::Top => 0,
+                Motion::Bottom => self.thread_scroll_limit,
+            }
+            .min(self.thread_scroll_limit);
+            return;
         } else {
             match motion {
                 Motion::Down(n) => self.move_diff_stops(1, n),
@@ -577,6 +594,8 @@ impl App {
     fn set_focused_thread(&mut self, focused: Option<String>) {
         if self.focused_thread != focused {
             self.expanded_thread = None;
+            self.thread_scroll = 0;
+            self.thread_scroll_limit = 0;
         }
         self.focused_thread = focused;
     }

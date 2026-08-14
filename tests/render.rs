@@ -85,6 +85,36 @@ fn renders_unresolved_thread_summary_inline() {
 }
 
 #[test]
+fn collapsed_thread_summary_uses_rendered_gfm_text() {
+    let mut app = load();
+    let mut thread = app
+        .pr
+        .as_ref()
+        .unwrap()
+        .threads
+        .iter()
+        .find(|thread| !thread.is_resolved)
+        .unwrap()
+        .clone();
+    thread.comments[0].body = "_Minor_ and **important** with `inline code`".into();
+    app.threads_by_path
+        .insert(thread.path.clone(), vec![thread.clone()]);
+    show_thread(&mut app, &thread);
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+
+    assert!(
+        terminal
+            .backend()
+            .to_string()
+            .contains("Minor and important with inline code")
+    );
+}
+
+#[test]
 fn focused_thread_expands_into_its_full_conversation() {
     let mut app = load();
     let mut thread = app
@@ -121,7 +151,111 @@ fn focused_thread_expands_into_its_full_conversation() {
     assert!(focused_row.contains("◆ ▾ 2 comments · open"));
     assert!(rendered.contains("Lol not suspicious of coupling at all."));
     assert!(rendered.contains("This is the full reply body."));
+    assert!(rendered.contains("reply 1/1"));
     assert!(rendered.contains("collapse"));
+}
+
+#[test]
+fn expanded_thread_can_scroll_to_its_complete_conversation() {
+    let mut app = load();
+    let mut thread = app
+        .pr
+        .as_ref()
+        .unwrap()
+        .threads
+        .iter()
+        .find(|thread| !thread.is_resolved)
+        .unwrap()
+        .clone();
+    thread.comments[0].body = (1..=18)
+        .map(|line| format!("Paragraph {line}\n\n"))
+        .collect::<String>()
+        + "TAIL CONTENT IS REACHABLE";
+    app.threads_by_path
+        .insert(thread.path.clone(), vec![thread.clone()]);
+    show_thread(&mut app, &thread);
+    app.focused_thread = Some(thread.id.clone());
+    app.expanded_thread = Some(thread.id.clone());
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let first_page = terminal.backend().to_string();
+
+    assert!(app.thread_scroll_limit > 0);
+    let small_viewport_limit = app.thread_scroll_limit;
+    assert!(first_page.contains("↓"));
+    assert!(first_page.contains("more"));
+    assert!(!first_page.contains("thread continues"));
+
+    app.thread_scroll = app.thread_scroll_limit;
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let last_page = terminal.backend().to_string();
+
+    assert!(last_page.contains("↑"));
+    assert!(last_page.contains("earlier"));
+    assert!(last_page.contains("TAIL CONTENT IS REACHABLE"));
+    assert!(last_page.contains("j/k scroll"));
+
+    app.thread_scroll = 0;
+    let mut large_terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    large_terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+
+    assert!(app.thread_scroll_limit < small_viewport_limit);
+    assert!(
+        large_terminal
+            .backend()
+            .to_string()
+            .contains("Paragraph 10")
+    );
+}
+
+#[test]
+fn long_reply_keeps_its_identity_visible_while_scrolling() {
+    let mut app = load();
+    let mut thread = app
+        .pr
+        .as_ref()
+        .unwrap()
+        .threads
+        .iter()
+        .find(|thread| !thread.is_resolved)
+        .unwrap()
+        .clone();
+    thread.comments[0].body = "Opening comment.".into();
+    let mut reply = thread.comments[0].clone();
+    reply.id = "long-reply".into();
+    reply.author = "andyfeller".into();
+    reply.body = (1..=24)
+        .map(|line| format!("Reply paragraph {line}\n\n"))
+        .collect();
+    thread.comments.push(reply);
+    app.threads_by_path
+        .insert(thread.path.clone(), vec![thread.clone()]);
+    show_thread(&mut app, &thread);
+    app.focused_thread = Some(thread.id.clone());
+    app.expanded_thread = Some(thread.id.clone());
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    assert!(app.thread_scroll_limit > 5);
+
+    app.thread_scroll = 5;
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    assert!(rendered.contains("↳ @andyfeller"));
+    assert!(rendered.contains("reply 1/1 · continued"));
+    assert!(rendered.contains("↑ 5 earlier"));
 }
 
 #[test]
@@ -156,6 +290,16 @@ fn multiple_threads_on_one_line_render_as_one_group() {
     assert!(rendered.contains("◆ 4 open threads"));
     assert!(rendered.contains("@williammartin  Discussion number 1"));
     assert!(rendered.contains("@williammartin  Discussion number 4"));
+
+    app.focused_thread = Some(threads[3].id.clone());
+    app.expanded_thread = Some(threads[3].id.clone());
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let expanded = terminal.backend().to_string();
+
+    assert!(expanded.contains("… 3 earlier"));
+    assert!(expanded.contains("Discussion number 4"));
 }
 
 #[test]

@@ -2,7 +2,7 @@ use crate::app::draft::{Draft, Side};
 use crate::app::mode::Mode;
 use crate::app::{App, Pane};
 use crate::model::{DiffLine, LineKind, ReviewThread};
-use crate::renderer::Theme;
+use crate::renderer::{Theme, markdown};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -13,12 +13,20 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const GUTTER: usize = 13;
 const MAX_VISIBLE_THREAD_SUMMARIES: usize = 4;
-const MAX_EXPANDED_THREAD_ROWS: usize = 14;
+
+#[derive(Clone)]
+struct ExpandedThreadRow {
+    spans: Vec<Span<'static>>,
+    comment_index: usize,
+    is_header: bool,
+}
 
 #[derive(Clone, Copy)]
 struct ThreadRenderState<'a> {
     focused: Option<&'a str>,
     expanded: Option<&'a str>,
+    scroll: usize,
+    window: usize,
 }
 
 impl ThreadRenderState<'_> {
@@ -266,7 +274,7 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(rows), list_area);
 }
 
-fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
     let is_focused = app.pane == Pane::Diff;
     let title = app.current_file().map_or_else(
@@ -311,6 +319,13 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    sync_expanded_thread_scroll(
+        app,
+        inner.width as usize,
+        expanded_thread_window(inner.height as usize),
+        theme,
+    );
+
     let Some(file) = app.current_file() else {
         draw_empty_pane(frame, app, inner, "no diff selected");
         return;
@@ -329,6 +344,8 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
     let thread_state = ThreadRenderState {
         focused: app.focused_thread.as_deref(),
         expanded: app.expanded_thread.as_deref(),
+        scroll: app.thread_scroll,
+        window: expanded_thread_window(height),
     };
 
     if file.lines.is_empty() {
@@ -652,7 +669,14 @@ fn render_thread_group(
             context,
         )];
         if expanded {
-            rows.extend(render_expanded_thread(thread, indent, width, theme));
+            rows.extend(render_expanded_thread(
+                thread,
+                indent,
+                width,
+                theme,
+                render_state.scroll,
+                render_state.window,
+            ));
         }
         return rows;
     }
@@ -676,10 +700,15 @@ fn render_thread_group(
         .iter()
         .position(|thread| render_state.is_focused(thread));
     let max_start = count.saturating_sub(MAX_VISIBLE_THREAD_SUMMARIES);
-    let start = focused_position
-        .map(|position| position.saturating_sub(MAX_VISIBLE_THREAD_SUMMARIES - 1))
-        .unwrap_or(0)
-        .min(max_start);
+    let expanded_position = threads
+        .iter()
+        .position(|thread| render_state.is_expanded(thread));
+    let start = expanded_position.unwrap_or_else(|| {
+        focused_position
+            .map(|position| position.saturating_sub(MAX_VISIBLE_THREAD_SUMMARIES - 1))
+            .unwrap_or(0)
+            .min(max_start)
+    });
     let end = (start + MAX_VISIBLE_THREAD_SUMMARIES).min(count);
 
     if start > 0 {
@@ -710,7 +739,14 @@ fn render_thread_group(
         ));
 
         if render_state.is_expanded(thread) {
-            rows.extend(render_expanded_thread(thread, indent, width, theme));
+            rows.extend(render_expanded_thread(
+                thread,
+                indent,
+                width,
+                theme,
+                render_state.scroll,
+                render_state.window,
+            ));
         }
     }
 
@@ -767,7 +803,7 @@ fn thread_summary_line(
         thread
             .comments
             .first()
-            .map(|comment| comment_summary(&comment.body))
+            .map(|comment| comment_summary(&comment.body, theme))
             .unwrap_or_else(|| "no comment body".into())
     };
     let replies = thread.comments.len().saturating_sub(1);
@@ -812,6 +848,8 @@ fn render_expanded_thread(
     indent: usize,
     width: usize,
     theme: Theme,
+    scroll: usize,
+    window: usize,
 ) -> Vec<Line<'static>> {
     let card_width = width.saturating_sub(indent);
     let body_width = card_width.saturating_sub(3);
@@ -819,81 +857,149 @@ fn render_expanded_thread(
         return Vec::new();
     }
 
-    let mut content: Vec<(String, bool)> = Vec::new();
-    let mut truncated = false;
+    let content = expanded_thread_content(thread, body_width, theme);
+    let start = scroll.min(content.len().saturating_sub(window));
+    let end = (start + window).min(content.len());
+    let mut visible = Vec::new();
 
-    for comment in &thread.comments {
-        if content.len() == MAX_EXPANDED_THREAD_ROWS {
-            truncated = true;
-            break;
-        }
+    if start > 0 {
+        visible.push(vec![thread_span(
+            format!("↑ {start} earlier"),
+            theme.muted,
+            Modifier::empty(),
+            theme,
+        )]);
+    }
+    if start > 0
+        && let Some(row) = content.get(start)
+        && !row.is_header
+    {
+        visible.push(comment_header(thread, row.comment_index, theme, true));
+    }
+    visible.extend(content[start..end].iter().map(|row| row.spans.clone()));
+    if end < content.len() {
+        visible.push(vec![thread_span(
+            format!("↓ {} more", content.len() - end),
+            theme.muted,
+            Modifier::empty(),
+            theme,
+        )]);
+    }
 
-        let date = display_date(&comment.created_at);
-        let header = if date.is_empty() {
-            format!("@{}", comment.author)
-        } else {
-            format!("@{} · {date}", comment.author)
-        };
-        content.push((header, true));
+    let last = visible.len().saturating_sub(1);
+    visible
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut spans)| {
+            spans.insert(
+                0,
+                thread_span(
+                    if index == last { "└  " } else { "│  " },
+                    theme.purple,
+                    Modifier::empty(),
+                    theme,
+                ),
+            );
+            thread_card_line(indent, width, spans, theme, false)
+        })
+        .collect()
+}
 
-        let normalized = comment.body.replace('\r', "");
-        for logical in normalized.lines() {
-            let expanded_tabs = clip(logical, usize::MAX, 0).0.into_owned();
-            for wrapped in wrap_display_line(&expanded_tabs, body_width) {
-                if content.len() == MAX_EXPANDED_THREAD_ROWS {
-                    truncated = true;
-                    break;
-                }
-                content.push((wrapped, false));
-            }
-            if truncated {
-                break;
-            }
-        }
+fn expanded_thread_content(
+    thread: &ReviewThread,
+    body_width: usize,
+    theme: Theme,
+) -> Vec<ExpandedThreadRow> {
+    let mut content = Vec::new();
 
-        if truncated {
-            break;
+    for (comment_index, comment) in thread.comments.iter().enumerate() {
+        content.push(ExpandedThreadRow {
+            spans: comment_header(thread, comment_index, theme, false),
+            comment_index,
+            is_header: true,
+        });
+
+        for line in markdown::render(&comment.body, body_width, theme) {
+            content.push(ExpandedThreadRow {
+                spans: line.spans,
+                comment_index,
+                is_header: false,
+            });
         }
     }
 
     if content.is_empty() {
-        content.push(("no comments".into(), false));
-    } else if truncated {
-        let last = content.len() - 1;
-        content[last] = ("… thread continues".into(), false);
+        content.push(ExpandedThreadRow {
+            spans: vec![thread_span(
+                "no comments",
+                theme.muted,
+                Modifier::empty(),
+                theme,
+            )],
+            comment_index: 0,
+            is_header: true,
+        });
     }
 
-    let last = content.len().saturating_sub(1);
     content
-        .into_iter()
-        .enumerate()
-        .map(|(index, (text, is_header))| {
-            thread_card_line(
-                indent,
-                width,
-                vec![
-                    thread_span(
-                        if index == last { "└  " } else { "│  " },
-                        theme.purple,
-                        Modifier::empty(),
-                        theme,
-                    ),
-                    thread_span(
-                        text,
-                        if is_header { theme.heading } else { theme.code },
-                        if is_header {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        },
-                        theme,
-                    ),
-                ],
-                theme,
-                false,
-            )
+}
+
+fn comment_header(
+    thread: &ReviewThread,
+    comment_index: usize,
+    theme: Theme,
+    continued: bool,
+) -> Vec<Span<'static>> {
+    let Some(comment) = thread.comments.get(comment_index) else {
+        return Vec::new();
+    };
+    let date = display_date(&comment.created_at);
+    let mut header = if comment_index == 0 {
+        format!("@{}", comment.author)
+    } else {
+        format!("↳ @{}", comment.author)
+    };
+    if !date.is_empty() {
+        header.push_str(" · ");
+        header.push_str(date);
+    }
+    if comment_index > 0 {
+        let replies = thread.comments.len().saturating_sub(1);
+        header.push_str(&format!(" · reply {comment_index}/{replies}"));
+    }
+    if continued {
+        header.push_str(" · continued");
+    }
+
+    vec![thread_span(header, theme.heading, Modifier::BOLD, theme)]
+}
+
+fn expanded_thread_window(height: usize) -> usize {
+    (height.saturating_mul(2) / 3)
+        .max(1)
+        .min(height.saturating_sub(6).max(1))
+}
+
+fn sync_expanded_thread_scroll(app: &mut App, width: usize, window: usize, theme: Theme) {
+    let limit = app
+        .expanded_thread
+        .as_deref()
+        .and_then(|expanded| {
+            let file = app.current_file()?;
+            app.threads_by_path
+                .get(&file.path)?
+                .iter()
+                .find(|thread| thread.id == expanded)
         })
-        .collect()
+        .map_or(0, |thread| {
+            let body_width = width.saturating_sub(GUTTER).saturating_sub(3);
+            expanded_thread_content(thread, body_width, theme)
+                .len()
+                .saturating_sub(window)
+        });
+
+    app.thread_scroll_limit = limit;
+    app.thread_scroll = app.thread_scroll.min(limit);
 }
 
 fn comment_count(count: usize) -> String {
@@ -907,55 +1013,17 @@ fn display_date(timestamp: &str) -> &str {
     timestamp.get(..10).unwrap_or(timestamp)
 }
 
-fn wrap_display_line(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-
-    let mut rows = Vec::new();
-    let mut rest = text;
-    while !rest.is_empty() {
-        let mut used = 0;
-        let mut end = 0;
-        let mut whitespace = None;
-
-        for (offset, character) in rest.char_indices() {
-            let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-            if used + character_width > width {
-                break;
-            }
-            used += character_width;
-            end = offset + character.len_utf8();
-            if character.is_whitespace() {
-                whitespace = Some(offset);
-            }
-        }
-
-        if end == rest.len() {
-            rows.push(rest.to_string());
-            break;
-        }
-        if end == 0 {
-            end = rest.chars().next().unwrap().len_utf8();
-        } else if let Some(break_at) = whitespace.filter(|offset| *offset > 0) {
-            end = break_at;
-        }
-
-        rows.push(rest[..end].trim_end().to_string());
-        rest = rest[end..].trim_start();
-    }
-    rows
-}
-
-fn comment_summary(body: &str) -> String {
-    body.replace('\r', "")
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no comment body")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+fn comment_summary(body: &str, theme: Theme) -> String {
+    markdown::render(body, 4096, theme)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_else(|| "no comment body".into())
 }
 
 fn thread_card_line(
@@ -967,7 +1035,9 @@ fn thread_card_line(
 ) -> Line<'static> {
     let background = if focused { theme.cursor } else { theme.hunk };
     for span in &mut spans {
-        span.style = span.style.bg(background);
+        if focused || span.style.bg.is_none() {
+            span.style = span.style.bg(background);
+        }
     }
     let used = spans.iter().map(Span::width).sum::<usize>();
     let card_width = width.saturating_sub(indent);
@@ -1192,7 +1262,14 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect)
             },
         ],
         (Mode::Normal, Pane::Diff) if app.focused_thread.is_some() => &[
-            ("j/k", "move"),
+            (
+                "j/k",
+                if app.expanded_thread.is_some() {
+                    "scroll"
+                } else {
+                    "move"
+                },
+            ),
             (
                 "↵",
                 if app

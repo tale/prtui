@@ -206,18 +206,23 @@ fn enter_toggles_the_focused_thread() {
 }
 
 #[test]
-fn moving_off_an_expanded_thread_collapses_it() {
+fn expanded_thread_movement_scrolls_without_losing_focus() {
     let mut app = load();
-    park_on_unresolved_thread(&mut app);
+    let thread = park_on_unresolved_thread(&mut app);
     press(&mut app, "j");
 
     let mut input = InputRouter::default();
     input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
     assert!(app.expanded_thread.is_some());
+    app.thread_scroll_limit = 4;
 
     press(&mut app, "j");
-    assert!(app.focused_thread.is_none());
-    assert!(app.expanded_thread.is_none());
+    assert_eq!(app.thread_scroll, 1);
+    assert_eq!(app.focused_thread.as_deref(), Some(thread.id.as_str()));
+    assert_eq!(app.expanded_thread.as_deref(), Some(thread.id.as_str()));
+
+    press(&mut app, "k");
+    assert_eq!(app.thread_scroll, 0);
 }
 
 #[test]
