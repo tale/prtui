@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyEventKind};
+use prtui::app::input::InputRouter;
 use prtui::app::App;
 use prtui::model::{self, ChangedFile, PullRequest};
 use prtui::{gh, ui};
@@ -111,6 +112,7 @@ async fn event_loop(
     started: Instant,
 ) -> Result<()> {
     let mut app = App::new();
+    let mut input = InputRouter::default();
     let mut pending = 2;
     let mut failure: Option<String> = None;
     let mut is_dirty = true;
@@ -118,7 +120,8 @@ async fn event_loop(
     while !app.should_quit {
         if is_dirty {
             app.ensure_highlighted();
-            terminal.draw(|frame| ui::draw(frame, &app))?;
+            let pending_hint = input.pending_hint();
+            terminal.draw(|frame| ui::draw(frame, &mut app, &pending_hint))?;
             is_dirty = false;
         }
 
@@ -159,12 +162,11 @@ async fn event_loop(
         match event::read()? {
             Event::Resize(_, _) => is_dirty = true,
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                match key.code {
-                    KeyCode::Char(c) => app.on_key(c, height),
-                    KeyCode::Tab => app.on_key('\t', height),
-                    KeyCode::Esc => app.should_quit = true,
-                    _ => {}
-                }
+                input.dispatch_key(&mut app, key, height);
+                is_dirty = true;
+            }
+            Event::Paste(text) => {
+                input.dispatch_paste(&mut app, text);
                 is_dirty = true;
             }
             _ => {}

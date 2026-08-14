@@ -1,9 +1,12 @@
+use crate::app::draft::{Draft, Side};
+use crate::app::mode::Mode;
 use crate::app::{App, Pane};
 use crate::model::LineKind;
+use edtui::{EditorTheme, EditorView};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 /// The page itself stays on the terminal's own background; only diff state
@@ -14,17 +17,21 @@ const BG_DEL: Color = Color::Rgb(58, 34, 38);
 const BG_ADD_STRONG: Color = Color::Rgb(46, 92, 68);
 const BG_DEL_STRONG: Color = Color::Rgb(105, 51, 58);
 const BG_CURSOR: Color = Color::Rgb(58, 64, 79);
+const BG_SELECT: Color = Color::Rgb(67, 76, 94);
 const BG_HUNK: Color = Color::Rgb(38, 43, 54);
 
 /// Text drawn on top of an accent pill, which is opaque regardless of theme.
 const INK: Color = Color::Rgb(28, 32, 40);
 const FG_DIM: Color = Color::Rgb(76, 86, 106);
 const FG_MUTED: Color = Color::Rgb(129, 161, 193);
+const FG_CODE: Color = Color::Rgb(216, 222, 233);
 const ACCENT: Color = Color::Rgb(136, 192, 208);
+const PURPLE: Color = Color::Rgb(180, 142, 173);
+const ORANGE: Color = Color::Rgb(208, 135, 112);
 
 const GUTTER: usize = 11;
 
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App, pending_hint: &str) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -50,8 +57,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_diff(frame, app, rows[1]);
     }
 
-    draw_status(frame, app, rows[2]);
+    draw_status(frame, app, pending_hint, rows[2]);
     draw_help(frame, app, rows[3]);
+    draw_composer(frame, app, rows[1]);
 }
 
 /// Roughly a quarter of the terminal, clamped so the tree neither crowds the
@@ -173,6 +181,8 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
     let styled = app.highlighted();
     let is_focused = app.pane == Pane::Diff;
 
+    let drafts: Vec<&Draft> = app.drafts.iter().filter(|d| d.path == file.path).collect();
+
     // Only the visible slice is ever converted to spans; a 7k-line diff costs
     // the same to render as a 40-line one.
     let rows: Vec<Line> = file
@@ -183,22 +193,31 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
         .take(height)
         .map(|(index, line)| {
             let is_cursor = is_focused && index == app.cursor;
+            let is_selected = app.selection.is_some_and(|s| s.contains(index));
 
             if line.kind == LineKind::Hunk {
                 let text = format!("{:<width$}", line.text, width = width);
+                let bg = if is_selected { BG_SELECT } else { BG_HUNK };
+
                 return Line::from(Span::styled(
                     text,
-                    Style::default().bg(BG_HUNK).fg(FG_MUTED).add_modifier(Modifier::ITALIC),
+                    Style::default().bg(bg).fg(FG_MUTED).add_modifier(Modifier::ITALIC),
                 ));
             }
 
-            let (bg, strong_bg, sigil) = match line.kind {
+            let (base_bg, strong_bg, sigil) = match line.kind {
                 LineKind::Added => (BG_ADD, BG_ADD_STRONG, "+"),
                 LineKind::Removed => (BG_DEL, BG_DEL_STRONG, "-"),
                 _ => (BG, BG, " "),
             };
 
-            let bg = if is_cursor { blend(bg) } else { bg };
+            // Selected rows keep their add/remove identity and are lifted instead
+            // of flattened; the left bar is what makes the span read as contiguous.
+            let bg = match (is_selected, is_cursor) {
+                (true, _) => lift(base_bg, 34),
+                (false, true) => blend(base_bg),
+                _ => base_bg,
+            };
 
             let has_thread = line.new_line.is_some_and(|n| {
                 threads.is_some_and(|list| {
@@ -206,9 +225,20 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
                 })
             });
 
+            let has_draft = drafts.iter().any(|d| match d.side {
+                Side::Right => line.new_line.is_some_and(|n| d.covers(&file.path, n, Side::Right)),
+                Side::Left => line.old_line.is_some_and(|n| d.covers(&file.path, n, Side::Left)),
+            });
+
+            let (marker, marker_color) = match (has_draft, has_thread) {
+                (true, _) => (" ✎", ORANGE),
+                (false, true) => (" ◆", PURPLE),
+                _ => ("  ", FG_DIM),
+            };
+
             let mut spans = vec![
                 Span::styled(
-                    if is_cursor { "▍" } else { " " },
+                    if is_cursor || is_selected { "▍" } else { " " },
                     Style::default().bg(bg).fg(ACCENT),
                 ),
                 Span::styled(
@@ -219,10 +249,7 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
                     ),
                     Style::default().bg(bg).fg(FG_DIM),
                 ),
-                Span::styled(
-                    if has_thread { " ◆" } else { "  " },
-                    Style::default().bg(bg).fg(Color::Rgb(180, 142, 173)),
-                ),
+                Span::styled(marker, Style::default().bg(bg).fg(marker_color)),
                 Span::styled(sigil, Style::default().bg(bg).fg(FG_DIM)),
             ];
 
@@ -236,7 +263,8 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
                         }
                         used += text.chars().count();
 
-                        let seg_bg = if segment.is_emphasis && !is_cursor { strong_bg } else { bg };
+                        let is_plain = !is_cursor && !is_selected;
+                        let seg_bg = if segment.is_emphasis && is_plain { strong_bg } else { bg };
                         spans.push(Span::styled(
                             text,
                             Style::default()
@@ -267,21 +295,75 @@ fn draw_diff(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(rows), area);
 }
 
+/// Floats over the diff so the anchored lines stay visible while typing.
+fn draw_composer(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(composer) = app.composer.as_mut() else { return };
+
+    let height = 10.min(area.height);
+    let rect = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(height),
+        width: area.width,
+        height,
+    };
+
+    let anchor = composer.anchor;
+    let span = if anchor.start_line == anchor.end_line {
+        format!("{}", anchor.start_line)
+    } else {
+        format!("{}-{}", anchor.start_line, anchor.end_line)
+    };
+
+    let name = composer.path.rsplit('/').next().unwrap_or(&composer.path);
+    let title = format!(" comment · {name}:{span} · {} ", anchor.side.as_api().to_lowercase());
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ORANGE))
+        .title(Span::styled(title, Style::default().fg(ORANGE).add_modifier(Modifier::BOLD)));
+
+    let inner = block.inner(rect);
+
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+
+    let theme = EditorTheme::default()
+        .base(Style::default().fg(FG_CODE))
+        .cursor_style(Style::default().bg(ACCENT).fg(INK))
+        .selection_style(Style::default().bg(BG_SELECT))
+        .hide_status_line();
+
+    frame.render_widget(EditorView::new(&mut composer.editor).theme(theme), inner);
+}
+
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
-    let keys: &[(&str, &str)] = match app.pane {
-        Pane::Files => &[
+    let keys: &[(&str, &str)] = match (app.mode, app.pane) {
+        (Mode::Insert, _) => &[
+            ("^s", "save draft"),
+            ("^c", "cancel"),
+            ("esc", "editor normal"),
+        ],
+        (Mode::Visual, _) => &[
+            ("j/k", "extend"),
+            ("c", "comment selection"),
+            ("v", "exit visual"),
+            ("esc", "cancel"),
+        ],
+        (Mode::Normal, Pane::Files) => &[
             ("j/k", "file"),
             ("⇥", "diff"),
             ("f", "hide tree"),
-            ("g/G", "top/end"),
+            ("gg/G", "top/end"),
             ("q", "quit"),
         ],
-        Pane::Diff => &[
+        (Mode::Normal, Pane::Diff) => &[
             ("j/k", "line"),
-            ("d/u", "half page"),
+            ("^d/^u", "half page"),
+            ("v", "visual"),
+            ("c", "comment"),
             ("[/]", "file"),
             ("⇥", "tree"),
-            ("f", "toggle tree"),
             ("q", "quit"),
         ],
     };
@@ -298,10 +380,16 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
-    let (mode, mode_bg) = match app.pane {
-        Pane::Files => (" FILES ", ACCENT),
-        Pane::Diff => (" DIFF ", Color::Rgb(163, 190, 140)),
+fn draw_status(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect) {
+    let mode_bg = match app.mode {
+        Mode::Normal => ACCENT,
+        Mode::Visual => ORANGE,
+        Mode::Insert => Color::Rgb(163, 190, 140),
+    };
+
+    let pane = match app.pane {
+        Pane::Files => " files ",
+        Pane::Diff => " diff ",
     };
 
     let position = match app.current_file() {
@@ -317,11 +405,33 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut spans = vec![
         Span::styled(
-            mode,
+            app.mode.label(),
             Style::default().bg(mode_bg).fg(INK).add_modifier(Modifier::BOLD),
         ),
+        Span::styled(pane, Style::default().fg(FG_DIM)),
         Span::styled(position, Style::default().fg(FG_MUTED)),
     ];
+
+    if let Some(selection) = app.selection {
+        spans.push(Span::styled(
+            format!("   {} lines", selection.row_count()),
+            Style::default().fg(ORANGE),
+        ));
+    }
+
+    if !pending_hint.is_empty() {
+        spans.push(Span::styled(
+            format!("   {pending_hint}"),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    if !app.drafts.is_empty() {
+        spans.push(Span::styled(
+            format!("   ✎ {}", app.drafts.len()),
+            Style::default().fg(ORANGE),
+        ));
+    }
 
     if let Some(ms) = app.load_ms {
         spans.push(Span::styled(
@@ -338,12 +448,21 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 /// Lightens a diff tint so the cursor row reads as selected without losing
 /// its add/remove identity.
 fn blend(color: Color) -> Color {
-    let Color::Rgb(r, g, b) = color else { return BG_CURSOR };
+    lift(color, 24)
+}
+
+fn lift(color: Color, amount: u8) -> Color {
+    let Color::Rgb(r, g, b) = color else {
+        return match amount {
+            0..=28 => BG_CURSOR,
+            _ => BG_SELECT,
+        };
+    };
 
     Color::Rgb(
-        r.saturating_add(22),
-        g.saturating_add(24),
-        b.saturating_add(26),
+        r.saturating_add(amount),
+        g.saturating_add(amount),
+        b.saturating_add(amount),
     )
 }
 
