@@ -13,7 +13,7 @@ fn load() -> App {
     let meta: serde_json::Value = serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
 
     let mut app = App::new();
-    app.files = parse_files(&files).unwrap();
+    app.set_files(parse_files(&files).unwrap());
     app.set_meta(parse_meta(&meta).unwrap());
     app.pane = Pane::Diff;
 

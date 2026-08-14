@@ -14,9 +14,8 @@ fn load() -> App {
     let meta: serde_json::Value = serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
 
     let mut app = App::new();
-    app.files = parse_files(&files).unwrap();
+    app.set_files(parse_files(&files).unwrap());
     app.set_meta(parse_meta(&meta).unwrap());
-    app.load_ms = Some(0);
     app
 }
 
@@ -106,7 +105,7 @@ fn loading_state_is_centered_once_and_animates() {
         .draw(|frame| ui::draw(frame, &mut app, ""))
         .unwrap();
     let first = terminal.backend().to_string();
-    assert_eq!(first.matches("loading pull request").count(), 1);
+    assert_eq!(first.matches("loading changes").count(), 1);
     assert!(first.contains('⠋'));
 
     app.advance_loading();
@@ -116,6 +115,39 @@ fn loading_state_is_centered_once_and_animates() {
     let second = terminal.backend().to_string();
     assert!(second.contains('⠙'));
     assert_ne!(first, second, "the loading indicator should advance frames");
+}
+
+#[test]
+fn files_release_the_loading_gate_without_metadata() {
+    let files: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
+    let mut app = App::new();
+    app.set_files(parse_files(&files).unwrap());
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    assert!(!rendered.contains("loading changes"));
+    assert!(rendered.contains("verify.go"));
+}
+
+#[test]
+fn metadata_can_arrive_while_the_file_loader_continues() {
+    let meta: serde_json::Value = serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
+    let mut app = App::new();
+    app.set_meta(parse_meta(&meta).unwrap());
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    assert!(rendered.contains("#9000"));
+    assert!(rendered.contains("loading changes"));
 }
 
 #[test]
@@ -255,9 +287,8 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
     let mut app = App::with_renderer(Renderer::new(ThemeMode::Light));
     let files: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
-    app.files = parse_files(&files).unwrap();
+    app.set_files(parse_files(&files).unwrap());
     app.is_files_visible = false;
-    app.load_ms = Some(0);
     app.ensure_highlighted();
 
     let added = app

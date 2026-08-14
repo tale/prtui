@@ -48,13 +48,13 @@ pub struct App {
     pub is_files_visible: bool,
 
     pub status: String,
-    pub load_ms: Option<u128>,
     pub loading_frame: usize,
     pub should_quit: bool,
 
     renderer: Renderer,
     highlights: HashMap<usize, Vec<Vec<Segment>>>,
     filter_snapshot: Option<FileFilterSnapshot>,
+    files_loaded: bool,
 }
 
 impl Default for App {
@@ -84,12 +84,12 @@ impl App {
             pane: Pane::Files,
             is_files_visible: true,
             status: String::new(),
-            load_ms: None,
             loading_frame: 0,
             should_quit: false,
             renderer,
             highlights: HashMap::new(),
             filter_snapshot: None,
+            files_loaded: false,
         }
     }
 
@@ -98,11 +98,18 @@ impl App {
     }
 
     pub const fn is_loading(&self) -> bool {
-        self.load_ms.is_none()
+        !self.files_loaded
     }
 
     pub fn advance_loading(&mut self) {
         self.loading_frame = self.loading_frame.wrapping_add(1);
+    }
+
+    /// File patches are the only data required to make the main review surface
+    /// useful. PR metadata and review threads may arrive independently later.
+    pub fn set_files(&mut self, files: Vec<ChangedFile>) {
+        self.files = files;
+        self.files_loaded = true;
     }
 
     /// Swap the complete renderer palette and discard syntax colors produced

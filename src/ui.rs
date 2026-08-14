@@ -669,7 +669,7 @@ fn draw_loading(frame: &mut Frame, app: &App, area: Rect) {
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  loading pull request", Style::default().fg(theme.dim)),
+        Span::styled("  loading changes", Style::default().fg(theme.dim)),
     ]);
     let y = area.y + area.height.saturating_sub(1) / 2;
     frame.render_widget(

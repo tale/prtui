@@ -6,11 +6,7 @@ use prtui::app::input::InputRouter;
 use prtui::model::{self, ChangedFile, PullRequest};
 use prtui::renderer::{Renderer, Segment, ThemeMode};
 use prtui::{gh, ui};
-use std::{
-    future::poll_fn,
-    pin::Pin,
-    time::{Duration, Instant},
-};
+use std::{future::poll_fn, pin::Pin, time::Duration};
 use termina::escape::csi::{Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode};
 use termina::event::KeyEventKind;
 use termina::{Event, EventStream};
@@ -58,7 +54,8 @@ enum Message {
     Meta(Box<PullRequest>),
     Files(Vec<ChangedFile>),
     Highlight(ThemeMode, usize, Vec<Vec<Segment>>),
-    Failed(String),
+    MetaFailed(String),
+    FilesFailed(String),
 }
 
 /// Highlighting all files costs ~600ms single-threaded but only ~150ms across
@@ -93,7 +90,6 @@ async fn main() -> Result<()> {
             .context("not inside a GitHub repo; pass -R OWNER/REPO")?,
     };
 
-    let started = Instant::now();
     let (tx, rx) = mpsc::unbounded_channel();
 
     // Both round trips leave immediately; whichever lands first paints.
@@ -105,9 +101,9 @@ async fn main() -> Result<()> {
         let msg = match gh::fetch_meta(&meta_repo, number).await {
             Ok(val) => match model::parse_meta(&val) {
                 Ok(pr) => Message::Meta(Box::new(pr)),
-                Err(err) => Message::Failed(err.to_string()),
+                Err(err) => Message::MetaFailed(err.to_string()),
             },
-            Err(err) => Message::Failed(err.to_string()),
+            Err(err) => Message::MetaFailed(err.to_string()),
         };
         let _ = meta_tx.send(msg);
     });
@@ -116,9 +112,9 @@ async fn main() -> Result<()> {
         let msg = match gh::fetch_files(&repo, number).await {
             Ok(val) => match model::parse_files(&val) {
                 Ok(files) => Message::Files(files),
-                Err(err) => Message::Failed(err.to_string()),
+                Err(err) => Message::FilesFailed(err.to_string()),
             },
-            Err(err) => Message::Failed(err.to_string()),
+            Err(err) => Message::FilesFailed(err.to_string()),
         };
         let _ = tx.send(msg);
     });
@@ -131,27 +127,17 @@ async fn main() -> Result<()> {
     // Syntax assets deserialize on a worker so the cost overlaps the fetch too.
     std::thread::spawn(move || renderer.preload());
 
-    run(rx, tx_ui, started, renderer, follow_terminal).await
+    run(rx, tx_ui, renderer, follow_terminal).await
 }
 
 async fn run(
     mut rx: mpsc::UnboundedReceiver<Message>,
     tx: mpsc::UnboundedSender<Message>,
-    started: Instant,
     renderer: Renderer,
     follow_terminal: bool,
 ) -> Result<()> {
     terminal::scope(follow_terminal, async |terminal, events| {
-        event_loop(
-            terminal,
-            events,
-            &mut rx,
-            tx,
-            started,
-            renderer,
-            follow_terminal,
-        )
-        .await
+        event_loop(terminal, events, &mut rx, tx, renderer, follow_terminal).await
     })
     .await
 }
@@ -161,7 +147,6 @@ async fn event_loop(
     events: &mut EventStream,
     rx: &mut mpsc::UnboundedReceiver<Message>,
     tx: mpsc::UnboundedSender<Message>,
-    started: Instant,
     renderer: Renderer,
     follow_terminal: bool,
 ) -> Result<()> {
@@ -181,7 +166,7 @@ async fn event_loop(
         }
 
         tokio::select! {
-            _ = animation.tick(), if pending != 0 => {
+            _ = animation.tick(), if app.is_loading() => {
                 app.advance_loading();
                 is_dirty = true;
             }
@@ -209,11 +194,18 @@ async fn event_loop(
                             Renderer::new(app.theme().mode),
                             tx.clone(),
                         );
-                        app.files = files;
+                        app.set_files(files);
                         pending = pending.saturating_sub(1);
                         true
                     }
-                    Message::Failed(err) => {
+                    Message::MetaFailed(err) => {
+                        failure = Some(err);
+                        pending = pending.saturating_sub(1);
+                        true
+                    }
+                    Message::FilesFailed(err) => {
+                        app.set_files(Vec::new());
+                        app.status = format!("error: {err}");
                         failure = Some(err);
                         pending = pending.saturating_sub(1);
                         true
@@ -221,7 +213,6 @@ async fn event_loop(
                 };
 
                 if pending_before != 0 && pending == 0 {
-                    app.load_ms = Some(started.elapsed().as_millis());
                     app.status = match &failure {
                         Some(err) => format!("error: {err}"),
                         None => String::new(),
