@@ -1132,3 +1132,64 @@ fn a_terminal_that_failed_the_probe_says_so() {
             .contains("▭ no image support · shot")
     );
 }
+
+#[test]
+fn search_paints_only_the_matched_bytes_of_a_diff_line() {
+    use prtui::app::input::InputRouter;
+    use prtui::renderer::Theme;
+
+    const NEEDLE: &str = "DisableAuthCheckFlag";
+
+    let mut app = load();
+    app.is_files_visible = false;
+    app.pane = Pane::Diff;
+    app.ensure_highlighted();
+
+    let row = app
+        .current_file()
+        .unwrap()
+        .lines
+        .iter()
+        .position(|line| line.text.contains(NEEDLE))
+        .expect("fixture has a line calling DisableAuthCheckFlag");
+
+    let mut input = InputRouter::default();
+    input.dispatch_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+        20,
+    );
+    input.dispatch_paste(&mut app, NEEDLE.into(), 20);
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+
+    assert_eq!(app.cursor, row, "search lands on the only match");
+    assert_eq!(app.search_summary(), (1, 1));
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
+        .unwrap();
+
+    let theme = Theme::dark();
+    let buffer = terminal.backend().buffer();
+    let painted = buffer
+        .content()
+        .iter()
+        .filter(|cell| cell.style().bg == Some(theme.search_current))
+        .count();
+
+    assert_eq!(
+        painted,
+        NEEDLE.len(),
+        "exactly the matched bytes carry the highlight"
+    );
+
+    let screen = terminal.backend().to_string();
+    assert!(
+        screen.contains(&format!("/{NEEDLE}")),
+        "the query shows in the status bar"
+    );
+    assert!(screen.contains("1/1 matches"));
+}

@@ -17,16 +17,27 @@ pub enum Action {
     Move(Motion),
     NextFile,
     PrevFile,
+    /// Jump to the next/previous unresolved thread, crossing into the
+    /// following file with comments once the current one runs out.
+    NextComment,
+    PrevComment,
     TogglePane,
     ToggleTree,
     Activate,
     LeaveThread,
     FocusFiles,
     FocusDiff,
-    StartFileFilter,
+    /// `/` — filters the tree from the files pane, searches the open file from
+    /// the diff pane. Which one is a property of app state, not of the key.
+    StartFind,
+    /// Drops whichever find state is live, leaving the view where it is.
+    ClearFind,
     AcceptFileFilter,
     CancelFileFilter,
-    ClearFileFilter,
+    AcceptSearch,
+    CancelSearch,
+    NextMatch,
+    PrevMatch,
 
     EnterVisual,
     LeaveVisual,

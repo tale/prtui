@@ -312,7 +312,7 @@ async fn event_loop(
                         }
                     }
                     Event::Paste(text) => {
-                        input.dispatch_paste(&mut app, text);
+                        input.dispatch_paste(&mut app, text, height);
                         is_dirty = true;
                     }
                     Event::Csi(Csi::Mode(CsiMode::ReportTheme(terminal_mode)))

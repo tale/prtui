@@ -39,20 +39,25 @@ impl Keymap {
         self.operator = None;
     }
 
-    pub fn resolve(&mut self, mode: Mode, filter_active: bool, key: KeyEvent) -> Resolution {
+    /// `find_active` is true while either find surface — the tree filter or the
+    /// diff search — holds a query, which is what escape clears.
+    pub fn resolve(&mut self, mode: Mode, find_active: bool, key: KeyEvent) -> Resolution {
         if mode == Mode::Insert {
             return self.resolve_insert(key);
         }
         if mode == Mode::Filter {
             return self.resolve_filter(key);
         }
+        if mode == Mode::Search {
+            return self.resolve_search(key);
+        }
 
         let KeyCode::Char(c) = key.code else {
-            return self.resolve_special(mode, filter_active, key);
+            return self.resolve_special(mode, find_active, key);
         };
 
         if key.modifiers == Modifiers::CONTROL {
-            return self.resolve_control(mode, filter_active, c);
+            return self.resolve_control(mode, find_active, c);
         }
 
         // Shift is represented both by the character's case and, depending on
@@ -95,8 +100,12 @@ impl Keymap {
             'G' => Action::Move(Motion::Bottom),
             ']' => Action::NextFile,
             '[' => Action::PrevFile,
+            'n' if mode == Mode::Normal => Action::NextMatch,
+            'N' if mode == Mode::Normal => Action::PrevMatch,
+            '}' if mode == Mode::Normal => Action::NextComment,
+            '{' if mode == Mode::Normal => Action::PrevComment,
             'f' => Action::ToggleTree,
-            '/' if mode == Mode::Normal => Action::StartFileFilter,
+            '/' if mode == Mode::Normal => Action::StartFind,
             'h' if mode == Mode::Normal => Action::FocusFiles,
             'l' if mode == Mode::Normal => Action::FocusDiff,
             'v' | 'V' => {
@@ -118,19 +127,19 @@ impl Keymap {
         Resolution::Action(action)
     }
 
-    fn resolve_control(&mut self, mode: Mode, filter_active: bool, c: char) -> Resolution {
+    fn resolve_control(&mut self, mode: Mode, find_active: bool, c: char) -> Resolution {
         self.clear();
 
         match c {
             'c' => Resolution::Action(Action::Quit),
             'd' => Resolution::Action(Action::Move(Motion::HalfPageDown)),
             'u' => Resolution::Action(Action::Move(Motion::HalfPageUp)),
-            '[' => Self::resolve_escape(mode, filter_active),
+            '[' => Self::resolve_escape(mode, find_active),
             _ => Resolution::Unbound,
         }
     }
 
-    fn resolve_special(&mut self, mode: Mode, filter_active: bool, key: KeyEvent) -> Resolution {
+    fn resolve_special(&mut self, mode: Mode, find_active: bool, key: KeyEvent) -> Resolution {
         self.clear();
 
         if key.modifiers != Modifiers::NONE {
@@ -139,7 +148,7 @@ impl Keymap {
 
         match key.code {
             KeyCode::Tab => Resolution::Action(Action::TogglePane),
-            KeyCode::Escape => Self::resolve_escape(mode, filter_active),
+            KeyCode::Escape => Self::resolve_escape(mode, find_active),
             KeyCode::Enter if mode == Mode::Normal => Resolution::Action(Action::Activate),
             KeyCode::Right if mode == Mode::Normal => Resolution::Action(Action::FocusDiff),
             KeyCode::Left if mode == Mode::Normal => Resolution::Action(Action::FocusFiles),
@@ -149,14 +158,41 @@ impl Keymap {
         }
     }
 
-    fn resolve_escape(mode: Mode, filter_active: bool) -> Resolution {
+    fn resolve_escape(mode: Mode, find_active: bool) -> Resolution {
         Resolution::Action(match mode {
-            Mode::Normal if filter_active => Action::ClearFileFilter,
+            Mode::Normal if find_active => Action::ClearFind,
             Mode::Normal => Action::Quit,
             Mode::Visual => Action::LeaveVisual,
             Mode::Insert => Action::CancelComment,
             Mode::Filter => Action::CancelFileFilter,
+            Mode::Search => Action::CancelSearch,
         })
+    }
+
+    /// Searching mirrors filtering: printable keys build the query while the
+    /// match-stepping and lifecycle keys stay application-level.
+    fn resolve_search(&mut self, key: KeyEvent) -> Resolution {
+        if key.modifiers == Modifiers::CONTROL {
+            return match key.code {
+                KeyCode::Char('c') => Resolution::Action(Action::Quit),
+                KeyCode::Char('[') => Resolution::Action(Action::CancelSearch),
+                KeyCode::Char('n') => Resolution::Action(Action::NextMatch),
+                KeyCode::Char('p') => Resolution::Action(Action::PrevMatch),
+                _ => Resolution::Unbound,
+            };
+        }
+
+        if key.modifiers != Modifiers::NONE {
+            return Resolution::Unbound;
+        }
+
+        match key.code {
+            KeyCode::Escape => Resolution::Action(Action::CancelSearch),
+            KeyCode::Enter => Resolution::Action(Action::AcceptSearch),
+            KeyCode::Down => Resolution::Action(Action::NextMatch),
+            KeyCode::Up => Resolution::Action(Action::PrevMatch),
+            _ => Resolution::Unbound,
+        }
     }
 
     /// Filtering is an editor state: printable keys and cursor edits are

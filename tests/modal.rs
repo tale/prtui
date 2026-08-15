@@ -370,14 +370,14 @@ fn paste_is_routed_only_to_an_open_composer() {
     let mut input = InputRouter::default();
 
     assert_eq!(
-        input.dispatch_paste(&mut app, "ignored".into()),
+        input.dispatch_paste(&mut app, "ignored".into(), 20),
         DispatchResult::Ignored
     );
 
     park_on_code(&mut app);
     press(&mut app, "c");
     assert_eq!(
-        input.dispatch_paste(&mut app, "pasted text".into()),
+        input.dispatch_paste(&mut app, "pasted text".into(), 20),
         DispatchResult::ForwardedToEditor
     );
     assert_eq!(app.composer.as_ref().unwrap().editor.text(), "pasted text");
@@ -440,7 +440,13 @@ fn escape_and_ctrl_bracket_both_cancel_the_composer() {
 fn ctrl_c_quits_from_every_mode() {
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), Modifiers::CONTROL);
 
-    for mode in [Mode::Normal, Mode::Visual, Mode::Insert, Mode::Filter] {
+    for mode in [
+        Mode::Normal,
+        Mode::Visual,
+        Mode::Insert,
+        Mode::Filter,
+        Mode::Search,
+    ] {
         let mut app = load();
         match mode {
             Mode::Normal => {}
@@ -449,7 +455,11 @@ fn ctrl_c_quits_from_every_mode() {
                 park_on_code(&mut app);
                 press(&mut app, "c");
             }
-            Mode::Filter => press(&mut app, "/"),
+            Mode::Filter => {
+                app.pane = Pane::Files;
+                press(&mut app, "/");
+            }
+            Mode::Search => press(&mut app, "/"),
         }
         assert_eq!(app.mode, mode);
 
@@ -533,6 +543,7 @@ fn pane_focus_has_tab_directional_and_enter_routes() {
 fn committed_filter_keeps_vim_navigation_over_matches() {
     let mut app = load();
     let mut input = InputRouter::default();
+    app.pane = Pane::Files;
 
     input.dispatch_key(
         &mut app,
@@ -617,12 +628,13 @@ fn escape_cancels_a_file_filter_and_enter_rejects_no_matches() {
     let mut app = load();
     let original_file = app.selected_file;
     let mut input = InputRouter::default();
+    app.pane = Pane::Files;
     input.dispatch_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
         20,
     );
-    input.dispatch_paste(&mut app, "nothing\nwill\rmatch".into());
+    input.dispatch_paste(&mut app, "nothing\nwill\rmatch".into(), 20);
     assert!(app.filtered_file_indices().is_empty());
 
     input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
@@ -640,13 +652,14 @@ fn escape_cancels_a_file_filter_and_enter_rejects_no_matches() {
 fn cancelling_an_edit_restores_the_committed_filter_and_selection() {
     let mut app = load();
     let mut input = InputRouter::default();
+    app.pane = Pane::Files;
 
     input.dispatch_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
         20,
     );
-    input.dispatch_paste(&mut app, "auth_check".into());
+    input.dispatch_paste(&mut app, "auth_check".into(), 20);
     input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
     app.selected_file = 2;
 
@@ -655,7 +668,7 @@ fn cancelling_an_edit_restores_the_committed_filter_and_selection() {
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
         20,
     );
-    input.dispatch_paste(&mut app, "_test".into());
+    input.dispatch_paste(&mut app, "_test".into(), 20);
     assert_eq!(app.filter_query().as_deref(), Some("auth_check_test"));
     assert_eq!(app.selected_file, 3);
 
@@ -673,18 +686,19 @@ fn escape_clears_a_committed_filter_before_quitting() {
         KeyEvent::new(KeyCode::Char('['), Modifiers::CONTROL),
     ] {
         let mut app = load();
+        app.pane = Pane::Files;
         let mut input = InputRouter::default();
         input.dispatch_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
             20,
         );
-        input.dispatch_paste(&mut app, "auth_check".into());
+        input.dispatch_paste(&mut app, "auth_check".into(), 20);
         input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
 
         assert_eq!(
             input.dispatch_key(&mut app, clear, 20),
-            DispatchResult::Applied(Action::ClearFileFilter)
+            DispatchResult::Applied(Action::ClearFind)
         );
         assert!(app.file_filter.is_none());
         assert!(!app.should_quit);
@@ -695,4 +709,288 @@ fn escape_clears_a_committed_filter_before_quitting() {
         );
         assert!(app.should_quit);
     }
+}
+
+#[test]
+fn comment_jump_crosses_files_and_skips_resolved_threads() {
+    let mut app = load();
+    app.selected_file = 0;
+    app.cursor = 0;
+    app.pane = Pane::Files;
+
+    let unresolved = app
+        .pr
+        .as_ref()
+        .unwrap()
+        .threads
+        .iter()
+        .find(|thread| !thread.is_resolved)
+        .unwrap()
+        .clone();
+
+    app.apply(Action::NextComment, 20);
+
+    assert_eq!(app.pane, Pane::Diff);
+    assert_eq!(app.files[app.selected_file].path, unresolved.path);
+    assert_eq!(app.focused_thread.as_deref(), Some(unresolved.id.as_str()));
+    assert!(unresolved.anchors_to(&app.files[app.selected_file].lines[app.cursor]));
+}
+
+#[test]
+fn comment_jump_reports_when_none_remain() {
+    let mut app = load();
+    app.selected_file = 0;
+    app.cursor = 0;
+
+    app.apply(Action::NextComment, 20);
+    let landed = app.selected_file;
+
+    app.apply(Action::NextComment, 20);
+
+    assert_eq!(app.selected_file, landed);
+    assert_eq!(app.status, "no more comments");
+}
+
+#[test]
+fn comment_jump_reverses_back_to_the_starting_file() {
+    let mut app = load();
+    app.selected_file = 0;
+    app.cursor = 0;
+
+    app.apply(Action::NextComment, 20);
+    assert_ne!(app.selected_file, 0);
+
+    app.apply(Action::PrevComment, 20);
+
+    assert_eq!(app.status, "no more comments");
+    assert!(app.focused_thread.is_some());
+}
+
+#[test]
+fn braces_jump_comments_and_n_repeats_the_search() {
+    let mut keymap = Keymap::default();
+    let normal = |character, modifiers| {
+        (
+            Mode::Normal,
+            KeyEvent::new(KeyCode::Char(character), modifiers),
+        )
+    };
+
+    for ((mode, key), expected) in [
+        (normal('}', Modifiers::NONE), Action::NextComment),
+        (normal('{', Modifiers::NONE), Action::PrevComment),
+        (normal('n', Modifiers::NONE), Action::NextMatch),
+        (normal('N', Modifiers::SHIFT), Action::PrevMatch),
+        (normal('/', Modifiers::NONE), Action::StartFind),
+    ] {
+        assert_eq!(
+            keymap.resolve(mode, false, key),
+            Resolution::Action(expected)
+        );
+    }
+
+    for character in ['n', '}'] {
+        assert_eq!(
+            keymap.resolve(
+                Mode::Visual,
+                false,
+                KeyEvent::new(KeyCode::Char(character), Modifiers::NONE)
+            ),
+            Resolution::Unbound
+        );
+    }
+}
+
+#[test]
+fn comment_jump_steps_through_every_thread_in_a_file() {
+    let mut app = load();
+    let file = app.files[app.selected_file].clone();
+
+    let rows: Vec<usize> = file
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.new_line.is_some())
+        .map(|(row, _)| row)
+        .take(3)
+        .collect();
+
+    let template = app.pr.as_ref().unwrap().threads[0].clone();
+    let threads: Vec<prtui::model::ReviewThread> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, &row)| prtui::model::ReviewThread {
+            id: format!("thread-{index}"),
+            path: file.path.clone(),
+            line: file.lines[row].new_line,
+            original_line: None,
+            is_resolved: false,
+            is_outdated: false,
+            ..template.clone()
+        })
+        .collect();
+    app.threads_by_path.insert(file.path.clone(), threads);
+
+    app.cursor = 0;
+    app.focused_thread = None;
+
+    for &row in &rows {
+        app.apply(Action::NextComment, 20);
+        assert_eq!(app.cursor, row);
+    }
+    assert_eq!(app.focused_thread.as_deref(), Some("thread-2"));
+
+    for &row in rows.iter().rev().skip(1) {
+        app.apply(Action::PrevComment, 20);
+        assert_eq!(app.cursor, row);
+    }
+    assert_eq!(app.focused_thread.as_deref(), Some("thread-0"));
+}
+
+fn search_for(app: &mut App, query: &str) -> InputRouter {
+    let mut input = InputRouter::default();
+
+    app.pane = Pane::Diff;
+    input.dispatch_key(app, KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE), 20);
+    input.dispatch_paste(app, query.into(), 20);
+
+    input
+}
+
+#[test]
+fn slash_filters_the_tree_from_the_files_pane_and_searches_from_the_diff() {
+    let mut app = load();
+    let mut input = InputRouter::default();
+
+    app.pane = Pane::Files;
+    input.dispatch_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+        20,
+    );
+    assert_eq!(app.mode, Mode::Filter);
+    input.dispatch_key(&mut app, KeyCode::Escape.into(), 20);
+
+    app.pane = Pane::Diff;
+    input.dispatch_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+        20,
+    );
+    assert_eq!(app.mode, Mode::Search);
+    assert!(app.file_filter.is_none());
+}
+
+#[test]
+fn search_finds_code_and_steps_through_matches_with_n() {
+    let mut app = load();
+    let needle = app.files[app.selected_file].lines[4]
+        .text
+        .trim()
+        .to_string();
+    let mut input = search_for(&mut app, &needle);
+
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    assert_eq!(app.mode, Mode::Normal);
+
+    let total = app.search_matches().len();
+    assert!(total >= 1, "the needle came from the file itself");
+
+    let (current, reported) = app.search_summary();
+    assert_eq!(reported, total);
+    assert!(current >= 1, "accepting a search lands on a match");
+
+    let first = app.cursor;
+    for _ in 0..total {
+        press(&mut app, "n");
+    }
+    assert_eq!(app.cursor, first, "n wraps back around the file");
+}
+
+#[test]
+fn search_matches_comment_bodies_and_focuses_the_thread() {
+    let mut app = load();
+    let thread = park_on_unresolved_thread(&mut app);
+    app.cursor = 0;
+    app.focused_thread = None;
+
+    let word = thread.comments[0]
+        .body
+        .split_whitespace()
+        .find(|word| word.len() > 5 && word.chars().all(char::is_alphanumeric))
+        .expect("fixture comment has a searchable word")
+        .to_string();
+
+    let mut input = search_for(&mut app, &word);
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+
+    let matches = app.search_matches();
+    assert!(
+        matches
+            .iter()
+            .any(|hit| hit.thread_id() == Some(thread.id.as_str())),
+        "the comment body should match"
+    );
+
+    while app.focused_thread.as_deref() != Some(thread.id.as_str()) {
+        press(&mut app, "n");
+    }
+    assert!(thread.anchors_to(&app.files[app.selected_file].lines[app.cursor]));
+}
+
+#[test]
+fn escape_restores_the_diff_position_the_search_previewed_away_from() {
+    let mut app = load();
+    app.cursor = 3;
+    app.diff_scroll = 1;
+    let needle = app.files[app.selected_file].lines[9]
+        .text
+        .trim()
+        .to_string();
+
+    let mut input = search_for(&mut app, &needle);
+    assert_eq!(app.cursor, 9, "typing previews the first match");
+
+    input.dispatch_key(&mut app, KeyCode::Escape.into(), 20);
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.cursor, 3);
+    assert_eq!(app.diff_scroll, 1);
+    assert!(app.search.is_none());
+}
+
+#[test]
+fn search_is_smartcase_and_escape_clears_a_committed_pattern() {
+    let mut app = load();
+    let lowered = app.files[app.selected_file].lines[4]
+        .text
+        .trim()
+        .to_lowercase();
+
+    let mut input = search_for(&mut app, &lowered);
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    let insensitive = app.search_matches().len();
+
+    let mut input = search_for(&mut app, &lowered.to_uppercase());
+    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    let sensitive = app.search_matches().len();
+
+    assert!(
+        insensitive > sensitive,
+        "an uppercase query must not match lowercase source"
+    );
+
+    press(&mut app, "n");
+    assert_eq!(
+        app.status,
+        format!("pattern not found: {}", lowered.to_uppercase())
+    );
+
+    let mut input = InputRouter::default();
+    input.dispatch_key(&mut app, KeyCode::Escape.into(), 20);
+    assert!(app.search.is_none());
+    assert!(
+        !app.should_quit,
+        "escape clears the pattern before quitting"
+    );
 }

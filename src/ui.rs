@@ -504,45 +504,51 @@ fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<Placement> {
             Span::styled(sigil, Style::default().bg(bg).fg(theme.dim)),
         ];
 
-        let mut used = GUTTER;
-        match styled.and_then(|s| s.get(index)).filter(|s| !s.is_empty()) {
-            Some(segments) => {
-                for segment in segments {
-                    let Some(source) = line.text.get(segment.range.clone()) else {
-                        continue;
-                    };
-                    let (text, display_width) = clip(
-                        source,
-                        width.saturating_sub(used),
-                        used.saturating_sub(GUTTER),
-                    );
-                    if text.is_empty() {
-                        break;
-                    }
-                    used += display_width;
+        let colored: Vec<Piece> = match styled.and_then(|s| s.get(index)).filter(|s| !s.is_empty())
+        {
+            Some(segments) => segments
+                .iter()
+                .map(|segment| Piece {
+                    range: segment.range.clone(),
+                    color: Color::Rgb(segment.color.0, segment.color.1, segment.color.2),
+                    is_emphasis: segment.is_emphasis,
+                    is_match: false,
+                })
+                .collect(),
+            None => vec![Piece {
+                range: 0..line.text.len(),
+                color: theme.code,
+                is_emphasis: false,
+                is_match: false,
+            }],
+        };
 
-                    let is_plain = !is_cursor && !is_selected;
-                    let seg_bg = if segment.is_emphasis && is_plain {
-                        strong_bg
-                    } else {
-                        bg
-                    };
-                    spans.push(Span::styled(
-                        text,
-                        Style::default().bg(seg_bg).fg(Color::Rgb(
-                            segment.color.0,
-                            segment.color.1,
-                            segment.color.2,
-                        )),
-                    ));
-                }
+        let mut used = GUTTER;
+        for piece in split_by_matches(colored, &app.line_match_ranges(index)) {
+            let Some(source) = line.text.get(piece.range.clone()) else {
+                continue;
+            };
+            let (text, display_width) = clip(
+                source,
+                width.saturating_sub(used),
+                used.saturating_sub(GUTTER),
+            );
+            if text.is_empty() {
+                break;
             }
-            None => {
-                let (text, display_width) =
-                    clip(&line.text, width.saturating_sub(used), used - GUTTER);
-                used += display_width;
-                spans.push(Span::styled(text, Style::default().bg(bg).fg(theme.code)));
-            }
+            used += display_width;
+
+            let is_plain = !is_cursor && !is_selected;
+            let seg_bg = match (piece.is_match, piece.is_emphasis && is_plain) {
+                (true, _) if is_cursor => theme.search_current,
+                (true, _) => theme.search,
+                (false, true) => strong_bg,
+                (false, false) => bg,
+            };
+            spans.push(Span::styled(
+                text,
+                Style::default().bg(seg_bg).fg(piece.color),
+            ));
         }
 
         spans.push(Span::styled(
@@ -572,6 +578,59 @@ fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<Placement> {
     let (lines, placements) = split_image_rows(rows, inner);
     frame.render_widget(Paragraph::new(lines), inner);
     placements
+}
+
+/// One run of diff text that shares a foreground color and a background role.
+struct Piece {
+    range: std::ops::Range<usize>,
+    color: Color,
+    is_emphasis: bool,
+    is_match: bool,
+}
+
+/// Cuts syntax runs at search-hit boundaries so a match repaints exactly the
+/// bytes it covers. `matches` must be sorted and non-overlapping, which is what
+/// the search produces.
+fn split_by_matches(colored: Vec<Piece>, matches: &[std::ops::Range<usize>]) -> Vec<Piece> {
+    if matches.is_empty() {
+        return colored;
+    }
+
+    let mut pieces = Vec::with_capacity(colored.len());
+    for piece in colored {
+        let mut at = piece.range.start;
+
+        for hit in matches {
+            let start = hit.start.max(piece.range.start);
+            let end = hit.end.min(piece.range.end);
+            if start >= end {
+                continue;
+            }
+
+            if at < start {
+                pieces.push(piece.slice(at..start, false));
+            }
+            pieces.push(piece.slice(start..end, true));
+            at = end;
+        }
+
+        if at < piece.range.end {
+            pieces.push(piece.slice(at..piece.range.end, false));
+        }
+    }
+
+    pieces
+}
+
+impl Piece {
+    fn slice(&self, range: std::ops::Range<usize>, is_match: bool) -> Self {
+        Self {
+            range,
+            color: self.color,
+            is_emphasis: self.is_emphasis,
+            is_match,
+        }
+    }
 }
 
 /// Splits rendered rows into the text the buffer draws and the image placements
@@ -1334,6 +1393,7 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect)
         Mode::Visual => theme.orange,
         Mode::Insert => theme.success,
         Mode::Filter => theme.purple,
+        Mode::Search => theme.warning,
     };
 
     let pane = match app.pane {
@@ -1341,10 +1401,19 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect)
         Pane::Diff => " diff",
     };
 
+    let show_search_position = app.search.is_some() && app.pane == Pane::Diff;
     let show_match_position = app.mode == Mode::Filter
         || (app.mode == Mode::Normal && app.pane == Pane::Files && app.file_filter.is_some());
-    let position = match (show_match_position, app.current_file()) {
-        (true, _) => {
+    let position = match (
+        show_search_position,
+        show_match_position,
+        app.current_file(),
+    ) {
+        (true, _, _) => {
+            let (current, total) = app.search_summary();
+            format!("  {current}/{total} matches")
+        }
+        (false, true, _) => {
             let matches = app.filtered_file_indices();
             let selected = matches
                 .iter()
@@ -1352,14 +1421,14 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect)
                 .map_or(0, |position| position + 1);
             format!("  {selected}/{} matches", matches.len())
         }
-        (false, Some(file)) => format!(
+        (false, false, Some(file)) => format!(
             "  {}/{} · {}/{}",
             app.selected_file + 1,
             app.files.len(),
             (app.cursor + 1).min(file.lines.len().max(1)),
             file.lines.len()
         ),
-        (false, None) => String::new(),
+        (false, false, None) => String::new(),
     };
 
     let mut spans = vec![
@@ -1371,8 +1440,20 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(pane, bar.fg(theme.dim)),
-        Span::styled(position, bar.fg(theme.muted)),
     ];
+
+    let mut search_column = None;
+    if let Some(editor) = app.search.as_ref() {
+        let query = editor.lines()[0].clone();
+        let (_, cursor_byte) = editor.cursor();
+
+        search_column =
+            Some(Line::from(spans.clone()).width() + 3 + terminal_width(&query[..cursor_byte]));
+        spans.push(Span::styled("  /", bar.fg(theme.warning)));
+        spans.push(Span::styled(query, bar.fg(theme.heading)));
+    }
+
+    spans.push(Span::styled(position, bar.fg(theme.muted)));
 
     if let Some(selection) = app.selection {
         spans.push(Span::styled(
@@ -1428,13 +1509,21 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect)
     let left_width = left.width();
     frame.render_widget(Paragraph::new(left), area);
 
+    if app.mode == Mode::Search
+        && let Some(column) = search_column.filter(|column| *column < area.width as usize)
+    {
+        frame.set_cursor_position((area.x + column as u16, area.y));
+    }
+
     let keys: &[(&str, &str)] = match (app.mode, app.pane) {
         (Mode::Filter, _) => &[("↑↓", "select"), ("↵", "apply"), ("esc", "cancel")],
+        (Mode::Search, _) => &[("↑↓", "step"), ("↵", "accept"), ("esc", "cancel")],
         (Mode::Insert, _) => &[("^s", "save"), ("esc", "cancel")],
         (Mode::Visual, _) => &[("j/k", "extend"), ("c", "comment"), ("esc", "cancel")],
         (Mode::Normal, Pane::Files) => &[
             ("j/k", "move"),
             ("↵", "open"),
+            ("}", "comments"),
             if app.file_filter.is_some() {
                 ("/", "edit filter")
             } else {
@@ -1462,10 +1551,21 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, pending_hint: &str, area: Rect)
                     "expand"
                 },
             ),
+            ("}", "next comment"),
             ("esc", "code"),
             ("⇥", "files"),
         ],
-        (Mode::Normal, Pane::Diff) => &[("j/k", "move"), ("c", "comment"), ("⇥", "files")],
+        (Mode::Normal, Pane::Diff) if app.search.is_some() => &[
+            ("n/N", "next match"),
+            ("}", "next comment"),
+            ("esc", "clear"),
+        ],
+        (Mode::Normal, Pane::Diff) => &[
+            ("j/k", "move"),
+            ("/", "search"),
+            ("}", "next comment"),
+            ("c", "comment"),
+        ],
     };
 
     let available = (area.width as usize).saturating_sub(left_width + 2);

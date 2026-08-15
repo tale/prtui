@@ -10,6 +10,8 @@ pub enum Mode {
     Insert,
     /// Editing the file tree's path filter.
     Filter,
+    /// Typing a query against the open file's code and comments.
+    Search,
 }
 
 impl Mode {
@@ -19,6 +21,7 @@ impl Mode {
             Mode::Visual => " VISUAL ",
             Mode::Insert => " INSERT ",
             Mode::Filter => " FILTER ",
+            Mode::Search => " SEARCH ",
         }
     }
 }

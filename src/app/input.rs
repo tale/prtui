@@ -33,7 +33,7 @@ impl InputRouter {
         viewport_height: usize,
     ) -> DispatchResult {
         let mode = app.mode;
-        let filter_active = app.file_filter.is_some();
+        let find_active = app.file_filter.is_some() || app.search.is_some();
         self.sync_mode(mode);
 
         let leaves_thread = mode == Mode::Normal
@@ -48,7 +48,7 @@ impl InputRouter {
             return DispatchResult::Applied(action);
         }
 
-        match self.keymap.resolve(mode, filter_active, key) {
+        match self.keymap.resolve(mode, find_active, key) {
             Resolution::Action(action) => {
                 app.apply(action.clone(), viewport_height);
                 self.sync_mode(app.mode);
@@ -72,11 +72,25 @@ impl InputRouter {
                 app.sync_file_filter();
                 DispatchResult::ForwardedToEditor
             }
+            Resolution::Unbound if mode == Mode::Search => {
+                let Some(search) = app.search.as_mut() else {
+                    return DispatchResult::Ignored;
+                };
+
+                search.handle_key(key);
+                app.sync_search(viewport_height);
+                DispatchResult::ForwardedToEditor
+            }
             Resolution::Unbound => DispatchResult::Ignored,
         }
     }
 
-    pub fn dispatch_paste(&mut self, app: &mut App, text: String) -> DispatchResult {
+    pub fn dispatch_paste(
+        &mut self,
+        app: &mut App,
+        text: String,
+        viewport_height: usize,
+    ) -> DispatchResult {
         self.sync_mode(app.mode);
 
         match app.mode {
@@ -93,6 +107,14 @@ impl InputRouter {
                 };
                 filter.insert_text(&text.replace(['\r', '\n'], ""));
                 app.sync_file_filter();
+                DispatchResult::ForwardedToEditor
+            }
+            Mode::Search => {
+                let Some(search) = app.search.as_mut() else {
+                    return DispatchResult::Ignored;
+                };
+                search.insert_text(&text.replace(['\r', '\n'], ""));
+                app.sync_search(viewport_height);
                 DispatchResult::ForwardedToEditor
             }
             Mode::Normal | Mode::Visual => DispatchResult::Ignored,
