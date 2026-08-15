@@ -1,20 +1,15 @@
-# clippy runs before fmt: its rewrites are not formatted, so fmt has to clean up
-# after them. stage_fixed re-adds what each job touched, otherwise the fix lands
-# in the worktree and the commit still carries the broken version.
-
 pre-commit:
   piped: true
   jobs:
-    - name: clippy
-      glob:
-        - "*.rs"
-        - "Cargo.toml"
-      run: cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings
-      stage_fixed: true
-
     - name: fmt
       glob:
         - "*.rs"
         - "rustfmt.toml"
       run: cargo fmt --all
       stage_fixed: true
+
+    - name: clippy
+      glob:
+        - "*.rs"
+        - "Cargo.toml"
+      run: cargo clippy --all-targets --all-features -- -D warnings

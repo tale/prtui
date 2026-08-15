@@ -13,6 +13,6 @@ description = "Clippy across all targets, warnings denied"
 run = "cargo clippy --all-targets --all-features -- -D warnings"
 
 [tasks.check]
-description = "Everything the pre-commit hook runs, plus the tests"
+description = "Everything CI runs"
 depends = ["lint"]
-run = ["cargo fmt --all -- --check", "cargo test"]
+run = ["cargo fmt --all -- --check", "cargo test --all-features"]
