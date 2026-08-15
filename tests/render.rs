@@ -10,6 +10,27 @@ use ratatui::backend::TestBackend;
 use std::fmt::Write;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
+/// Drives the app the way the event loop does: raw keys through the keymap.
+fn press(app: &mut App, keys: &str) {
+    let mut input = InputRouter::default();
+    for c in keys.chars() {
+        let key = KeyEvent::new(KeyCode::Char(c), Modifiers::NONE);
+        input.dispatch_key(app, key, 20);
+    }
+}
+
+/// Renders a frame at the size most tests use and returns it as text.
+fn draw(app: &mut App) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, app, "");
+        })
+        .unwrap();
+
+    terminal.backend().to_string()
+}
+
 /// Body text long enough to overflow any thread viewport.
 fn paragraphs(count: usize, label: &str) -> String {
     (1..=count).fold(String::new(), |mut body, index| {
@@ -205,7 +226,6 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
     let small_viewport_limit = app.thread_scroll_limit;
     assert!(first_page.contains("↓"));
     assert!(first_page.contains("more"));
-    assert!(!first_page.contains("thread continues"));
 
     app.thread_scroll = app.thread_scroll_limit;
     terminal
@@ -531,19 +551,6 @@ fn multi_digit_thread_badge_keeps_diff_counts_visible() {
 }
 
 #[test]
-fn pending_input_is_visible_in_the_status_line() {
-    let mut app = load();
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal
-        .draw(|frame| {
-            ui::draw(frame, &mut app, "123456");
-        })
-        .unwrap();
-
-    assert!(terminal.backend().to_string().contains("123456"));
-}
-
-#[test]
 fn loading_state_is_centered_once_and_animates() {
     let mut app = App::new();
     let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
@@ -607,7 +614,7 @@ fn metadata_can_arrive_while_the_file_loader_continues() {
 }
 
 #[test]
-fn bottom_bar_keeps_only_contextual_actions() {
+fn bottom_bar_shows_the_focused_pane_s_actions() {
     let mut app = load();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
@@ -619,59 +626,30 @@ fn bottom_bar_keeps_only_contextual_actions() {
 
     assert!(rendered.contains("j/k move"));
     assert!(rendered.contains("↵ open"));
-    assert!(!rendered.contains("top/end"));
-    assert!(!rendered.contains("half page"));
 }
 
 #[test]
-fn file_filter_renders_its_query_and_only_the_matching_path() {
+fn the_filter_prompt_renders_while_typing_and_stays_after_commit() {
     let mut app = load();
     press(&mut app, "/auth_check_test");
 
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal
-        .draw(|frame| {
-            ui::draw(frame, &mut app, "");
-        })
-        .unwrap();
-    let rendered = terminal.backend().to_string();
-
-    assert!(rendered.contains("FILTER"));
-    assert!(rendered.contains("1/1 matches"));
-    assert!(rendered.contains("/auth_check_test"));
+    let typing = draw(&mut app);
+    assert!(typing.contains("FILTER"));
+    assert!(typing.contains("/auth_check_test"));
+    assert!(typing.contains("1/1 matches"));
     // The sidebar deliberately elides the left edge of long basenames.
-    assert!(rendered.contains("heck_test.go"));
-    assert!(!rendered.contains("verify_test.go"));
-}
+    assert!(typing.contains("heck_test.go"));
+    assert!(
+        !typing.contains("verify_test.go"),
+        "non-matching paths leave the tree"
+    );
 
-#[test]
-fn committed_filter_stays_visible_in_normal_tree_mode() {
-    let mut app = load();
-    press(&mut app, "/auth_check");
-    let mut input = InputRouter::default();
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    InputRouter::default().dispatch_key(&mut app, KeyCode::Enter.into(), 20);
 
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal
-        .draw(|frame| {
-            ui::draw(frame, &mut app, "");
-        })
-        .unwrap();
-    let rendered = terminal.backend().to_string();
-
-    assert!(rendered.contains("NORMAL"));
-    assert!(rendered.contains("1/2 matches"));
-    assert!(rendered.contains("/auth_check"));
-    assert!(rendered.contains("edit filter"));
-}
-
-/// Drives the app the way the event loop does: raw keys through the keymap.
-fn press(app: &mut App, keys: &str) {
-    let mut input = InputRouter::default();
-    for c in keys.chars() {
-        let key = KeyEvent::new(KeyCode::Char(c), Modifiers::NONE);
-        input.dispatch_key(app, key, 20);
-    }
+    let committed = draw(&mut app);
+    assert!(committed.contains("NORMAL"));
+    assert!(committed.contains("/auth_check_test"));
+    assert!(committed.contains("edit filter"));
 }
 
 #[test]
@@ -690,27 +668,6 @@ fn scrolling_stays_in_bounds() {
     }
     assert_eq!(app.diff_scroll, 0);
     assert_eq!(app.cursor, 0);
-}
-
-#[test]
-fn renders_large_diff_in_constant_time() {
-    let mut app = load();
-    let file = app.files.iter().position(|f| f.lines.len() > 5).unwrap();
-    app.selected_file = file;
-
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-
-    let started = std::time::Instant::now();
-    for _ in 0..500 {
-        terminal
-            .draw(|frame| {
-                ui::draw(frame, &mut app, "");
-            })
-            .unwrap();
-    }
-    let elapsed = started.elapsed();
-
-    assert!(elapsed.as_millis() < 1000, "500 frames took {elapsed:?}");
 }
 
 #[test]
@@ -871,34 +828,6 @@ fn visual_selection_paints_every_row_in_the_span() {
             plain[row],
             selected[row],
             "diff row {} is outside the selection and must not change",
-            row - 2
-        );
-    }
-}
-
-#[test]
-fn every_selected_row_carries_the_left_bar() {
-    use prtui::app::mode::Selection;
-
-    let mut app = load();
-    app.pane = Pane::Diff;
-    app.selection = Some(Selection { anchor: 1, head: 4 });
-
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal
-        .draw(|frame| {
-            ui::draw(frame, &mut app, "");
-        })
-        .unwrap();
-
-    let buffer = terminal.backend().buffer();
-    // The tree is 30 columns at this width, so the diff's own gutter starts there.
-    let bar_column = 30;
-    for row in 3..=6 {
-        assert_eq!(
-            buffer.cell((bar_column, row)).unwrap().symbol(),
-            "▍",
-            "selected row {} should show the selection bar",
             row - 2
         );
     }

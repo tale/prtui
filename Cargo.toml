@@ -5,6 +5,7 @@ edition = "2024"
 description = "A terminal UI for reviewing GitHub pull requests"
 license = "MIT"
 repository = "https://github.com/tale/prtui"
+readme = "README.md"
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["github", "pull-request", "review", "tui"]
 
