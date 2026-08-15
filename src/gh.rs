@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
-const THREADS_QUERY: &str = r#"
+const THREADS_QUERY: &str = r"
 query($owner:String!, $repo:String!, $number:Int!) {
   repository(owner:$owner, name:$repo) {
     pullRequest(number:$number) {
@@ -18,7 +18,7 @@ query($owner:String!, $repo:String!, $number:Int!) {
     }
   }
 }
-"#;
+";
 
 #[derive(Clone)]
 pub struct Repo {
@@ -30,7 +30,8 @@ pub struct Repo {
 impl Repo {
     /// Accepts `OWNER/REPO` or `HOST/OWNER/REPO`, matching `gh -R`.
     pub fn parse(slug: &str) -> Result<Self> {
-        let parts: Vec<&str> = slug.trim().split('/').filter(|s| !s.is_empty()).collect();
+        let parts: Vec<&str> =
+            slug.trim().split('/').filter(|s| !s.is_empty()).collect();
 
         let (host, owner, name) = match parts.as_slice() {
             [owner, name] => (None, *owner, *name),
@@ -70,7 +71,10 @@ async fn run(args: &[String]) -> Result<Vec<u8>> {
 
 /// Changed files with their unified-diff patches. Measured faster than the
 /// `Accept: v3.diff` endpoint, and arrives pre-split per file.
-pub async fn fetch_files(repo: &Repo, number: u32) -> Result<serde_json::Value> {
+pub async fn fetch_files(
+    repo: &Repo,
+    number: u32,
+) -> Result<serde_json::Value> {
     let path = format!(
         "/repos/{}/{}/pulls/{number}/files?per_page=100",
         repo.owner, repo.name
@@ -107,8 +111,8 @@ pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<serde_json::Value> {
 
     let raw = run(&args).await?;
 
-    let val: serde_json::Value =
-        serde_json::from_slice(&raw).context("failed to parse graphql response")?;
+    let val: serde_json::Value = serde_json::from_slice(&raw)
+        .context("failed to parse graphql response")?;
 
     if let Some(errors) = val.get("errors") {
         bail!("graphql error: {errors}");

@@ -23,7 +23,7 @@ enum Piece {
 }
 
 impl Piece {
-    fn is_content(&self) -> bool {
+    const fn is_content(&self) -> bool {
         !matches!(self, Self::Line(line) if line.spans.is_empty())
     }
 }
@@ -189,7 +189,11 @@ impl Builder {
                 self.finish_line();
                 self.item_depth += 1;
                 let indent = "  ".repeat(self.lists.len().saturating_sub(1));
-                let marker = match self.lists.last_mut().and_then(|list| list.next.as_mut()) {
+                let marker = match self
+                    .lists
+                    .last_mut()
+                    .and_then(|list| list.next.as_mut())
+                {
                     Some(next) => {
                         let marker = format!("{next}. ");
                         *next += 1;
@@ -209,7 +213,7 @@ impl Builder {
                     Style::default().fg(self.theme.muted),
                 );
             }
-            Tag::Table(_) => {
+            Tag::Table(_) | Tag::TableRow => {
                 self.finish_line();
                 self.table_cell = 0;
             }
@@ -217,10 +221,6 @@ impl Builder {
                 self.finish_line();
                 self.table_cell = 0;
                 self.table_header = true;
-            }
-            Tag::TableRow => {
-                self.finish_line();
-                self.table_cell = 0;
             }
             Tag::TableCell => {
                 if self.table_cell > 0 {
@@ -311,7 +311,6 @@ impl Builder {
                 self.finish_line();
                 self.table_header = false;
             }
-            TagEnd::TableRow => self.finish_line(),
             TagEnd::Table => self.blank_line(),
             TagEnd::Image => {
                 if let Some(image) = self.image.take() {
@@ -325,7 +324,9 @@ impl Builder {
             | TagEnd::Superscript
             | TagEnd::Subscript
             | TagEnd::DefinitionListTitle => self.pop_style(),
-            TagEnd::DefinitionListDefinition => self.finish_line(),
+            TagEnd::DefinitionListDefinition | TagEnd::TableRow => {
+                self.finish_line();
+            }
             TagEnd::DefinitionList
             | TagEnd::TableCell
             | TagEnd::HtmlBlock
@@ -385,8 +386,11 @@ impl Builder {
                 return;
             };
             let content_start = summary_start + content_start + 1;
-            if let Some(content_end) = lower[content_start..].find("</summary>") {
-                let text = strip_html(&raw[content_start..content_start + content_end]);
+            if let Some(content_end) = lower[content_start..].find("</summary>")
+            {
+                let text = strip_html(
+                    &raw[content_start..content_start + content_end],
+                );
                 self.append(
                     format!("▾ {text}"),
                     Style::default()
@@ -411,7 +415,9 @@ impl Builder {
             self.finish_line();
             return;
         }
-        if lower.trim().starts_with("<details") || lower.trim().starts_with("</details") {
+        if lower.trim().starts_with("<details")
+            || lower.trim().starts_with("</details")
+        {
             return;
         }
 
@@ -428,17 +434,24 @@ impl Builder {
         match event {
             Event::Start(tag) => self.start_tag(tag),
             Event::End(tag) => self.end_tag(tag),
-            Event::Text(text) if self.code_language.is_some() => self.code_text(&text),
-            Event::Text(text) => match image_link(&text).filter(|_| self.image.is_none()) {
-                Some(url) => self.push_image(url, String::new()),
-                None => self.append_current(text.into_string()),
-            },
+            Event::Text(text) if self.code_language.is_some() => {
+                self.code_text(&text);
+            }
+            Event::Text(text) => {
+                match image_link(&text).filter(|_| self.image.is_none()) {
+                    Some(url) => self.push_image(url, String::new()),
+                    None => self.append_current(text.into_string()),
+                }
+            }
             Event::Code(code) => self.append(
                 code.into_string(),
                 self.style.fg(self.theme.orange).bg(self.theme.cursor),
             ),
             Event::InlineMath(math) | Event::DisplayMath(math) => {
-                self.append(math.into_string(), self.style.fg(self.theme.orange));
+                self.append(
+                    math.into_string(),
+                    self.style.fg(self.theme.orange),
+                );
             }
             Event::Html(html) | Event::InlineHtml(html) => self.html(&html),
             Event::FootnoteReference(label) => self.append(
@@ -449,7 +462,10 @@ impl Builder {
             Event::HardBreak => self.finish_line(),
             Event::Rule => {
                 self.finish_line();
-                self.append("─".repeat(12), Style::default().fg(self.theme.dim));
+                self.append(
+                    "─".repeat(12),
+                    Style::default().fg(self.theme.dim),
+                );
                 self.finish_line();
             }
             Event::TaskListMarker(checked) => self.append(
@@ -496,7 +512,9 @@ pub fn render(body: &str, width: usize, theme: Theme) -> Vec<Line<'static>> {
         .into_iter()
         .flat_map(|block| match block {
             Block::Text(line) => vec![line],
-            Block::Image { url, alt } => image_lines(&url, &alt, None, width, theme),
+            Block::Image { url, alt } => {
+                image_lines(&url, &alt, None, width, theme)
+            }
         })
         .collect()
 }
@@ -567,7 +585,10 @@ fn image_link(text: &str) -> Option<String> {
     const EXTENSIONS: [&str; 5] = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
 
     let url = text.trim();
-    if url.is_empty() || url.contains(char::is_whitespace) || !url.starts_with("https://") {
+    if url.is_empty()
+        || url.contains(char::is_whitespace)
+        || !url.starts_with("https://")
+    {
         return None;
     }
 
@@ -598,7 +619,10 @@ fn img_tags(raw: &str) -> Vec<(String, String)> {
         let Some(url) = attribute(&raw[start..end], "src") else {
             continue;
         };
-        tags.push((url, attribute(&raw[start..end], "alt").unwrap_or_default()));
+        tags.push((
+            url,
+            attribute(&raw[start..end], "alt").unwrap_or_default(),
+        ));
     }
 
     tags
@@ -607,7 +631,8 @@ fn img_tags(raw: &str) -> Vec<(String, String)> {
 /// Lowercasing is byte-length preserving for ASCII, so offsets found in the
 /// lowered copy index the original safely.
 fn attribute(tag: &str, name: &str) -> Option<String> {
-    let start = tag.to_ascii_lowercase().find(&format!("{name}="))? + name.len() + 1;
+    let start =
+        tag.to_ascii_lowercase().find(&format!("{name}="))? + name.len() + 1;
     let value = tag.get(start..)?;
 
     let quote = value.chars().next()?;
@@ -649,7 +674,8 @@ fn wrap_line(line: StyledLine, width: usize) -> Vec<Line<'static>> {
                 pending_space = None;
             }
 
-            if let Some(space_style) = pending_space.take().filter(|_| used > 0) {
+            if let Some(space_style) = pending_space.take().filter(|_| used > 0)
+            {
                 push_span(&mut current, " ", space_style);
                 used += 1;
             }
@@ -670,13 +696,17 @@ fn wrap_line(line: StyledLine, width: usize) -> Vec<Line<'static>> {
     rows
 }
 
-fn wrap_preserving_whitespace(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
+fn wrap_preserving_whitespace(
+    spans: Vec<Span<'static>>,
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut rows = Vec::new();
     let mut current = Vec::new();
     let mut used = 0;
     for span in spans {
         for character in span.content.chars() {
-            let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+            let character_width =
+                UnicodeWidthChar::width(character).unwrap_or(0);
             if used > 0 && used + character_width > width {
                 rows.push(Line::from(std::mem::take(&mut current)));
                 used = 0;
@@ -710,7 +740,11 @@ fn push_hard_wrapped(
     }
 }
 
-fn push_span(spans: &mut Vec<Span<'static>>, text: impl Into<String>, style: Style) {
+fn push_span(
+    spans: &mut Vec<Span<'static>>,
+    text: impl Into<String>,
+    style: Style,
+) {
     let text = text.into();
     if text.is_empty() {
         return;
@@ -788,12 +822,15 @@ mod tests {
             "Minor and important with code and obsolete"
         );
 
-        let spans: Vec<&Span<'_>> = lines.iter().flat_map(|line| &line.spans).collect();
+        let spans: Vec<&Span<'_>> =
+            lines.iter().flat_map(|line| &line.spans).collect();
         assert!(spans.iter().any(|span| {
-            span.content.contains("Minor") && span.style.add_modifier.contains(Modifier::ITALIC)
+            span.content.contains("Minor")
+                && span.style.add_modifier.contains(Modifier::ITALIC)
         }));
         assert!(spans.iter().any(|span| {
-            span.content.contains("important") && span.style.add_modifier.contains(Modifier::BOLD)
+            span.content.contains("important")
+                && span.style.add_modifier.contains(Modifier::BOLD)
         }));
         assert!(spans.iter().any(|span| {
             span.content.contains("obsolete")
@@ -803,7 +840,7 @@ mod tests {
 
     #[test]
     fn renders_gfm_details_tasks_and_diff_blocks() {
-        let markdown = r#"<details>
+        let markdown = r"<details>
 <summary>Proposed fix</summary>
 
 - [x] handled
@@ -812,7 +849,7 @@ mod tests {
 -old
 +new
 ```
-</details>"#;
+</details>";
         let lines = render(markdown, 80, Theme::dark());
         let text = rendered_text(&lines);
 

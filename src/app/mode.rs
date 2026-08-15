@@ -15,13 +15,13 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
-            Mode::Normal => " NORMAL ",
-            Mode::Visual => " VISUAL ",
-            Mode::Insert => " INSERT ",
-            Mode::Filter => " FILTER ",
-            Mode::Search => " SEARCH ",
+            Self::Normal => " NORMAL ",
+            Self::Visual => " VISUAL ",
+            Self::Insert => " INSERT ",
+            Self::Filter => " FILTER ",
+            Self::Search => " SEARCH ",
         }
     }
 }
@@ -34,7 +34,7 @@ pub struct Selection {
 }
 
 impl Selection {
-    pub fn at(row: usize) -> Self {
+    pub const fn at(row: usize) -> Self {
         Self {
             anchor: row,
             head: row,

@@ -126,7 +126,7 @@ impl App {
         !self.files_loaded
     }
 
-    pub fn advance_loading(&mut self) {
+    pub const fn advance_loading(&mut self) {
         self.loading_frame = self.loading_frame.wrapping_add(1);
     }
 
@@ -167,7 +167,7 @@ impl App {
     }
 
     pub fn diff_len(&self) -> usize {
-        self.current_file().map(|f| f.lines.len()).unwrap_or(0)
+        self.current_file().map_or(0, |f| f.lines.len())
     }
 
     pub fn ensure_highlighted(&mut self) {
@@ -192,11 +192,11 @@ impl App {
     pub fn highlighted(&self) -> Option<&[Vec<Segment>]> {
         self.highlights
             .get(&self.selected_file)
-            .map(|v| v.as_slice())
+            .map(std::vec::Vec::as_slice)
     }
 
-    pub fn apply(&mut self, action: Action, viewport_height: usize) {
-        match action {
+    pub fn apply(&mut self, action: &Action, viewport_height: usize) {
+        match *action {
             Action::Quit => self.should_quit = true,
             Action::TogglePane => self.toggle_pane(),
             Action::ToggleTree => {
@@ -308,14 +308,17 @@ impl App {
             selected_file: self.selected_file,
         });
         match query {
-            Some(query) => self.file_filter.get_or_insert_default().set_text(query),
+            Some(query) => {
+                self.file_filter.get_or_insert_default().set_text(query);
+            }
             None => self.file_filter = Some(CommentEditor::default()),
         }
         self.mode = Mode::Filter;
     }
 
     fn accept_file_filter(&mut self) {
-        if self.mode != Mode::Filter || self.filtered_file_indices().is_empty() {
+        if self.mode != Mode::Filter || self.filtered_file_indices().is_empty()
+        {
             return;
         }
 
@@ -367,7 +370,8 @@ impl App {
         self.search_origin = None;
         self.mode = Mode::Normal;
 
-        let Some(query) = self.search_query().filter(|query| !query.is_empty()) else {
+        let Some(query) = self.search_query().filter(|query| !query.is_empty())
+        else {
             self.search = None;
             return;
         };
@@ -428,7 +432,8 @@ impl App {
     /// Every hit in the open file, ordered the way the diff renders them: a code
     /// line, then the threads that hang beneath it.
     pub fn search_matches(&self) -> Vec<search::Match> {
-        let Some(query) = self.search_query().filter(|query| !query.is_empty()) else {
+        let Some(query) = self.search_query().filter(|query| !query.is_empty())
+        else {
             return Vec::new();
         };
         let Some(file) = self.current_file() else {
@@ -453,12 +458,12 @@ impl App {
                 matches.push(search::Match::Line(row));
             }
 
-            matches.extend(hits.iter().filter(|(hit, _)| *hit == row).map(|(_, id)| {
-                search::Match::Thread {
+            matches.extend(hits.iter().filter(|(hit, _)| *hit == row).map(
+                |(_, id)| search::Match::Thread {
                     row,
                     id: id.clone(),
-                }
-            }));
+                },
+            ));
         }
 
         matches
@@ -468,17 +473,21 @@ impl App {
     /// position means the cursor is currently between matches.
     pub fn search_summary(&self) -> (usize, usize) {
         let matches = self.search_matches();
-        let current = self.match_position(&matches).map_or(0, |index| index + 1);
+        let current =
+            self.match_position(&matches).map_or(0, |index| index + 1);
 
         (current, matches.len())
     }
 
     /// Byte ranges to paint on one diff row, for the renderer.
     pub fn line_match_ranges(&self, row: usize) -> Vec<std::ops::Range<usize>> {
-        let Some(query) = self.search_query().filter(|query| !query.is_empty()) else {
+        let Some(query) = self.search_query().filter(|query| !query.is_empty())
+        else {
             return Vec::new();
         };
-        let Some(line) = self.current_file().and_then(|file| file.lines.get(row)) else {
+        let Some(line) =
+            self.current_file().and_then(|file| file.lines.get(row))
+        else {
             return Vec::new();
         };
 
@@ -487,12 +496,14 @@ impl App {
 
     fn match_position(&self, matches: &[search::Match]) -> Option<usize> {
         matches.iter().position(|hit| {
-            hit.row() == self.cursor && hit.thread_id() == self.focused_thread.as_deref()
+            hit.row() == self.cursor
+                && hit.thread_id() == self.focused_thread.as_deref()
         })
     }
 
     fn jump_match(&mut self, direction: isize, viewport_height: usize) {
-        let Some(query) = self.search_query().filter(|query| !query.is_empty()) else {
+        let Some(query) = self.search_query().filter(|query| !query.is_empty())
+        else {
             self.status = "no search pattern".into();
             return;
         };
@@ -539,7 +550,9 @@ impl App {
         self.files
             .iter()
             .enumerate()
-            .filter_map(|(index, file)| file.path.to_lowercase().contains(&query).then_some(index))
+            .filter_map(|(index, file)| {
+                file.path.to_lowercase().contains(&query).then_some(index)
+            })
             .collect()
     }
 
@@ -602,7 +615,8 @@ impl App {
         let Some(id) = self.focused_thread.clone() else {
             return;
         };
-        self.expanded_thread = (self.expanded_thread.as_deref() != Some(&id)).then_some(id);
+        self.expanded_thread =
+            (self.expanded_thread.as_deref() != Some(&id)).then_some(id);
         self.thread_scroll = 0;
         self.thread_scroll_limit = 0;
 
@@ -703,8 +717,12 @@ impl App {
                 let target = match motion {
                     Motion::Down(n) => position.saturating_add(n),
                     Motion::Up(n) => position.saturating_sub(n),
-                    Motion::HalfPageDown => position.saturating_add(viewport_height / 2),
-                    Motion::HalfPageUp => position.saturating_sub(viewport_height / 2),
+                    Motion::HalfPageDown => {
+                        position.saturating_add(viewport_height / 2)
+                    }
+                    Motion::HalfPageUp => {
+                        position.saturating_sub(viewport_height / 2)
+                    }
                     Motion::Top => 0,
                     Motion::Bottom => matches.len().saturating_sub(1),
                 }
@@ -716,8 +734,12 @@ impl App {
             let target = match motion {
                 Motion::Down(n) => self.selected_file.saturating_add(n),
                 Motion::Up(n) => self.selected_file.saturating_sub(n),
-                Motion::HalfPageDown => self.selected_file.saturating_add(viewport_height / 2),
-                Motion::HalfPageUp => self.selected_file.saturating_sub(viewport_height / 2),
+                Motion::HalfPageDown => {
+                    self.selected_file.saturating_add(viewport_height / 2)
+                }
+                Motion::HalfPageUp => {
+                    self.selected_file.saturating_sub(viewport_height / 2)
+                }
                 Motion::Top => 0,
                 Motion::Bottom => self.files.len().saturating_sub(1),
             };
@@ -731,8 +753,12 @@ impl App {
             self.cursor = match motion {
                 Motion::Down(n) => self.cursor.saturating_add(n).min(last),
                 Motion::Up(n) => self.cursor.saturating_sub(n),
-                Motion::HalfPageDown => self.cursor.saturating_add(viewport_height / 2).min(last),
-                Motion::HalfPageUp => self.cursor.saturating_sub(viewport_height / 2),
+                Motion::HalfPageDown => {
+                    self.cursor.saturating_add(viewport_height / 2).min(last)
+                }
+                Motion::HalfPageUp => {
+                    self.cursor.saturating_sub(viewport_height / 2)
+                }
                 Motion::Top => 0,
                 Motion::Bottom => last,
             };
@@ -740,8 +766,12 @@ impl App {
             self.thread_scroll = match motion {
                 Motion::Down(n) => self.thread_scroll.saturating_add(n),
                 Motion::Up(n) => self.thread_scroll.saturating_sub(n),
-                Motion::HalfPageDown => self.thread_scroll.saturating_add(viewport_height / 2),
-                Motion::HalfPageUp => self.thread_scroll.saturating_sub(viewport_height / 2),
+                Motion::HalfPageDown => {
+                    self.thread_scroll.saturating_add(viewport_height / 2)
+                }
+                Motion::HalfPageUp => {
+                    self.thread_scroll.saturating_sub(viewport_height / 2)
+                }
                 Motion::Top => 0,
                 Motion::Bottom => self.thread_scroll_limit,
             }
@@ -751,8 +781,12 @@ impl App {
             match motion {
                 Motion::Down(n) => self.move_diff_stops(1, n),
                 Motion::Up(n) => self.move_diff_stops(-1, n),
-                Motion::HalfPageDown => self.move_diff_stops(1, viewport_height / 2),
-                Motion::HalfPageUp => self.move_diff_stops(-1, viewport_height / 2),
+                Motion::HalfPageDown => {
+                    self.move_diff_stops(1, viewport_height / 2);
+                }
+                Motion::HalfPageUp => {
+                    self.move_diff_stops(-1, viewport_height / 2);
+                }
                 Motion::Top => {
                     self.cursor = 0;
                     self.set_focused_thread(None);
@@ -843,7 +877,8 @@ impl App {
             return;
         }
 
-        let Some((index, row, id)) = self.comment_stop_elsewhere(direction) else {
+        let Some((index, row, id)) = self.comment_stop_elsewhere(direction)
+        else {
             self.status = "no more comments".into();
             return;
         };
@@ -854,7 +889,12 @@ impl App {
 
     /// Puts the cursor on a diff row, optionally focusing one of its threads,
     /// and scrolls the row into view.
-    fn land_on(&mut self, row: usize, thread: Option<String>, viewport_height: usize) {
+    fn land_on(
+        &mut self,
+        row: usize,
+        thread: Option<String>,
+        viewport_height: usize,
+    ) {
         self.pane = Pane::Diff;
         self.selection = None;
         self.cursor = row;
@@ -882,7 +922,10 @@ impl App {
                     return Some((last, 2, thread));
                 }
 
-                let row = file.lines.iter().position(|line| thread.anchors_to(line))?;
+                let row = file
+                    .lines
+                    .iter()
+                    .position(|line| thread.anchors_to(line))?;
                 Some((row, u8::from(thread.is_resolved), thread))
             })
             .collect();
@@ -914,14 +957,21 @@ impl App {
         let target = match (current, direction > 0) {
             (Some(index), true) => (index + 1 < stops.len()).then(|| index + 1),
             (Some(index), false) => index.checked_sub(1),
-            (None, true) => stops.iter().position(|(row, _)| *row >= self.cursor),
-            (None, false) => stops.iter().rposition(|(row, _)| *row <= self.cursor),
+            (None, true) => {
+                stops.iter().position(|(row, _)| *row >= self.cursor)
+            }
+            (None, false) => {
+                stops.iter().rposition(|(row, _)| *row <= self.cursor)
+            }
         }?;
 
         Some(stops[target].clone())
     }
 
-    fn comment_stop_elsewhere(&self, direction: isize) -> Option<(usize, usize, String)> {
+    fn comment_stop_elsewhere(
+        &self,
+        direction: isize,
+    ) -> Option<(usize, usize, String)> {
         let visible = self.filtered_file_indices();
         let position = visible.iter().position(|&i| i == self.selected_file)?;
 
@@ -966,16 +1016,15 @@ impl App {
             .into_iter()
             .flatten()
             .filter(|thread| {
-                (thread.is_outdated && is_last) || (!thread.is_outdated && thread.anchors_to(line))
+                (thread.is_outdated && is_last)
+                    || (!thread.is_outdated && thread.anchors_to(line))
             })
             .collect();
         threads.sort_by_key(|thread| {
             if thread.is_outdated {
                 2
-            } else if thread.is_resolved {
-                1
             } else {
-                0
+                i32::from(thread.is_resolved)
             }
         });
         threads.iter().map(|thread| thread.id.clone()).collect()
@@ -994,9 +1043,11 @@ impl App {
             return;
         }
 
-        let bottom = self.diff_scroll + viewport_height.saturating_sub(margin + 1);
+        let bottom =
+            self.diff_scroll + viewport_height.saturating_sub(margin + 1);
         if self.cursor > bottom {
-            self.diff_scroll = (self.cursor + margin + 1).saturating_sub(viewport_height);
+            self.diff_scroll =
+                (self.cursor + margin + 1).saturating_sub(viewport_height);
         }
     }
 }

@@ -42,12 +42,14 @@ impl Assets {
                 lines
                     .iter()
                     .find(|line| line.kind != LineKind::Hunk)
-                    .and_then(|line| self.syntaxes.find_syntax_by_first_line(&line.text))
+                    .and_then(|line| {
+                        self.syntaxes.find_syntax_by_first_line(&line.text)
+                    })
             })
             .unwrap_or_else(|| self.syntaxes.find_syntax_plain_text())
     }
 
-    fn theme(&self, mode: ThemeMode) -> &Theme {
+    const fn theme(&self, mode: ThemeMode) -> &Theme {
         match mode {
             ThemeMode::Dark => &self.dark,
             ThemeMode::Light => &self.light,
@@ -57,7 +59,7 @@ impl Assets {
 
 static ASSETS: OnceLock<Assets> = OnceLock::new();
 
-fn syntax_color(rgb: u32) -> Color {
+const fn syntax_color(rgb: u32) -> Color {
     Color {
         r: ((rgb >> 16) & 0xff) as u8,
         g: ((rgb >> 8) & 0xff) as u8,
@@ -68,7 +70,9 @@ fn syntax_color(rgb: u32) -> Color {
 
 fn theme_item(scopes: &str, rgb: u32) -> ThemeItem {
     ThemeItem {
-        scope: scopes.parse::<ScopeSelectors>().expect("static scope selectors are valid"),
+        scope: scopes
+            .parse::<ScopeSelectors>()
+            .expect("static scope selectors are valid"),
         style: StyleModifier {
             foreground: Some(syntax_color(rgb)),
             ..StyleModifier::default()
@@ -79,24 +83,35 @@ fn theme_item(scopes: &str, rgb: u32) -> ThemeItem {
 /// GitHub Light/Dark Default's semantic syntax palette, expressed as syntect
 /// scopes. The colors and token groupings follow Primer's official themes.
 fn github_theme(mode: ThemeMode) -> Theme {
-    let (foreground, background, comment, constant, string, entity, function, tag, keyword) =
-        match mode {
-            ThemeMode::Dark => (
-                0xe6edf3, 0x0d1117, 0x8c959f, 0x79c0ff, 0xa5d6ff, 0xffa657, 0xd2a8ff,
-                0x7ee787, 0xff7b72,
-            ),
-            ThemeMode::Light => (
-                0x1f2328, 0xffffff, 0x6e7781, 0x0550ae, 0x0a3069, 0x953800, 0x8250df,
-                0x116329, 0xcf222e,
-            ),
-        };
+    let (
+        foreground,
+        background,
+        comment,
+        constant,
+        string,
+        entity,
+        function,
+        tag,
+        keyword,
+    ) = match mode {
+        ThemeMode::Dark => (
+            0xe6edf3, 0x0d1117, 0x8c959f, 0x79c0ff, 0xa5d6ff, 0xffa657,
+            0xd2a8ff, 0x7ee787, 0xff7b72,
+        ),
+        ThemeMode::Light => (
+            0x1f2328, 0xffffff, 0x6e7781, 0x0550ae, 0x0a3069, 0x953800,
+            0x8250df, 0x116329, 0xcf222e,
+        ),
+    };
 
     Theme {
-        name: Some(match mode {
-            ThemeMode::Dark => "GitHub Dark Default",
-            ThemeMode::Light => "GitHub Light Default",
-        }
-        .into()),
+        name: Some(
+            match mode {
+                ThemeMode::Dark => "GitHub Dark Default",
+                ThemeMode::Light => "GitHub Light Default",
+            }
+            .into(),
+        ),
         author: Some("GitHub / Primer".into()),
         settings: ThemeSettings {
             foreground: Some(syntax_color(foreground)),
@@ -106,7 +121,10 @@ fn github_theme(mode: ThemeMode) -> Theme {
         // Broad rules come first; later, more specific selectors win.
         scopes: vec![
             theme_item("comment, punctuation.definition.comment", comment),
-            theme_item("constant, support.constant, meta.module-reference", constant),
+            theme_item(
+                "constant, support.constant, meta.module-reference",
+                constant,
+            ),
             theme_item("constant.numeric", constant),
             theme_item("string, punctuation.definition.string", string),
             theme_item(
@@ -126,12 +144,10 @@ fn github_theme(mode: ThemeMode) -> Theme {
 }
 
 fn assets() -> &'static Assets {
-    ASSETS.get_or_init(|| {
-        Assets {
-            syntaxes: two_face::syntax::extra_newlines(),
-            dark: github_theme(ThemeMode::Dark),
-            light: github_theme(ThemeMode::Light),
-        }
+    ASSETS.get_or_init(|| Assets {
+        syntaxes: two_face::syntax::extra_newlines(),
+        dark: github_theme(ThemeMode::Dark),
+        light: github_theme(ThemeMode::Light),
     })
 }
 
@@ -180,7 +196,10 @@ fn push_range(ranges: &mut Vec<Range<usize>>, range: Range<usize>) {
 }
 
 /// Byte ranges of the tokens that changed between a removed and added line.
-fn emphasis_ranges(old: &str, new: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+fn emphasis_ranges(
+    old: &str,
+    new: &str,
+) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
     let old_tokens = tokenize(old);
     let new_tokens = tokenize(new);
     let diff = TextDiff::from_slices(&old_tokens, &new_tokens);
@@ -273,13 +292,16 @@ fn split_region(
     emphasis_index: &mut usize,
 ) {
     let mut cursor = region.start;
-    while *emphasis_index < emphasis.len() && emphasis[*emphasis_index].end <= cursor {
+    while *emphasis_index < emphasis.len()
+        && emphasis[*emphasis_index].end <= cursor
+    {
         *emphasis_index += 1;
     }
 
     while cursor < region.end {
         let changed = emphasis.get(*emphasis_index);
-        let is_emphasis = changed.is_some_and(|range| range.start <= cursor && cursor < range.end);
+        let is_emphasis = changed
+            .is_some_and(|range| range.start <= cursor && cursor < range.end);
         let end = match changed {
             Some(range) if is_emphasis => region.end.min(range.end),
             Some(range) => region.end.min(range.start),
@@ -304,7 +326,11 @@ fn split_region(
 
 const MAX_HIGHLIGHT_BYTES: usize = 16 * 1024;
 
-pub fn highlight_file(path: &str, lines: &[DiffLine], mode: ThemeMode) -> Vec<Vec<Segment>> {
+pub fn highlight_file(
+    path: &str,
+    lines: &[DiffLine],
+    mode: ThemeMode,
+) -> Vec<Vec<Segment>> {
     let assets = assets();
     let syntax = assets.syntax_for(path, lines);
     let syntax_theme = assets.theme(mode);
@@ -347,10 +373,15 @@ pub fn highlight_file(path: &str, lines: &[DiffLine], mode: ThemeMode) -> Vec<Ve
             line_buffer.push('\n');
 
             let regions = match line.kind {
-                LineKind::Removed => old_side.highlight_line(&line_buffer, &assets.syntaxes),
-                LineKind::Added => new_side.highlight_line(&line_buffer, &assets.syntaxes),
+                LineKind::Removed => {
+                    old_side.highlight_line(&line_buffer, &assets.syntaxes)
+                }
+                LineKind::Added => {
+                    new_side.highlight_line(&line_buffer, &assets.syntaxes)
+                }
                 LineKind::Context => {
-                    let _ = old_side.highlight_line(&line_buffer, &assets.syntaxes);
+                    let _ =
+                        old_side.highlight_line(&line_buffer, &assets.syntaxes);
                     new_side.highlight_line(&line_buffer, &assets.syntaxes)
                 }
                 LineKind::Hunk => unreachable!(),
@@ -365,7 +396,8 @@ pub fn highlight_file(path: &str, lines: &[DiffLine], mode: ThemeMode) -> Vec<Ve
             };
 
             let changed = emphasis[index].as_deref().unwrap_or_default();
-            let mut segments = Vec::with_capacity(regions.len() + changed.len() * 2);
+            let mut segments =
+                Vec::with_capacity(regions.len() + changed.len() * 2);
             let mut cursor = 0;
             let mut emphasis_index = 0;
 
@@ -375,7 +407,11 @@ pub fn highlight_file(path: &str, lines: &[DiffLine], mode: ThemeMode) -> Vec<Ve
                     continue;
                 }
 
-                let color = (style.foreground.r, style.foreground.g, style.foreground.b);
+                let color = (
+                    style.foreground.r,
+                    style.foreground.g,
+                    style.foreground.b,
+                );
                 split_region(
                     &mut segments,
                     cursor..cursor + len,
@@ -416,16 +452,26 @@ mod tests {
             new_line: Some(1),
         }];
 
-        let highlighted = highlight_file("generated.js", &lines, ThemeMode::Dark);
+        let highlighted =
+            highlight_file("generated.js", &lines, ThemeMode::Dark);
         assert_eq!(highlighted[0].len(), 1);
         assert_eq!(highlighted[0][0].range, 0..MAX_HIGHLIGHT_BYTES + 1);
     }
 
     #[test]
     fn github_defaults_are_used_for_both_modes() {
-        assert_eq!(assets().dark.settings.foreground, Some(syntax_color(0xe6edf3)));
-        assert_eq!(assets().light.settings.foreground, Some(syntax_color(0x1f2328)));
+        assert_eq!(
+            assets().dark.settings.foreground,
+            Some(syntax_color(0xe6edf3))
+        );
+        assert_eq!(
+            assets().light.settings.foreground,
+            Some(syntax_color(0x1f2328))
+        );
         assert_eq!(assets().dark.name.as_deref(), Some("GitHub Dark Default"));
-        assert_eq!(assets().light.name.as_deref(), Some("GitHub Light Default"));
+        assert_eq!(
+            assets().light.name.as_deref(),
+            Some("GitHub Light Default")
+        );
     }
 }

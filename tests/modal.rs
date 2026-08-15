@@ -10,7 +10,8 @@ use termina::event::{KeyCode, KeyEvent, Modifiers};
 fn load() -> App {
     let files: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
-    let meta: serde_json::Value = serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
+    let meta: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
 
     let mut app = App::new();
     app.set_files(parse_files(&files).unwrap());
@@ -286,7 +287,7 @@ fn commenting_a_selection_produces_one_multiline_draft() {
     let composer = app.composer.as_mut().unwrap();
     composer.editor.set_text("this allocates on every call");
 
-    app.apply(Action::CommitComment, 20);
+    app.apply(&Action::CommitComment, 20);
 
     assert_eq!(app.mode, Mode::Normal);
     assert!(app.selection.is_none());
@@ -306,7 +307,7 @@ fn an_empty_comment_is_discarded() {
     press(&mut app, "c");
     assert_eq!(app.mode, Mode::Insert);
 
-    app.apply(Action::CommitComment, 20);
+    app.apply(&Action::CommitComment, 20);
     assert!(app.drafts.is_empty());
     assert_eq!(app.mode, Mode::Normal);
 }
@@ -348,7 +349,8 @@ fn insert_mode_reserves_app_chords_and_forwards_editor_keys() {
     assert_eq!(app.composer.as_ref().unwrap().editor.text(), "s");
 
     // Extra modifiers do not accidentally trigger an application chord.
-    let modified = KeyEvent::new(KeyCode::Char('s'), Modifiers::CONTROL | Modifiers::ALT);
+    let modified =
+        KeyEvent::new(KeyCode::Char('s'), Modifiers::CONTROL | Modifiers::ALT);
     assert_eq!(
         input.dispatch_key(&mut app, modified, 20),
         DispatchResult::ForwardedToEditor
@@ -370,14 +372,14 @@ fn paste_is_routed_only_to_an_open_composer() {
     let mut input = InputRouter::default();
 
     assert_eq!(
-        input.dispatch_paste(&mut app, "ignored".into(), 20),
+        input.dispatch_paste(&mut app, "ignored", 20),
         DispatchResult::Ignored
     );
 
     park_on_code(&mut app);
     press(&mut app, "c");
     assert_eq!(
-        input.dispatch_paste(&mut app, "pasted text".into(), 20),
+        input.dispatch_paste(&mut app, "pasted text", 20),
         DispatchResult::ForwardedToEditor
     );
     assert_eq!(app.composer.as_ref().unwrap().editor.text(), "pasted text");
@@ -634,7 +636,7 @@ fn escape_cancels_a_file_filter_and_enter_rejects_no_matches() {
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
         20,
     );
-    input.dispatch_paste(&mut app, "nothing\nwill\rmatch".into(), 20);
+    input.dispatch_paste(&mut app, "nothing\nwill\rmatch", 20);
     assert!(app.filtered_file_indices().is_empty());
 
     input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
@@ -659,7 +661,7 @@ fn cancelling_an_edit_restores_the_committed_filter_and_selection() {
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
         20,
     );
-    input.dispatch_paste(&mut app, "auth_check".into(), 20);
+    input.dispatch_paste(&mut app, "auth_check", 20);
     input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
     app.selected_file = 2;
 
@@ -668,7 +670,7 @@ fn cancelling_an_edit_restores_the_committed_filter_and_selection() {
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
         20,
     );
-    input.dispatch_paste(&mut app, "_test".into(), 20);
+    input.dispatch_paste(&mut app, "_test", 20);
     assert_eq!(app.filter_query().as_deref(), Some("auth_check_test"));
     assert_eq!(app.selected_file, 3);
 
@@ -693,7 +695,7 @@ fn escape_clears_a_committed_filter_before_quitting() {
             KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
             20,
         );
-        input.dispatch_paste(&mut app, "auth_check".into(), 20);
+        input.dispatch_paste(&mut app, "auth_check", 20);
         input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
 
         assert_eq!(
@@ -728,12 +730,14 @@ fn comment_jump_crosses_files_and_skips_resolved_threads() {
         .unwrap()
         .clone();
 
-    app.apply(Action::NextComment, 20);
+    app.apply(&Action::NextComment, 20);
 
     assert_eq!(app.pane, Pane::Diff);
     assert_eq!(app.files[app.selected_file].path, unresolved.path);
     assert_eq!(app.focused_thread.as_deref(), Some(unresolved.id.as_str()));
-    assert!(unresolved.anchors_to(&app.files[app.selected_file].lines[app.cursor]));
+    assert!(
+        unresolved.anchors_to(&app.files[app.selected_file].lines[app.cursor])
+    );
 }
 
 #[test]
@@ -742,10 +746,10 @@ fn comment_jump_reports_when_none_remain() {
     app.selected_file = 0;
     app.cursor = 0;
 
-    app.apply(Action::NextComment, 20);
+    app.apply(&Action::NextComment, 20);
     let landed = app.selected_file;
 
-    app.apply(Action::NextComment, 20);
+    app.apply(&Action::NextComment, 20);
 
     assert_eq!(app.selected_file, landed);
     assert_eq!(app.status, "no more comments");
@@ -757,10 +761,10 @@ fn comment_jump_reverses_back_to_the_starting_file() {
     app.selected_file = 0;
     app.cursor = 0;
 
-    app.apply(Action::NextComment, 20);
+    app.apply(&Action::NextComment, 20);
     assert_ne!(app.selected_file, 0);
 
-    app.apply(Action::PrevComment, 20);
+    app.apply(&Action::PrevComment, 20);
 
     assert_eq!(app.status, "no more comments");
     assert!(app.focused_thread.is_some());
@@ -829,19 +833,19 @@ fn comment_jump_steps_through_every_thread_in_a_file() {
             ..template.clone()
         })
         .collect();
-    app.threads_by_path.insert(file.path.clone(), threads);
+    app.threads_by_path.insert(file.path, threads);
 
     app.cursor = 0;
     app.focused_thread = None;
 
     for &row in &rows {
-        app.apply(Action::NextComment, 20);
+        app.apply(&Action::NextComment, 20);
         assert_eq!(app.cursor, row);
     }
     assert_eq!(app.focused_thread.as_deref(), Some("thread-2"));
 
     for &row in rows.iter().rev().skip(1) {
-        app.apply(Action::PrevComment, 20);
+        app.apply(&Action::PrevComment, 20);
         assert_eq!(app.cursor, row);
     }
     assert_eq!(app.focused_thread.as_deref(), Some("thread-0"));
@@ -851,8 +855,12 @@ fn search_for(app: &mut App, query: &str) -> InputRouter {
     let mut input = InputRouter::default();
 
     app.pane = Pane::Diff;
-    input.dispatch_key(app, KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE), 20);
-    input.dispatch_paste(app, query.into(), 20);
+    input.dispatch_key(
+        app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+        20,
+    );
+    input.dispatch_paste(app, query, 20);
 
     input
 }

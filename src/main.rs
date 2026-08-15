@@ -8,7 +8,9 @@ use prtui::model::{self, ChangedFile, PullRequest};
 use prtui::renderer::{Renderer, Segment, ThemeMode};
 use prtui::{gh, ui};
 use std::{future::poll_fn, pin::Pin, time::Duration};
-use termina::escape::csi::{Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode};
+use termina::escape::csi::{
+    Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode,
+};
 use termina::event::KeyEventKind;
 use termina::{Event, EventStream};
 use tokio::sync::mpsc;
@@ -16,7 +18,10 @@ use tokio::sync::mpsc;
 mod terminal;
 
 #[derive(Parser)]
-#[command(name = "prtui", about = "Review GitHub pull requests in the terminal")]
+#[command(
+    name = "prtui",
+    about = "Review GitHub pull requests in the terminal"
+)]
 struct Args {
     /// Pull request number
     number: u32,
@@ -93,9 +98,11 @@ fn spawn_image_fetch(url: String, tx: mpsc::UnboundedSender<Message>) {
     tokio::spawn(async move {
         let fetched = gh::fetch_asset(&url).await;
         let decoded = match fetched {
-            Ok(bytes) => tokio::task::spawn_blocking(move || images::decode(&bytes))
-                .await
-                .unwrap_or_else(|error| Err(error.into())),
+            Ok(bytes) => {
+                tokio::task::spawn_blocking(move || images::decode(&bytes))
+                    .await
+                    .unwrap_or_else(|error| Err(error.into()))
+            }
             Err(error) => Err(error),
         };
 
@@ -230,7 +237,9 @@ async fn event_loop(
 
         if is_dirty {
             let pending_hint = input.pending_hint();
-            terminal::draw(terminal, |frame| ui::draw(frame, &mut app, &pending_hint))?;
+            terminal::draw(terminal, |frame| {
+                ui::draw(frame, &mut app, &pending_hint)
+            })?;
             is_dirty = false;
         }
 
@@ -312,7 +321,7 @@ async fn event_loop(
                         }
                     }
                     Event::Paste(text) => {
-                        input.dispatch_paste(&mut app, text, height);
+                        input.dispatch_paste(&mut app, &text, height);
                         is_dirty = true;
                     }
                     Event::Csi(Csi::Mode(CsiMode::ReportTheme(terminal_mode)))
@@ -346,7 +355,9 @@ async fn event_loop(
     Ok(())
 }
 
-async fn next_event(events: &mut EventStream) -> Option<std::io::Result<Event>> {
+async fn next_event(
+    events: &mut EventStream,
+) -> Option<std::io::Result<Event>> {
     poll_fn(|cx| Pin::new(&mut *events).poll_next(cx)).await
 }
 

@@ -116,7 +116,9 @@ fn parse_hunk_header(header: &str) -> Option<(u32, u32)> {
     let inner = header.strip_prefix("@@ ")?.split(" @@").next()?;
     let (old, new) = inner.split_once(' ')?;
 
-    let start = |s: &str| -> Option<u32> { s.get(1..)?.split(',').next()?.parse().ok() };
+    let start = |s: &str| -> Option<u32> {
+        s.get(1..)?.split(',').next()?.parse().ok()
+    };
 
     Some((start(old)?, start(new)?))
 }
@@ -182,11 +184,12 @@ pub fn parse_files(val: &serde_json::Value) -> Result<Vec<ChangedFile>> {
 
     let mut files = Vec::new();
     for page in pages {
-        let raws: Vec<RawFile> =
-            serde_json::from_value(page.clone()).context("unexpected /files page shape")?;
+        let raws: Vec<RawFile> = serde_json::from_value(page.clone())
+            .context("unexpected /files page shape")?;
 
         for raw in raws {
-            let lines = raw.patch.as_deref().map(parse_patch).unwrap_or_default();
+            let lines =
+                raw.patch.as_deref().map(parse_patch).unwrap_or_default();
 
             files.push(ChangedFile {
                 path: raw.filename,
@@ -222,10 +225,13 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<PullRequest> {
                 .map(|t| ReviewThread {
                     id: text_at(t, "/id"),
                     path: text_at(t, "/path"),
-                    line: t.get("line").and_then(|v| v.as_u64()).map(|v| v as u32),
+                    line: t
+                        .get("line")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|v| v as u32),
                     original_line: t
                         .get("originalLine")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .map(|v| v as u32),
                     side: t
                         .get("diffSide")
@@ -234,11 +240,11 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<PullRequest> {
                         .unwrap_or(Side::Right),
                     is_resolved: t
                         .get("isResolved")
-                        .and_then(|v| v.as_bool())
+                        .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false),
                     is_outdated: t
                         .get("isOutdated")
-                        .and_then(|v| v.as_bool())
+                        .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false),
                     comments: t
                         .pointer("/comments/nodes")
@@ -260,10 +266,16 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<PullRequest> {
         .unwrap_or_default();
 
     Ok(PullRequest {
-        number: pr.get("number").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        number: pr
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32,
         title: text_at(pr, "/title"),
         state: text_at(pr, "/state"),
-        is_draft: pr.get("isDraft").and_then(|v| v.as_bool()).unwrap_or(false),
+        is_draft: pr
+            .get("isDraft")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         author: text_at(pr, "/author/login"),
         base_ref: text_at(pr, "/baseRefName"),
         head_ref: text_at(pr, "/headRefName"),

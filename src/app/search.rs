@@ -67,3 +67,11 @@ pub fn is_match(haystack: &str, query: &str) -> bool {
         .to_ascii_lowercase()
         .contains(&query.to_ascii_lowercase())
 }
+
+pub fn probe_fix(values: &[String]) -> Vec<String> {
+    values.to_vec()
+}
+
+const fn probe_fmt() -> u8 {
+    7
+}

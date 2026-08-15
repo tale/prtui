@@ -40,17 +40,18 @@ impl InputRouter {
             && app.focused_thread.is_some()
             && matches!(
                 (key.code, key.modifiers),
-                (KeyCode::Escape, Modifiers::NONE) | (KeyCode::Char('['), Modifiers::CONTROL)
+                (KeyCode::Escape, Modifiers::NONE)
+                    | (KeyCode::Char('['), Modifiers::CONTROL)
             );
         if leaves_thread {
             let action = Action::LeaveThread;
-            app.apply(action.clone(), viewport_height);
+            app.apply(&action, viewport_height);
             return DispatchResult::Applied(action);
         }
 
         match self.keymap.resolve(mode, find_active, key) {
             Resolution::Action(action) => {
-                app.apply(action.clone(), viewport_height);
+                app.apply(&action, viewport_height);
                 self.sync_mode(app.mode);
                 DispatchResult::Applied(action)
             }
@@ -88,7 +89,7 @@ impl InputRouter {
     pub fn dispatch_paste(
         &mut self,
         app: &mut App,
-        text: String,
+        text: &str,
         viewport_height: usize,
     ) -> DispatchResult {
         self.sync_mode(app.mode);
@@ -98,7 +99,7 @@ impl InputRouter {
                 let Some(composer) = app.composer.as_mut() else {
                     return DispatchResult::Ignored;
                 };
-                composer.editor.insert_text(&text);
+                composer.editor.insert_text(text);
                 DispatchResult::ForwardedToEditor
             }
             Mode::Filter => {

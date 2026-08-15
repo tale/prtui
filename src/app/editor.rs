@@ -45,7 +45,9 @@ impl CommentEditor {
             match character {
                 '\n' => self.insert_newline(),
                 '\t' => self.insert_spaces(4),
-                character if !character.is_control() => self.insert_char(character),
+                character if !character.is_control() => {
+                    self.insert_char(character);
+                }
                 _ => {}
             }
         }
@@ -107,7 +109,8 @@ impl CommentEditor {
 
     fn backspace(&mut self) -> bool {
         if self.column > 0 {
-            let previous = previous_boundary(&self.lines[self.row], self.column);
+            let previous =
+                previous_boundary(&self.lines[self.row], self.column);
             self.lines[self.row].drain(previous..self.column);
             self.column = previous;
             return true;
@@ -172,13 +175,15 @@ impl CommentEditor {
             return false;
         }
 
-        let character_column = self.lines[self.row][..self.column].chars().count();
+        let character_column =
+            self.lines[self.row][..self.column].chars().count();
         self.row = target;
-        self.column = byte_at_character(&self.lines[self.row], character_column);
+        self.column =
+            byte_at_character(&self.lines[self.row], character_column);
         true
     }
 
-    fn move_to(&mut self, column: usize) -> bool {
+    const fn move_to(&mut self, column: usize) -> bool {
         let changed = self.column != column;
         self.column = column;
         changed
@@ -187,7 +192,8 @@ impl CommentEditor {
 
 fn normalized_lines(text: &str) -> Vec<String> {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-    let lines: Vec<String> = normalized.split('\n').map(str::to_owned).collect();
+    let lines: Vec<String> =
+        normalized.split('\n').map(str::to_owned).collect();
     if lines.is_empty() {
         vec![String::new()]
     } else {
@@ -199,23 +205,20 @@ fn previous_boundary(text: &str, byte: usize) -> usize {
     text[..byte]
         .char_indices()
         .next_back()
-        .map(|(index, _)| index)
-        .unwrap_or(0)
+        .map_or(0, |(index, _)| index)
 }
 
 fn next_boundary(text: &str, byte: usize) -> usize {
     text[byte..]
         .chars()
         .next()
-        .map(|character| byte + character.len_utf8())
-        .unwrap_or(byte)
+        .map_or(byte, |character| byte + character.len_utf8())
 }
 
 fn byte_at_character(text: &str, character: usize) -> usize {
     text.char_indices()
         .nth(character)
-        .map(|(byte, _)| byte)
-        .unwrap_or(text.len())
+        .map_or(text.len(), |(byte, _)| byte)
 }
 
 #[cfg(test)]

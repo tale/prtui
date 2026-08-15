@@ -7,12 +7,22 @@ use prtui::renderer::ThemeMode;
 use prtui::ui;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use std::fmt::Write;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
+
+/// Body text long enough to overflow any thread viewport.
+fn paragraphs(count: usize, label: &str) -> String {
+    (1..=count).fold(String::new(), |mut body, index| {
+        let _ = writeln!(body, "{label} {index}\n");
+        body
+    })
+}
 
 fn load() -> App {
     let files: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
-    let meta: serde_json::Value = serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
+    let meta: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
 
     let mut app = App::new();
     app.set_files(parse_files(&files).unwrap());
@@ -99,7 +109,8 @@ fn collapsed_thread_summary_uses_rendered_gfm_text() {
         .find(|thread| !thread.is_resolved)
         .unwrap()
         .clone();
-    thread.comments[0].body = "_Minor_ and **important** with `inline code`".into();
+    thread.comments[0].body =
+        "_Minor_ and **important** with `inline code`".into();
     app.threads_by_path
         .insert(thread.path.clone(), vec![thread.clone()]);
     show_thread(&mut app, &thread);
@@ -174,10 +185,8 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
         .find(|thread| !thread.is_resolved)
         .unwrap()
         .clone();
-    thread.comments[0].body = (1..=18)
-        .map(|line| format!("Paragraph {line}\n\n"))
-        .collect::<String>()
-        + "TAIL CONTENT IS REACHABLE";
+    thread.comments[0].body =
+        paragraphs(18, "Paragraph") + "TAIL CONTENT IS REACHABLE";
     app.threads_by_path
         .insert(thread.path.clone(), vec![thread.clone()]);
     show_thread(&mut app, &thread);
@@ -244,9 +253,7 @@ fn long_reply_keeps_its_identity_visible_while_scrolling() {
     let mut reply = thread.comments[0].clone();
     reply.id = "long-reply".into();
     reply.author = "andyfeller".into();
-    reply.body = (1..=24)
-        .map(|line| format!("Reply paragraph {line}\n\n"))
-        .collect();
+    reply.body = paragraphs(24, "Reply paragraph");
     thread.comments.push(reply);
     app.threads_by_path
         .insert(thread.path.clone(), vec![thread.clone()]);
@@ -294,8 +301,7 @@ fn multiple_threads_on_one_line_render_as_one_group() {
         thread.comments[0].body = format!("Discussion number {index}");
         threads.push(thread);
     }
-    app.threads_by_path
-        .insert(base.path.clone(), threads.clone());
+    app.threads_by_path.insert(base.path, threads.clone());
     show_thread(&mut app, &threads[0]);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
@@ -362,8 +368,9 @@ fn left_side_threads_anchor_to_removed_lines() {
                 .iter()
                 .enumerate()
                 .find_map(|(line_index, line)| {
-                    (line.kind == LineKind::Removed)
-                        .then(|| (file_index, line_index, line.old_line.unwrap()))
+                    (line.kind == LineKind::Removed).then(|| {
+                        (file_index, line_index, line.old_line.unwrap())
+                    })
                 })
         })
         .unwrap();
@@ -440,10 +447,18 @@ fn hunk_line_numbers_advance_correctly() {
 
     for line in &file.lines {
         match line.kind {
-            LineKind::Added => assert!(line.old_line.is_none() && line.new_line.is_some()),
-            LineKind::Removed => assert!(line.old_line.is_some() && line.new_line.is_none()),
-            LineKind::Context => assert!(line.old_line.is_some() && line.new_line.is_some()),
-            LineKind::Hunk => assert!(line.old_line.is_none() && line.new_line.is_none()),
+            LineKind::Added => {
+                assert!(line.old_line.is_none() && line.new_line.is_some());
+            }
+            LineKind::Removed => {
+                assert!(line.old_line.is_some() && line.new_line.is_none());
+            }
+            LineKind::Context => {
+                assert!(line.old_line.is_some() && line.new_line.is_some());
+            }
+            LineKind::Hunk => {
+                assert!(line.old_line.is_none() && line.new_line.is_none());
+            }
         }
     }
 
@@ -574,7 +589,8 @@ fn files_release_the_loading_gate_without_metadata() {
 
 #[test]
 fn metadata_can_arrive_while_the_file_loader_continues() {
-    let meta: serde_json::Value = serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
+    let meta: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
     let mut app = App::new();
     app.set_meta(parse_meta(&meta).unwrap());
 
@@ -716,12 +732,13 @@ fn word_diff_marks_only_changed_tokens() {
 
     let styled = Renderer::default().highlight_file("x.rs", &lines);
 
-    let marked = |row: &Vec<prtui::renderer::Segment>, source: &str| -> Vec<String> {
-        row.iter()
-            .filter(|segment| segment.is_emphasis)
-            .map(|segment| source[segment.range.clone()].to_string())
-            .collect()
-    };
+    let marked =
+        |row: &Vec<prtui::renderer::Segment>, source: &str| -> Vec<String> {
+            row.iter()
+                .filter(|segment| segment.is_emphasis)
+                .map(|segment| source[segment.range.clone()].to_string())
+                .collect()
+        };
 
     // Whitespace-only tokenization used to flag `compute(alpha,` wholesale.
     assert_eq!(marked(&styled[0], &lines[0].text), vec!["alpha", "10"]);
@@ -798,7 +815,7 @@ fn hiding_the_tree_forces_focus_to_the_diff() {
     assert_eq!(app.pane, Pane::Diff);
 
     // Tab is also the recovery path: it reopens and focuses the tree.
-    app.apply(Action::TogglePane, 20);
+    app.apply(&Action::TogglePane, 20);
     assert!(app.is_files_visible);
     assert_eq!(app.pane, Pane::Files);
 
@@ -897,7 +914,7 @@ fn the_composer_opens_over_the_diff_with_its_anchor_in_the_title() {
         .position(|l| l.kind != LineKind::Hunk)
         .unwrap();
 
-    app.apply(Action::StartComment, 20);
+    app.apply(&Action::StartComment, 20);
     assert!(app.composer.is_some());
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -925,13 +942,13 @@ fn a_saved_draft_marks_its_lines_in_the_gutter() {
         .position(|l| l.kind != LineKind::Hunk)
         .unwrap();
 
-    app.apply(Action::StartComment, 20);
+    app.apply(&Action::StartComment, 20);
     app.composer
         .as_mut()
         .unwrap()
         .editor
         .set_text("needs a guard");
-    app.apply(Action::CommitComment, 20);
+    app.apply(&Action::CommitComment, 20);
     assert_eq!(app.drafts.len(), 1);
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -957,7 +974,8 @@ fn thread_with_image(app: &mut App) -> prtui::model::ReviewThread {
         .find(|thread| !thread.is_resolved)
         .unwrap()
         .clone();
-    thread.comments[0].body = format!("Before and after:\n\n![shot]({IMAGE_URL})");
+    thread.comments[0].body =
+        format!("Before and after:\n\n![shot]({IMAGE_URL})");
     app.threads_by_path
         .insert(thread.path.clone(), vec![thread.clone()]);
     thread
@@ -971,7 +989,7 @@ fn expanding_a_thread_queues_its_images() {
     app.images = Images::new(Support::Enabled);
     app.focused_thread = Some(thread.id.clone());
 
-    app.apply(Action::Activate, 20);
+    app.apply(&Action::Activate, 20);
 
     assert_eq!(app.images.take_pending(), vec![IMAGE_URL.to_string()]);
 }
@@ -988,7 +1006,8 @@ fn a_loaded_image_is_drawn_over_the_rows_it_reserves() {
     }));
     app.images.insert(
         IMAGE_URL.into(),
-        images::decode(include_bytes!("fixtures/screenshot.png")).map_err(|err| err.to_string()),
+        images::decode(include_bytes!("fixtures/screenshot.png"))
+            .map_err(|err| err.to_string()),
     );
     app.focused_thread = Some(thread.id.clone());
     app.expanded_thread = Some(thread.id.clone());
@@ -1012,10 +1031,8 @@ fn a_loaded_image_is_drawn_over_the_rows_it_reserves() {
 fn scrolling_past_an_image_crops_it_to_what_is_visible() {
     let mut app = load();
     let mut thread = thread_with_image(&mut app);
-    thread.comments[0].body = format!("![shot]({IMAGE_URL})\n\n")
-        + &(1..=20)
-            .map(|line| format!("Paragraph {line}\n\n"))
-            .collect::<String>();
+    thread.comments[0].body =
+        format!("![shot]({IMAGE_URL})\n\n") + &paragraphs(20, "Paragraph");
     app.threads_by_path
         .insert(thread.path.clone(), vec![thread.clone()]);
     show_thread(&mut app, &thread);
@@ -1026,7 +1043,8 @@ fn scrolling_past_an_image_crops_it_to_what_is_visible() {
     }));
     app.images.insert(
         IMAGE_URL.into(),
-        images::decode(include_bytes!("fixtures/screenshot.png")).map_err(|err| err.to_string()),
+        images::decode(include_bytes!("fixtures/screenshot.png"))
+            .map_err(|err| err.to_string()),
     );
     app.focused_thread = Some(thread.id.clone());
     app.expanded_thread = Some(thread.id.clone());
@@ -1159,7 +1177,7 @@ fn search_paints_only_the_matched_bytes_of_a_diff_line() {
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
         20,
     );
-    input.dispatch_paste(&mut app, NEEDLE.into(), 20);
+    input.dispatch_paste(&mut app, NEEDLE, 20);
     input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
 
     assert_eq!(app.cursor, row, "search lands on the only match");

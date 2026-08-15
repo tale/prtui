@@ -27,14 +27,21 @@ impl Renderer {
         self.theme
     }
 
-    pub fn highlight_file(self, path: &str, lines: &[DiffLine]) -> Vec<Vec<Segment>> {
+    pub fn highlight_file(
+        self,
+        path: &str,
+        lines: &[DiffLine],
+    ) -> Vec<Vec<Segment>> {
         highlight::highlight_file(path, lines, self.theme.mode)
     }
 
     /// Highlight independent files across the shared Rayon pool, publishing
     /// each result immediately instead of waiting for the slowest file.
-    pub fn highlight_files_parallel<F>(self, files: &[(String, Vec<DiffLine>)], publish: F)
-    where
+    pub fn highlight_files_parallel<F>(
+        self,
+        files: &[(String, Vec<DiffLine>)],
+        publish: F,
+    ) where
         F: Fn(usize, Vec<Vec<Segment>>) + Sync + Send,
     {
         files

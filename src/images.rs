@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use image::ImageFormat;
 use image::imageops::FilterType;
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::io::Cursor;
 
 /// Kitty accepts at most 4096 base64 bytes per escape sequence.
@@ -132,7 +133,12 @@ impl Images {
         self.entries.insert(url, entry);
     }
 
-    pub fn status(&self, url: &str, max_cols: u16, max_rows: u16) -> Status<'_> {
+    pub fn status(
+        &self,
+        url: &str,
+        max_cols: u16,
+        max_rows: u16,
+    ) -> Status<'_> {
         if !self.is_supported() {
             return Status::Off(self.support);
         }
@@ -150,7 +156,9 @@ impl Images {
     /// Escape sequences that repaint every visible image for one frame. Image
     /// data is transmitted once; later frames only move placements around.
     pub fn frame_commands(&mut self, placements: &[Placement]) -> String {
-        if !self.is_supported() || (placements.is_empty() && !self.has_placements) {
+        if !self.is_supported()
+            || (placements.is_empty() && !self.has_placements)
+        {
             return String::new();
         }
         self.has_placements = !placements.is_empty();
@@ -172,7 +180,13 @@ impl Images {
                 push_transmit(&mut commands, *id, &image.png);
                 *is_transmitted = true;
             }
-            push_placement(&mut commands, *id, index as u32 + 1, image, placement);
+            push_placement(
+                &mut commands,
+                *id,
+                index as u32 + 1,
+                image,
+                placement,
+            );
         }
         commands.push_str("\x1b8");
 
@@ -186,7 +200,8 @@ pub fn decode(bytes: &[u8]) -> Result<Image> {
         bail!("video attachment");
     }
 
-    let decoded = image::load_from_memory(bytes).context("unsupported image format")?;
+    let decoded =
+        image::load_from_memory(bytes).context("unsupported image format")?;
     let scaled = if decoded.width().max(decoded.height()) > MAX_DIMENSION {
         decoded.resize(MAX_DIMENSION, MAX_DIMENSION, FilterType::Triangle)
     } else {
@@ -217,7 +232,12 @@ fn is_video(bytes: &[u8]) -> bool {
 /// Cells the image occupies, preserving its aspect ratio inside the box. Without
 /// a reported cell size the image is sized to the available width instead of its
 /// natural resolution.
-fn fit(image: &Image, cell: Option<CellSize>, max_cols: u16, max_rows: u16) -> (u16, u16) {
+fn fit(
+    image: &Image,
+    cell: Option<CellSize>,
+    max_cols: u16,
+    max_rows: u16,
+) -> (u16, u16) {
     if max_cols == 0 || max_rows == 0 || image.width == 0 || image.height == 0 {
         return (0, 0);
     }
@@ -254,11 +274,12 @@ fn push_transmit(commands: &mut String, id: u32, png: &[u8]) {
         let chunk = &payload[offset..end];
 
         if offset == 0 {
-            commands.push_str(&format!(
+            let _ = write!(
+                commands,
                 "\x1b_Ga=t,i={id},f=100,t=d,q=2,m={more};{chunk}\x1b\\"
-            ));
+            );
         } else {
-            commands.push_str(&format!("\x1b_Gm={more};{chunk}\x1b\\"));
+            let _ = write!(commands, "\x1b_Gm={more};{chunk}\x1b\\");
         }
         offset = end;
     }
@@ -271,7 +292,8 @@ fn push_placement(
     image: &Image,
     placement: &Placement,
 ) {
-    let top = source_row(image.height, placement.skip_rows, placement.total_rows);
+    let top =
+        source_row(image.height, placement.skip_rows, placement.total_rows);
     let bottom = source_row(
         image.height,
         placement.skip_rows + placement.rows,
@@ -279,14 +301,15 @@ fn push_placement(
     );
     let height = bottom.saturating_sub(top).max(1);
 
-    commands.push_str(&format!(
+    let _ = write!(
+        commands,
         "\x1b[{};{}H\x1b_Ga=p,i={id},p={placement_id},c={},r={},x=0,y={top},w={},h={height},C=1,q=2\x1b\\",
         placement.row + 1,
         placement.column + 1,
         placement.cols,
         placement.rows,
         image.width,
-    ));
+    );
 }
 
 fn source_row(height: u32, row: u16, total_rows: u16) -> u32 {
@@ -297,7 +320,8 @@ fn source_row(height: u32, row: u16, total_rows: u16) -> u32 {
 }
 
 fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
@@ -390,7 +414,10 @@ mod tests {
 
         assert!(commands.contains("\x1b_Ga=t,i=1,f=100,t=d,q=2,m=0;"));
         assert!(commands.contains("\x1b[3;5H"));
-        assert!(commands.contains("a=p,i=1,p=1,c=20,r=5,x=0,y=100,w=100,h=100,C=1,q=2"));
+        assert!(
+            commands
+                .contains("a=p,i=1,p=1,c=20,r=5,x=0,y=100,w=100,h=100,C=1,q=2")
+        );
 
         // Data is transmitted once; later frames only re-place.
         let repeat = images.frame_commands(&[]);

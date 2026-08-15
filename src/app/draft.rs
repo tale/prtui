@@ -15,12 +15,14 @@ pub struct Draft {
 }
 
 impl Draft {
-    pub fn is_multiline(&self) -> bool {
+    pub const fn is_multiline(&self) -> bool {
         self.start_line != self.end_line
     }
 
     pub fn covers(&self, path: &str, line: u32, side: Side) -> bool {
-        self.path == path && self.side == side && (self.start_line..=self.end_line).contains(&line)
+        self.path == path
+            && self.side == side
+            && (self.start_line..=self.end_line).contains(&line)
     }
 }
 
@@ -36,7 +38,10 @@ pub struct Anchor {
 /// A selection that is entirely removals comments on the old side; anything
 /// else anchors to the new side, which is what GitHub expects for additions
 /// and untouched context.
-pub fn anchor_for(file: &ChangedFile, rows: RangeInclusive<usize>) -> Option<Anchor> {
+pub fn anchor_for(
+    file: &ChangedFile,
+    rows: RangeInclusive<usize>,
+) -> Option<Anchor> {
     let selected: Vec<&crate::model::DiffLine> = file
         .lines
         .get(rows)

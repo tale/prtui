@@ -9,9 +9,11 @@ pub enum Motion {
     Bottom,
 }
 
-/// The application's verb vocabulary. App-level keys resolve to one of these,
-/// which keeps command parsing separate from state transitions and testable
-/// without a terminal. Widget-internal editing stays inside the input router.
+/// The application's verb vocabulary.
+///
+/// App-level keys resolve to one of these, which keeps command parsing separate
+/// from state transitions and testable without a terminal. Widget-internal
+/// editing stays inside the input router.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Move(Motion),

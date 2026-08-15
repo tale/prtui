@@ -9,13 +9,13 @@ use std::ops::AsyncFnOnce;
 use std::rc::Rc;
 use std::time::Duration;
 use termina::escape::csi::{
-    Csi, Cursor, DecPrivateMode, DecPrivateModeCode, Edit, EraseInDisplay, Keyboard,
-    KittyKeyboardFlags, Mode, ThemeMode as TerminalThemeMode,
+    Csi, Cursor, DecPrivateMode, DecPrivateModeCode, Edit, EraseInDisplay,
+    Keyboard, KittyKeyboardFlags, Mode, ThemeMode as TerminalThemeMode,
 };
 use termina::escape::osc::{ColorOrQuery, DynamicColorNumber, Osc};
 use termina::{
-    Event, EventReader, EventStream, PlatformHandle, PlatformTerminal, Terminal as TerminaTerminal,
-    WindowSize,
+    Event, EventReader, EventStream, PlatformHandle, PlatformTerminal,
+    Terminal as TerminaTerminal, WindowSize,
 };
 
 pub type AppTerminal = RatatuiTerminal<TerminaBackend<SharedTerminal>>;
@@ -70,7 +70,10 @@ impl TerminaTerminal for SharedTerminal {
         self.0.borrow().read(filter)
     }
 
-    fn set_panic_hook(&mut self, hook: impl Fn(&mut PlatformHandle) + Send + Sync + 'static) {
+    fn set_panic_hook(
+        &mut self,
+        hook: impl Fn(&mut PlatformHandle) + Send + Sync + 'static,
+    ) {
         self.0.borrow_mut().set_panic_hook(hook);
     }
 }
@@ -110,25 +113,28 @@ fn query_theme() -> io::Result<Option<ThemeMode>> {
 
 fn theme_from_event(event: &Event) -> Option<ThemeMode> {
     match event {
-        Event::Csi(Csi::Mode(Mode::ReportTheme(TerminalThemeMode::Dark))) => Some(ThemeMode::Dark),
+        Event::Csi(Csi::Mode(Mode::ReportTheme(TerminalThemeMode::Dark))) => {
+            Some(ThemeMode::Dark)
+        }
         Event::Csi(Csi::Mode(Mode::ReportTheme(TerminalThemeMode::Light))) => {
             Some(ThemeMode::Light)
         }
-        Event::Osc(Osc::ChangeDynamicColors(DynamicColorNumber::TextBackgroundColor, colors)) => {
-            colors.iter().find_map(|color| match color {
-                ColorOrQuery::Color(color) => {
-                    let luma = u32::from(color.red) * 299
-                        + u32::from(color.green) * 587
-                        + u32::from(color.blue) * 114;
-                    Some(if luma >= 128_000 {
-                        ThemeMode::Light
-                    } else {
-                        ThemeMode::Dark
-                    })
-                }
-                ColorOrQuery::Query => None,
-            })
-        }
+        Event::Osc(Osc::ChangeDynamicColors(
+            DynamicColorNumber::TextBackgroundColor,
+            colors,
+        )) => colors.iter().find_map(|color| match color {
+            ColorOrQuery::Color(color) => {
+                let luma = u32::from(color.red) * 299
+                    + u32::from(color.green) * 587
+                    + u32::from(color.blue) * 114;
+                Some(if luma >= 128_000 {
+                    ThemeMode::Light
+                } else {
+                    ThemeMode::Dark
+                })
+            }
+            ColorOrQuery::Query => None,
+        }),
         _ => None,
     }
 }
@@ -136,9 +142,17 @@ fn theme_from_event(event: &Event) -> Option<ThemeMode> {
 /// Runs asynchronous application code inside a fully restored Termina session.
 /// `probe_graphics` asks the terminal whether it speaks the kitty graphics
 /// protocol; the answer reaches `run` as its third argument.
-pub async fn scope<T, F>(follow_theme: bool, probe_graphics: bool, run: F) -> Result<T>
+pub async fn scope<T, F>(
+    follow_theme: bool,
+    probe_graphics: bool,
+    run: F,
+) -> Result<T>
 where
-    F: for<'a> AsyncFnOnce(&'a mut AppTerminal, &'a mut EventStream, bool) -> Result<T>,
+    F: for<'a> AsyncFnOnce(
+        &'a mut AppTerminal,
+        &'a mut EventStream,
+        bool,
+    ) -> Result<T>,
 {
     let mut session = TerminalSession::enter(follow_theme, probe_graphics)?;
     let has_graphics = session.has_graphics;
@@ -146,7 +160,8 @@ where
 }
 
 /// One pixel transmitted and displayed with the cursor left free to move.
-const GRAPHICS_PROBE: &str = "\x1b_Gi=31,a=T,f=24,s=1,v=1,t=d,C=0,q=2;AAAA\x1b\\";
+const GRAPHICS_PROBE: &str =
+    "\x1b_Gi=31,a=T,f=24,s=1,v=1,t=d,C=0,q=2;AAAA\x1b\\";
 
 /// Drop the probe image and its data again.
 const GRAPHICS_CLEANUP: &str = "\x1b_Ga=d,d=I,i=31,q=2\x1b\\";
@@ -192,7 +207,9 @@ fn query_graphics(terminal: &mut SharedTerminal) -> io::Result<bool> {
 /// home means the sequence was discarded, and landing far right means it was
 /// printed as text.
 fn moved_one_cell(event: &Event) -> bool {
-    let Event::Csi(Csi::Cursor(Cursor::ActivePositionReport { line, col })) = event else {
+    let Event::Csi(Csi::Cursor(Cursor::ActivePositionReport { line, col })) =
+        event
+    else {
         return false;
     };
     let (line, col) = (line.get(), col.get());
@@ -281,11 +298,13 @@ impl TerminalSession {
 
             // Probed before the event stream parks its reader thread on the
             // same input, so the position report cannot be swallowed by it.
-            let has_graphics = probe_graphics && query_graphics(&mut output).unwrap_or(false);
+            let has_graphics =
+                probe_graphics && query_graphics(&mut output).unwrap_or(false);
             let events = EventStream::new(control.event_reader(), |_| true);
 
             let backend = TerminaBackend::new(output);
-            let terminal = RatatuiTerminal::new(backend).context("initializing terminal")?;
+            let terminal = RatatuiTerminal::new(backend)
+                .context("initializing terminal")?;
             Ok((terminal, events, has_graphics))
         })();
 
@@ -315,7 +334,10 @@ impl Drop for TerminalSession {
     }
 }
 
-fn restore_output(output: &mut impl Write, follow_theme: bool) -> io::Result<()> {
+fn restore_output(
+    output: &mut impl Write,
+    follow_theme: bool,
+) -> io::Result<()> {
     write!(
         output,
         "{}{}{}",

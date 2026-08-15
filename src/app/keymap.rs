@@ -34,22 +34,27 @@ impl Keymap {
         self.count.take().unwrap_or(1)
     }
 
-    pub(super) fn clear(&mut self) {
+    pub(super) const fn clear(&mut self) {
         self.count = None;
         self.operator = None;
     }
 
     /// `find_active` is true while either find surface — the tree filter or the
     /// diff search — holds a query, which is what escape clears.
-    pub fn resolve(&mut self, mode: Mode, find_active: bool, key: KeyEvent) -> Resolution {
+    pub fn resolve(
+        &mut self,
+        mode: Mode,
+        find_active: bool,
+        key: KeyEvent,
+    ) -> Resolution {
         if mode == Mode::Insert {
-            return self.resolve_insert(key);
+            return Self::resolve_insert(key);
         }
         if mode == Mode::Filter {
-            return self.resolve_filter(key);
+            return Self::resolve_filter(key);
         }
         if mode == Mode::Search {
-            return self.resolve_search(key);
+            return Self::resolve_search(key);
         }
 
         let KeyCode::Char(c) = key.code else {
@@ -63,7 +68,8 @@ impl Keymap {
         // Shift is represented both by the character's case and, depending on
         // the terminal, by this flag. Other modifiers must not trigger a plain
         // application binding.
-        if key.modifiers != Modifiers::NONE && key.modifiers != Modifiers::SHIFT {
+        if key.modifiers != Modifiers::NONE && key.modifiers != Modifiers::SHIFT
+        {
             self.clear();
             return Resolution::Unbound;
         }
@@ -127,7 +133,12 @@ impl Keymap {
         Resolution::Action(action)
     }
 
-    fn resolve_control(&mut self, mode: Mode, find_active: bool, c: char) -> Resolution {
+    const fn resolve_control(
+        &mut self,
+        mode: Mode,
+        find_active: bool,
+        c: char,
+    ) -> Resolution {
         self.clear();
 
         match c {
@@ -139,7 +150,12 @@ impl Keymap {
         }
     }
 
-    fn resolve_special(&mut self, mode: Mode, find_active: bool, key: KeyEvent) -> Resolution {
+    fn resolve_special(
+        &mut self,
+        mode: Mode,
+        find_active: bool,
+        key: KeyEvent,
+    ) -> Resolution {
         self.clear();
 
         if key.modifiers != Modifiers::NONE {
@@ -149,16 +165,22 @@ impl Keymap {
         match key.code {
             KeyCode::Tab => Resolution::Action(Action::TogglePane),
             KeyCode::Escape => Self::resolve_escape(mode, find_active),
-            KeyCode::Enter if mode == Mode::Normal => Resolution::Action(Action::Activate),
-            KeyCode::Right if mode == Mode::Normal => Resolution::Action(Action::FocusDiff),
-            KeyCode::Left if mode == Mode::Normal => Resolution::Action(Action::FocusFiles),
+            KeyCode::Enter if mode == Mode::Normal => {
+                Resolution::Action(Action::Activate)
+            }
+            KeyCode::Right if mode == Mode::Normal => {
+                Resolution::Action(Action::FocusDiff)
+            }
+            KeyCode::Left if mode == Mode::Normal => {
+                Resolution::Action(Action::FocusFiles)
+            }
             KeyCode::Down => Resolution::Action(Action::Move(Motion::Down(1))),
             KeyCode::Up => Resolution::Action(Action::Move(Motion::Up(1))),
             _ => Resolution::Unbound,
         }
     }
 
-    fn resolve_escape(mode: Mode, find_active: bool) -> Resolution {
+    const fn resolve_escape(mode: Mode, find_active: bool) -> Resolution {
         Resolution::Action(match mode {
             Mode::Normal if find_active => Action::ClearFind,
             Mode::Normal => Action::Quit,
@@ -171,7 +193,7 @@ impl Keymap {
 
     /// Searching mirrors filtering: printable keys build the query while the
     /// match-stepping and lifecycle keys stay application-level.
-    fn resolve_search(&mut self, key: KeyEvent) -> Resolution {
+    fn resolve_search(key: KeyEvent) -> Resolution {
         if key.modifiers == Modifiers::CONTROL {
             return match key.code {
                 KeyCode::Char('c') => Resolution::Action(Action::Quit),
@@ -197,13 +219,19 @@ impl Keymap {
 
     /// Filtering is an editor state: printable keys and cursor edits are
     /// forwarded, while navigation and lifecycle keys stay application-level.
-    fn resolve_filter(&mut self, key: KeyEvent) -> Resolution {
+    fn resolve_filter(key: KeyEvent) -> Resolution {
         if key.modifiers == Modifiers::CONTROL {
             return match key.code {
                 KeyCode::Char('c') => Resolution::Action(Action::Quit),
-                KeyCode::Char('[') => Resolution::Action(Action::CancelFileFilter),
-                KeyCode::Char('n') => Resolution::Action(Action::Move(Motion::Down(1))),
-                KeyCode::Char('p') => Resolution::Action(Action::Move(Motion::Up(1))),
+                KeyCode::Char('[') => {
+                    Resolution::Action(Action::CancelFileFilter)
+                }
+                KeyCode::Char('n') => {
+                    Resolution::Action(Action::Move(Motion::Down(1)))
+                }
+                KeyCode::Char('p') => {
+                    Resolution::Action(Action::Move(Motion::Up(1)))
+                }
                 _ => Resolution::Unbound,
             };
         }
@@ -225,7 +253,7 @@ impl Keymap {
     /// ours; every other key belongs to the editor widget. Escape and Ctrl+[
     /// are the same byte on a legacy terminal but arrive as distinct events
     /// once the Kitty protocol disambiguates them, so both are bound.
-    fn resolve_insert(&mut self, key: KeyEvent) -> Resolution {
+    fn resolve_insert(key: KeyEvent) -> Resolution {
         if key.code == KeyCode::Escape && key.modifiers == Modifiers::NONE {
             return Self::resolve_escape(Mode::Insert, false);
         }

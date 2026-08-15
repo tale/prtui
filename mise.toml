@@ -1,0 +1,18 @@
+[tools]
+lefthook = "latest"
+
+[hooks]
+postinstall = "lefthook install"
+
+[tasks.fmt]
+description = "Format every target"
+run = "cargo fmt --all"
+
+[tasks.lint]
+description = "Clippy across all targets, warnings denied"
+run = "cargo clippy --all-targets --all-features -- -D warnings"
+
+[tasks.check]
+description = "Everything the pre-commit hook runs, plus the tests"
+depends = ["lint"]
+run = ["cargo fmt --all -- --check", "cargo test"]
