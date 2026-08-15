@@ -3,6 +3,7 @@ use clap::{Parser, ValueEnum};
 use futures_core::Stream;
 use prtui::app::App;
 use prtui::app::input::InputRouter;
+use prtui::images::{self, Image, Images, Support};
 use prtui::model::{self, ChangedFile, PullRequest};
 use prtui::renderer::{Renderer, Segment, ThemeMode};
 use prtui::{gh, ui};
@@ -27,6 +28,33 @@ struct Args {
     /// Color theme; auto queries the terminal's actual background
     #[arg(long, value_enum, default_value_t = ThemeChoice::Auto)]
     theme: ThemeChoice,
+
+    /// Draw comment images with the kitty graphics protocol; auto asks the
+    /// terminal whether it supports them
+    #[arg(long, value_enum, default_value_t = ImageChoice::Auto)]
+    images: ImageChoice,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ImageChoice {
+    Auto,
+    Always,
+    Never,
+}
+
+impl ImageChoice {
+    const fn queries_terminal(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+
+    const fn resolve(self, has_graphics: bool) -> Support {
+        match self {
+            Self::Always => Support::Enabled,
+            Self::Never => Support::Disabled,
+            Self::Auto if has_graphics => Support::Enabled,
+            Self::Auto => Support::Unsupported,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -54,8 +82,28 @@ enum Message {
     Meta(Box<PullRequest>),
     Files(Vec<ChangedFile>),
     Highlight(ThemeMode, usize, Vec<Vec<Segment>>),
+    Image(String, Result<Image, String>),
     MetaFailed(String),
     FilesFailed(String),
+}
+
+/// Download and decode off the UI thread; a slow or broken attachment must not
+/// stall review.
+fn spawn_image_fetch(url: String, tx: mpsc::UnboundedSender<Message>) {
+    tokio::spawn(async move {
+        let fetched = gh::fetch_asset(&url).await;
+        let decoded = match fetched {
+            Ok(bytes) => tokio::task::spawn_blocking(move || images::decode(&bytes))
+                .await
+                .unwrap_or_else(|error| Err(error.into())),
+            Err(error) => Err(error),
+        };
+
+        let _ = tx.send(Message::Image(
+            url,
+            decoded.map_err(|error| error.to_string()),
+        ));
+    });
 }
 
 /// Highlighting all files costs ~600ms single-threaded but only ~150ms across
@@ -127,7 +175,7 @@ async fn main() -> Result<()> {
     // Syntax assets deserialize on a worker so the cost overlaps the fetch too.
     std::thread::spawn(move || renderer.preload());
 
-    run(rx, tx_ui, renderer, follow_terminal).await
+    run(rx, tx_ui, renderer, follow_terminal, args.images).await
 }
 
 async fn run(
@@ -135,10 +183,24 @@ async fn run(
     tx: mpsc::UnboundedSender<Message>,
     renderer: Renderer,
     follow_terminal: bool,
+    images: ImageChoice,
 ) -> Result<()> {
-    terminal::scope(follow_terminal, async |terminal, events| {
-        event_loop(terminal, events, &mut rx, tx, renderer, follow_terminal).await
-    })
+    terminal::scope(
+        follow_terminal,
+        images.queries_terminal(),
+        async |terminal, events, has_graphics| {
+            event_loop(
+                terminal,
+                events,
+                &mut rx,
+                tx,
+                renderer,
+                follow_terminal,
+                images.resolve(has_graphics),
+            )
+            .await
+        },
+    )
     .await
 }
 
@@ -149,8 +211,11 @@ async fn event_loop(
     tx: mpsc::UnboundedSender<Message>,
     renderer: Renderer,
     follow_terminal: bool,
+    support: Support,
 ) -> Result<()> {
     let mut app = App::with_renderer(renderer);
+    app.images = Images::new(support);
+    app.images.set_cell_size(terminal::cell_size(terminal));
     let mut input = InputRouter::default();
     let mut pending: u8 = 2;
     let mut failure: Option<String> = None;
@@ -159,6 +224,10 @@ async fn event_loop(
     animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     while !app.should_quit {
+        for url in app.images.take_pending() {
+            spawn_image_fetch(url, tx.clone());
+        }
+
         if is_dirty {
             let pending_hint = input.pending_hint();
             terminal::draw(terminal, |frame| ui::draw(frame, &mut app, &pending_hint))?;
@@ -183,6 +252,10 @@ async fn event_loop(
                         is_current
                     }
                     Message::Highlight(_, _, _) => false,
+                    Message::Image(url, image) => {
+                        app.images.insert(url, image);
+                        true
+                    }
                     Message::Meta(pr) => {
                         app.set_meta(*pr);
                         pending = pending.saturating_sub(1);
@@ -228,7 +301,10 @@ async fn event_loop(
                 let height = ui::diff_viewport_height(terminal.get_frame().area());
 
                 match event {
-                    Event::WindowResized(_) => is_dirty = true,
+                    Event::WindowResized(_) => {
+                        app.images.set_cell_size(terminal::cell_size(terminal));
+                        is_dirty = true;
+                    }
                     Event::Key(key) => {
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                             input.dispatch_key(&mut app, key, height);

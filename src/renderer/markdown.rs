@@ -10,13 +10,36 @@ struct StyledLine {
     preserve_whitespace: bool,
 }
 
+/// A rendered comment is mostly text, but images are handed to the caller whole
+/// so a terminal that can draw them is not stuck with their alt text.
+pub enum Block {
+    Text(Line<'static>),
+    Image { url: String, alt: String },
+}
+
+enum Piece {
+    Line(StyledLine),
+    Image { url: String, alt: String },
+}
+
+impl Piece {
+    fn is_content(&self) -> bool {
+        !matches!(self, Self::Line(line) if line.spans.is_empty())
+    }
+}
+
+struct PendingImage {
+    url: String,
+    alt: String,
+}
+
 struct ListState {
     next: Option<u64>,
 }
 
 struct Builder {
     theme: Theme,
-    lines: Vec<StyledLine>,
+    lines: Vec<Piece>,
     current: StyledLine,
     style: Style,
     style_stack: Vec<Style>,
@@ -27,6 +50,7 @@ struct Builder {
     table_cell: usize,
     table_header: bool,
     in_summary: bool,
+    image: Option<PendingImage>,
 }
 
 impl Builder {
@@ -44,6 +68,7 @@ impl Builder {
             table_cell: 0,
             table_header: false,
             in_summary: false,
+            image: None,
         }
     }
 
@@ -57,6 +82,11 @@ impl Builder {
     }
 
     fn append_current(&mut self, text: impl Into<String>) {
+        if let Some(image) = &mut self.image {
+            image.alt.push_str(&text.into());
+            return;
+        }
+
         let style = if self.in_summary {
             self.style
                 .fg(self.theme.heading)
@@ -84,14 +114,20 @@ impl Builder {
         if self.current.spans.is_empty() {
             return;
         }
-        self.lines.push(std::mem::take(&mut self.current));
+        self.lines
+            .push(Piece::Line(std::mem::take(&mut self.current)));
     }
 
     fn blank_line(&mut self) {
         self.finish_line();
-        if self.lines.last().is_some_and(|line| !line.spans.is_empty()) {
-            self.lines.push(StyledLine::default());
+        if self.lines.last().is_some_and(Piece::is_content) {
+            self.lines.push(Piece::Line(StyledLine::default()));
         }
+    }
+
+    fn push_image(&mut self, url: String, alt: String) {
+        self.finish_line();
+        self.lines.push(Piece::Image { url, alt });
     }
 
     fn push_style(&mut self, style: Style) {
@@ -208,9 +244,12 @@ impl Builder {
                         .add_modifier(Modifier::UNDERLINED),
                 );
             }
-            Tag::Image { .. } => {
-                self.append("image: ", Style::default().fg(self.theme.muted));
-                self.push_style(self.style.fg(self.theme.accent));
+            Tag::Image { dest_url, .. } => {
+                self.finish_line();
+                self.image = Some(PendingImage {
+                    url: dest_url.into_string(),
+                    alt: String::new(),
+                });
             }
             Tag::DefinitionList => self.finish_line(),
             Tag::DefinitionListTitle => {
@@ -274,11 +313,15 @@ impl Builder {
             }
             TagEnd::TableRow => self.finish_line(),
             TagEnd::Table => self.blank_line(),
+            TagEnd::Image => {
+                if let Some(image) = self.image.take() {
+                    self.push_image(image.url, image.alt);
+                }
+            }
             TagEnd::Emphasis
             | TagEnd::Strong
             | TagEnd::Strikethrough
             | TagEnd::Link
-            | TagEnd::Image
             | TagEnd::Superscript
             | TagEnd::Subscript
             | TagEnd::DefinitionListTitle => self.pop_style(),
@@ -320,6 +363,14 @@ impl Builder {
         let lower = raw.to_ascii_lowercase();
         if lower.contains("<br") {
             self.finish_line();
+        }
+
+        // Attachments dropped into a comment often arrive as raw <img> tags.
+        if lower.contains("<img") {
+            for (url, alt) in img_tags(raw) {
+                self.push_image(url, alt);
+            }
+            return;
         }
 
         if let Some(summary_start) = lower.find("<summary") {
@@ -378,7 +429,10 @@ impl Builder {
             Event::Start(tag) => self.start_tag(tag),
             Event::End(tag) => self.end_tag(tag),
             Event::Text(text) if self.code_language.is_some() => self.code_text(&text),
-            Event::Text(text) => self.append_current(text.into_string()),
+            Event::Text(text) => match image_link(&text).filter(|_| self.image.is_none()) {
+                Some(url) => self.push_image(url, String::new()),
+                None => self.append_current(text.into_string()),
+            },
             Event::Code(code) => self.append(
                 code.into_string(),
                 self.style.fg(self.theme.orange).bg(self.theme.cursor),
@@ -409,23 +463,55 @@ impl Builder {
         }
     }
 
-    fn finish(mut self, width: usize) -> Vec<Line<'static>> {
+    fn finish(mut self) -> Vec<Piece> {
         self.finish_line();
-        while self.lines.last().is_some_and(|line| line.spans.is_empty()) {
+        while self.lines.last().is_some_and(|piece| !piece.is_content()) {
             self.lines.pop();
         }
         self.lines
-            .into_iter()
-            .flat_map(|line| wrap_line(line, width))
-            .collect()
     }
 }
 
-pub fn render(body: &str, width: usize, theme: Theme) -> Vec<Line<'static>> {
+/// Text lines plus the images the comment referenced, in document order.
+pub fn render_blocks(body: &str, width: usize, theme: Theme) -> Vec<Block> {
     if width == 0 {
         return Vec::new();
     }
 
+    build(body, theme)
+        .into_iter()
+        .flat_map(|piece| match piece {
+            Piece::Line(line) => wrap_line(line, width)
+                .into_iter()
+                .map(Block::Text)
+                .collect(),
+            Piece::Image { url, alt } => vec![Block::Image { url, alt }],
+        })
+        .collect()
+}
+
+/// Rendered text only; images degrade to a single labelled line.
+pub fn render(body: &str, width: usize, theme: Theme) -> Vec<Line<'static>> {
+    render_blocks(body, width, theme)
+        .into_iter()
+        .flat_map(|block| match block {
+            Block::Text(line) => vec![line],
+            Block::Image { url, alt } => image_lines(&url, &alt, None, width, theme),
+        })
+        .collect()
+}
+
+pub fn image_urls(body: &str) -> Vec<String> {
+    build(body, Theme::dark())
+        .into_iter()
+        .filter_map(|piece| match piece {
+            Piece::Image { url, .. } => Some(url),
+            Piece::Line(_) => None,
+        })
+        .collect()
+}
+
+fn build(body: &str, theme: Theme) -> Vec<Piece> {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_STRIKETHROUGH
@@ -435,7 +521,102 @@ pub fn render(body: &str, width: usize, theme: Theme) -> Vec<Line<'static>> {
     for event in Parser::new_ext(body, options) {
         builder.event(event);
     }
-    builder.finish(width)
+    builder.finish()
+}
+
+/// An image the caller will not draw, shown as its link. `reason` leads because
+/// an attachment URL is a UUID that wraps away, and why it is missing should not.
+pub fn image_lines(
+    url: &str,
+    alt: &str,
+    reason: Option<&str>,
+    width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let label = if alt.trim().is_empty() { url } else { alt };
+    let mut spans = vec![Span::styled("▭ ", Style::default().fg(theme.muted))];
+
+    if let Some(reason) = reason {
+        spans.push(Span::styled(
+            format!("{reason} · "),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    spans.push(Span::styled(
+        label.to_string(),
+        Style::default().fg(theme.accent),
+    ));
+
+    wrap_line(
+        StyledLine {
+            spans,
+            preserve_whitespace: false,
+        },
+        width,
+    )
+}
+
+/// GitHub renders an attachment URL pasted on its own as the image itself, and
+/// that is how the web UI writes uploads into a comment body.
+fn image_link(text: &str) -> Option<String> {
+    const ATTACHMENTS: [&str; 3] = [
+        "https://github.com/user-attachments/assets/",
+        "https://user-images.githubusercontent.com/",
+        "https://private-user-images.githubusercontent.com/",
+    ];
+    const EXTENSIONS: [&str; 5] = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
+
+    let url = text.trim();
+    if url.is_empty() || url.contains(char::is_whitespace) || !url.starts_with("https://") {
+        return None;
+    }
+
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    let is_image = ATTACHMENTS.iter().any(|prefix| url.starts_with(prefix))
+        || EXTENSIONS.iter().any(|extension| path.ends_with(extension));
+
+    is_image.then(|| url.to_string())
+}
+
+/// Source URL and alt text of every `<img>` in a raw HTML chunk.
+fn img_tags(raw: &str) -> Vec<(String, String)> {
+    let lower = raw.to_ascii_lowercase();
+    let mut tags = Vec::new();
+    let mut cursor = 0;
+
+    while let Some(offset) = lower[cursor..].find("<img") {
+        let start = cursor + offset;
+        let end = lower[start..]
+            .find('>')
+            .map_or(raw.len(), |offset| start + offset);
+        cursor = end.max(start + 4);
+
+        let Some(url) = attribute(&raw[start..end], "src") else {
+            continue;
+        };
+        tags.push((url, attribute(&raw[start..end], "alt").unwrap_or_default()));
+    }
+
+    tags
+}
+
+/// Lowercasing is byte-length preserving for ASCII, so offsets found in the
+/// lowered copy index the original safely.
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let start = tag.to_ascii_lowercase().find(&format!("{name}="))? + name.len() + 1;
+    let value = tag.get(start..)?;
+
+    let quote = value.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return value.split_whitespace().next().map(str::to_string);
+    }
+
+    let value = &value[quote.len_utf8()..];
+    Some(value[..value.find(quote)?].to_string())
 }
 
 fn wrap_line(line: StyledLine, width: usize) -> Vec<Line<'static>> {
@@ -640,5 +821,68 @@ mod tests {
         assert!(text.contains("┌─ diff"));
         assert!(text.contains("│ -old"));
         assert!(text.contains("│ +new"));
+    }
+
+    #[test]
+    fn lifts_markdown_and_html_images_out_of_the_text() {
+        let markdown = "Before\n\n![the fix](https://example.com/a.png)\n\nAfter\n\n\
+             <img width=\"600\" alt=\"raw tag\" src='https://example.com/b.png' />";
+        let blocks = render_blocks(markdown, 40, Theme::dark());
+
+        let images: Vec<(&str, &str)> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Image { url, alt } => Some((url.as_str(), alt.as_str())),
+                Block::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            images,
+            vec![
+                ("https://example.com/a.png", "the fix"),
+                ("https://example.com/b.png", "raw tag"),
+            ]
+        );
+        assert_eq!(
+            image_urls(markdown),
+            vec![
+                "https://example.com/a.png".to_string(),
+                "https://example.com/b.png".to_string(),
+            ]
+        );
+
+        // Callers that cannot draw images still see the surrounding prose.
+        let text = rendered_text(&render(markdown, 40, Theme::dark()));
+        assert!(text.contains("Before"));
+        assert!(text.contains("▭ the fix"));
+        assert!(text.contains("After"));
+    }
+
+    #[test]
+    fn treats_a_bare_attachment_url_as_the_image_it_renders_to() {
+        let body = "this pattern is really weird to me.\n\n\
+             https://github.com/user-attachments/assets/a9f8c825-a13f-4760-ae7b-6402471435aa";
+        assert_eq!(
+            image_urls(body),
+            vec![
+                "https://github.com/user-attachments/assets/a9f8c825-a13f-4760-ae7b-6402471435aa"
+                    .to_string()
+            ]
+        );
+
+        assert_eq!(
+            image_urls("look at https://example.com/shot.png inline"),
+            Vec::<String>::new(),
+            "a URL mixed into a sentence stays prose"
+        );
+        assert_eq!(
+            image_urls("https://example.com/pull/9000"),
+            Vec::<String>::new(),
+            "an ordinary link is not an image"
+        );
+        assert_eq!(
+            image_urls("https://example.com/a.PNG?raw=1"),
+            vec!["https://example.com/a.PNG?raw=1".to_string()]
+        );
     }
 }

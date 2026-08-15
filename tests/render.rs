@@ -1,6 +1,7 @@
 use prtui::app::action::Action;
 use prtui::app::input::InputRouter;
 use prtui::app::{App, Pane};
+use prtui::images::{self, CellSize, Images, Support};
 use prtui::model::{LineKind, Side, parse_files, parse_meta};
 use prtui::renderer::ThemeMode;
 use prtui::ui;
@@ -75,7 +76,9 @@ fn renders_unresolved_thread_summary_inline() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let rendered = terminal.backend().to_string();
 
@@ -103,7 +106,9 @@ fn collapsed_thread_summary_uses_rendered_gfm_text() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
 
     assert!(
@@ -139,7 +144,9 @@ fn focused_thread_expands_into_its_full_conversation() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let rendered = terminal.backend().to_string();
     let focused_row = rendered
@@ -179,7 +186,9 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let first_page = terminal.backend().to_string();
 
@@ -191,7 +200,9 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
 
     app.thread_scroll = app.thread_scroll_limit;
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let last_page = terminal.backend().to_string();
 
@@ -203,7 +214,9 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
     app.thread_scroll = 0;
     let mut large_terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     large_terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
 
     assert!(app.thread_scroll_limit < small_viewport_limit);
@@ -243,13 +256,17 @@ fn long_reply_keeps_its_identity_visible_while_scrolling() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     assert!(app.thread_scroll_limit > 5);
 
     app.thread_scroll = 5;
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let rendered = terminal.backend().to_string();
 
@@ -283,7 +300,9 @@ fn multiple_threads_on_one_line_render_as_one_group() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let rendered = terminal.backend().to_string();
 
@@ -294,7 +313,9 @@ fn multiple_threads_on_one_line_render_as_one_group() {
     app.focused_thread = Some(threads[3].id.clone());
     app.expanded_thread = Some(threads[3].id.clone());
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let expanded = terminal.backend().to_string();
 
@@ -318,7 +339,9 @@ fn resolved_threads_render_as_compact_rows() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let rendered = terminal.backend().to_string();
 
@@ -361,7 +384,9 @@ fn left_side_threads_anchor_to_removed_lines() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
 
     assert!(
@@ -397,7 +422,9 @@ fn outdated_threads_render_compactly_after_the_diff() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let rendered = terminal.backend().to_string();
 
@@ -438,7 +465,9 @@ fn renders_header_and_diff() {
     let mut app = load();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
 
     let rendered = terminal.backend().to_string();
@@ -472,7 +501,9 @@ fn multi_digit_thread_badge_keeps_diff_counts_visible() {
 
     let mut terminal = Terminal::new(TestBackend::new(52, 12)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let rendered = terminal.backend().to_string();
 
@@ -489,7 +520,9 @@ fn pending_input_is_visible_in_the_status_line() {
     let mut app = load();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, "123456"))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "123456");
+        })
         .unwrap();
 
     assert!(terminal.backend().to_string().contains("123456"));
@@ -501,7 +534,9 @@ fn loading_state_is_centered_once_and_animates() {
     let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
 
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let first = terminal.backend().to_string();
     assert_eq!(first.matches("loading changes").count(), 1);
@@ -509,7 +544,9 @@ fn loading_state_is_centered_once_and_animates() {
 
     app.advance_loading();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let second = terminal.backend().to_string();
     assert!(second.contains('⠙'));
@@ -525,7 +562,9 @@ fn files_release_the_loading_gate_without_metadata() {
 
     let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let rendered = terminal.backend().to_string();
 
@@ -541,7 +580,9 @@ fn metadata_can_arrive_while_the_file_loader_continues() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let rendered = terminal.backend().to_string();
 
@@ -554,7 +595,9 @@ fn bottom_bar_keeps_only_contextual_actions() {
     let mut app = load();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let rendered = terminal.backend().to_string();
 
@@ -571,7 +614,9 @@ fn file_filter_renders_its_query_and_only_the_matching_path() {
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let rendered = terminal.backend().to_string();
 
@@ -592,7 +637,9 @@ fn committed_filter_stays_visible_in_normal_tree_mode() {
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
     let rendered = terminal.backend().to_string();
 
@@ -640,7 +687,9 @@ fn renders_large_diff_in_constant_time() {
     let started = std::time::Instant::now();
     for _ in 0..500 {
         terminal
-            .draw(|frame| ui::draw(frame, &mut app, ""))
+            .draw(|frame| {
+                ui::draw(frame, &mut app, "");
+            })
             .unwrap();
     }
     let elapsed = started.elapsed();
@@ -699,7 +748,9 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
         .unwrap();
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
 
     assert_eq!(
@@ -773,7 +824,11 @@ fn visual_selection_paints_every_row_in_the_span() {
 
     let snapshot = |app: &mut App| -> Vec<Option<ratatui::style::Color>> {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-        terminal.draw(|frame| ui::draw(frame, app, "")).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::draw(frame, app, "");
+            })
+            .unwrap();
         let buffer = terminal.backend().buffer();
         (0..30)
             .map(|row| buffer.cell((45, row)).unwrap().style().bg)
@@ -814,7 +869,9 @@ fn every_selected_row_carries_the_left_bar() {
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
 
     let buffer = terminal.backend().buffer();
@@ -845,7 +902,9 @@ fn the_composer_opens_over_the_diff_with_its_anchor_in_the_title() {
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
 
     let rendered = terminal.backend().to_string();
@@ -877,9 +936,199 @@ fn a_saved_draft_marks_its_lines_in_the_gutter() {
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
-        .draw(|frame| ui::draw(frame, &mut app, ""))
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
         .unwrap();
 
     let rendered = terminal.backend().to_string();
     assert!(rendered.contains('✎'), "draft lines carry a pencil marker");
+}
+
+const IMAGE_URL: &str = "https://github.com/user-attachments/assets/shot.png";
+
+fn thread_with_image(app: &mut App) -> prtui::model::ReviewThread {
+    let mut thread = app
+        .pr
+        .as_ref()
+        .unwrap()
+        .threads
+        .iter()
+        .find(|thread| !thread.is_resolved)
+        .unwrap()
+        .clone();
+    thread.comments[0].body = format!("Before and after:\n\n![shot]({IMAGE_URL})");
+    app.threads_by_path
+        .insert(thread.path.clone(), vec![thread.clone()]);
+    thread
+}
+
+#[test]
+fn expanding_a_thread_queues_its_images() {
+    let mut app = load();
+    let thread = thread_with_image(&mut app);
+    show_thread(&mut app, &thread);
+    app.images = Images::new(Support::Enabled);
+    app.focused_thread = Some(thread.id.clone());
+
+    app.apply(Action::Activate, 20);
+
+    assert_eq!(app.images.take_pending(), vec![IMAGE_URL.to_string()]);
+}
+
+#[test]
+fn a_loaded_image_is_drawn_over_the_rows_it_reserves() {
+    let mut app = load();
+    let thread = thread_with_image(&mut app);
+    show_thread(&mut app, &thread);
+    app.images = Images::new(Support::Enabled);
+    app.images.set_cell_size(Some(CellSize {
+        width: 8,
+        height: 16,
+    }));
+    app.images.insert(
+        IMAGE_URL.into(),
+        images::decode(include_bytes!("fixtures/screenshot.png")).map_err(|err| err.to_string()),
+    );
+    app.focused_thread = Some(thread.id.clone());
+    app.expanded_thread = Some(thread.id.clone());
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let mut commands = String::new();
+    terminal
+        .draw(|frame| commands = ui::draw(frame, &mut app, ""))
+        .unwrap();
+
+    // 80x80 pixels over 8x16 cells is 10 columns and 5 rows.
+    assert!(commands.contains("\x1b_Ga=t,i=1,f=100,t=d,q=2,"));
+    assert!(
+        commands.contains("a=p,i=1,p=1,c=10,r=5,x=0,y=0,w=80,h=80,C=1,q=2"),
+        "expected a full-height placement, got {commands:?}"
+    );
+    assert!(!terminal.backend().to_string().contains("▭ shot"));
+}
+
+#[test]
+fn scrolling_past_an_image_crops_it_to_what_is_visible() {
+    let mut app = load();
+    let mut thread = thread_with_image(&mut app);
+    thread.comments[0].body = format!("![shot]({IMAGE_URL})\n\n")
+        + &(1..=20)
+            .map(|line| format!("Paragraph {line}\n\n"))
+            .collect::<String>();
+    app.threads_by_path
+        .insert(thread.path.clone(), vec![thread.clone()]);
+    show_thread(&mut app, &thread);
+    app.images = Images::new(Support::Enabled);
+    app.images.set_cell_size(Some(CellSize {
+        width: 8,
+        height: 16,
+    }));
+    app.images.insert(
+        IMAGE_URL.into(),
+        images::decode(include_bytes!("fixtures/screenshot.png")).map_err(|err| err.to_string()),
+    );
+    app.focused_thread = Some(thread.id.clone());
+    app.expanded_thread = Some(thread.id.clone());
+    app.thread_scroll = 3;
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let mut commands = String::new();
+    terminal
+        .draw(|frame| commands = ui::draw(frame, &mut app, ""))
+        .unwrap();
+
+    assert!(
+        commands.contains(",r=3,x=0,y=32,w=80,h=48,"),
+        "the scrolled-off rows should be cropped from the source, got {commands:?}"
+    );
+}
+
+#[test]
+fn terminals_without_graphics_support_keep_the_alt_text() {
+    let mut app = load();
+    let thread = thread_with_image(&mut app);
+    show_thread(&mut app, &thread);
+    app.focused_thread = Some(thread.id.clone());
+    app.expanded_thread = Some(thread.id.clone());
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let mut commands = String::new();
+    terminal
+        .draw(|frame| commands = ui::draw(frame, &mut app, ""))
+        .unwrap();
+
+    assert!(commands.is_empty());
+    assert!(terminal.backend().to_string().contains("▭ shot"));
+}
+
+#[test]
+fn the_file_tree_marks_files_whose_threads_are_all_resolved() {
+    let mut app = load();
+    let path = app.files[0].path.clone();
+    let mut thread = app.pr.as_ref().unwrap().threads[1].clone();
+    thread.is_resolved = true;
+    app.threads_by_path.insert(path, vec![thread; 2]);
+
+    let mut terminal = Terminal::new(TestBackend::new(52, 12)).unwrap();
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    assert!(
+        rendered.lines().any(|line| line.contains("◇ 2")),
+        "a settled conversation still marks its file, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn an_undrawable_attachment_says_why() {
+    let mut app = load();
+    let thread = thread_with_image(&mut app);
+    show_thread(&mut app, &thread);
+    app.images = Images::new(Support::Enabled);
+    app.images
+        .insert(IMAGE_URL.into(), Err("video attachment".into()));
+    app.focused_thread = Some(thread.id.clone());
+    app.expanded_thread = Some(thread.id.clone());
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
+        .unwrap();
+    let rendered = terminal.backend().to_string();
+
+    assert!(
+        rendered.contains("▭ video attachment · shot"),
+        "the reason leads and the link still reads as itself, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn a_terminal_that_failed_the_probe_says_so() {
+    let mut app = load();
+    let thread = thread_with_image(&mut app);
+    show_thread(&mut app, &thread);
+    app.images = Images::new(Support::Unsupported);
+    app.focused_thread = Some(thread.id.clone());
+    app.expanded_thread = Some(thread.id.clone());
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, &mut app, "");
+        })
+        .unwrap();
+
+    assert!(
+        terminal
+            .backend()
+            .to_string()
+            .contains("▭ no image support · shot")
+    );
 }

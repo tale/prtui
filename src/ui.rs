@@ -1,7 +1,9 @@
 use crate::app::draft::{Draft, Side};
 use crate::app::mode::Mode;
 use crate::app::{App, Pane};
+use crate::images::{Images, Placement, Status, Support};
 use crate::model::{DiffLine, LineKind, ReviewThread};
+use crate::renderer::markdown::Block as MarkdownBlock;
 use crate::renderer::{Theme, markdown};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -14,11 +16,34 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const GUTTER: usize = 13;
 const MAX_VISIBLE_THREAD_SUMMARIES: usize = 4;
 
+/// One rendered row, plus the horizontal slice of an image it stands in for.
+/// The row itself stays blank: the terminal paints over it after the frame.
+struct ThreadRow<'a> {
+    line: Line<'a>,
+    image: Option<ImageSlice>,
+}
+
+impl<'a> ThreadRow<'a> {
+    const fn text(line: Line<'a>) -> Self {
+        Self { line, image: None }
+    }
+}
+
+#[derive(Clone)]
+struct ImageSlice {
+    url: String,
+    column: u16,
+    cols: u16,
+    row_index: u16,
+    total_rows: u16,
+}
+
 #[derive(Clone)]
 struct ExpandedThreadRow {
     spans: Vec<Span<'static>>,
     comment_index: usize,
     is_header: bool,
+    image: Option<ImageSlice>,
 }
 
 #[derive(Clone, Copy)]
@@ -27,6 +52,7 @@ struct ThreadRenderState<'a> {
     expanded: Option<&'a str>,
     scroll: usize,
     window: usize,
+    images: &'a Images,
 }
 
 impl ThreadRenderState<'_> {
@@ -39,7 +65,9 @@ impl ThreadRenderState<'_> {
     }
 }
 
-pub fn draw(frame: &mut Frame, app: &mut App, pending_hint: &str) {
+/// Returns the terminal escape sequences that paint this frame's images, which
+/// the caller writes inside the same synchronized update as the cells.
+pub fn draw(frame: &mut Frame, app: &mut App, pending_hint: &str) -> String {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -54,10 +82,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, pending_hint: &str) {
     if app.is_loading() {
         draw_loading(frame, app, rows[1]);
         draw_bottom_bar(frame, app, pending_hint, rows[2]);
-        return;
+        return app.images.frame_commands(&[]);
     }
 
-    let diff_area = if app.is_files_visible {
+    let (diff_area, placements) = if app.is_files_visible {
         let width = files_width(rows[1].width);
         let cols = Layout::default()
             .direction(Direction::Horizontal)
@@ -65,15 +93,22 @@ pub fn draw(frame: &mut Frame, app: &mut App, pending_hint: &str) {
             .split(rows[1]);
 
         draw_files(frame, app, cols[0]);
-        draw_diff(frame, app, cols[1]);
-        cols[1]
+        (cols[1], draw_diff(frame, app, cols[1]))
     } else {
-        draw_diff(frame, app, rows[1]);
-        rows[1]
+        (rows[1], draw_diff(frame, app, rows[1]))
     };
 
     draw_bottom_bar(frame, app, pending_hint, rows[2]);
     draw_composer(frame, app, diff_area);
+
+    // Images sit above the cells, so they would hide the floating composer.
+    let placements = if app.composer.is_some() {
+        Vec::new()
+    } else {
+        placements
+    };
+
+    app.images.frame_commands(&placements)
 }
 
 /// Roughly a quarter of the terminal, clamped so the tree neither crowds the
@@ -217,16 +252,19 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
         .map(|&index| {
             let file = &app.files[index];
             let is_selected = index == app.selected_file;
-            let unresolved = app
+            let threads = app
                 .threads_by_path
                 .get(&file.path)
-                .map(|list| list.iter().filter(|t| !t.is_resolved).count())
-                .unwrap_or(0);
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let unresolved = threads.iter().filter(|t| !t.is_resolved).count();
 
-            let marker = if unresolved > 0 {
-                format!(" ◆ {unresolved}")
-            } else {
-                "  ".into()
+            // A settled conversation still says something about the file, so it
+            // keeps a hollow marker instead of disappearing from the tree.
+            let (marker, marker_color) = match (unresolved, threads.len()) {
+                (0, 0) => ("  ".to_string(), theme.dim),
+                (0, total) => (format!(" ◇ {total}"), theme.muted),
+                (open, _) => (format!(" ◆ {open}"), theme.purple),
             };
             let adds = format!("+{}", file.additions);
             let dels = format!("-{}", file.deletions);
@@ -257,7 +295,7 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled(dir, base.fg(theme.dim)),
                 Span::styled(name, base.fg(status_color)),
                 Span::styled(" ".repeat(pad), base),
-                Span::styled(marker, base.fg(theme.purple)),
+                Span::styled(marker, base.fg(marker_color)),
                 Span::styled(format!("{adds:>5}"), base.fg(theme.success)),
                 Span::styled(format!(" {dels:>5}"), base.fg(theme.danger)),
             ])
@@ -274,7 +312,7 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(rows), list_area);
 }
 
-fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<Placement> {
     let theme = app.theme();
     let is_focused = app.pane == Pane::Diff;
     let title = app.current_file().map_or_else(
@@ -328,7 +366,7 @@ fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let Some(file) = app.current_file() else {
         draw_empty_pane(frame, app, inner, "no diff selected");
-        return;
+        return Vec::new();
     };
 
     let height = inner.height as usize;
@@ -346,16 +384,18 @@ fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
         expanded: app.expanded_thread.as_deref(),
         scroll: app.thread_scroll,
         window: expanded_thread_window(height),
+        images: &app.images,
     };
 
     if file.lines.is_empty() {
         let all: Vec<&ReviewThread> = threads.iter().collect();
-        let rows: Vec<Line> = render_thread_groups(&all, width, theme, thread_state)
+        let rows: Vec<ThreadRow<'_>> = render_thread_groups(&all, width, theme, thread_state)
             .into_iter()
             .take(height)
             .collect();
-        frame.render_widget(Paragraph::new(rows), inner);
-        return;
+        let (lines, placements) = split_image_rows(rows, inner);
+        frame.render_widget(Paragraph::new(lines), inner);
+        return placements;
     }
 
     // Keep enough room below the source cursor for its inline thread preview.
@@ -387,7 +427,7 @@ fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Only source lines in and immediately around the viewport are converted
     // to spans; large diffs retain their constant steady-state render cost.
-    let mut rows: Vec<Line> = Vec::with_capacity(height);
+    let mut rows: Vec<ThreadRow<'_>> = Vec::with_capacity(height);
     for (index, line) in file.lines.iter().enumerate().skip(visible_start) {
         if rows.len() >= height {
             break;
@@ -404,13 +444,13 @@ fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                 theme.hunk
             };
 
-            rows.push(Line::from(Span::styled(
+            rows.push(ThreadRow::text(Line::from(Span::styled(
                 text,
                 Style::default()
                     .bg(bg)
                     .fg(theme.muted)
                     .add_modifier(Modifier::ITALIC),
-            )));
+            ))));
             continue;
         }
 
@@ -510,7 +550,7 @@ fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().bg(bg),
         ));
 
-        rows.push(Line::from(spans));
+        rows.push(ThreadRow::text(Line::from(spans)));
 
         let available = height.saturating_sub(rows.len());
         rows.extend(
@@ -529,7 +569,45 @@ fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    frame.render_widget(Paragraph::new(rows), inner);
+    let (lines, placements) = split_image_rows(rows, inner);
+    frame.render_widget(Paragraph::new(lines), inner);
+    placements
+}
+
+/// Splits rendered rows into the text the buffer draws and the image placements
+/// the terminal paints over them, merging each image's rows into one placement.
+fn split_image_rows<'a>(rows: Vec<ThreadRow<'a>>, area: Rect) -> (Vec<Line<'a>>, Vec<Placement>) {
+    let mut lines = Vec::with_capacity(rows.len());
+    let mut placements: Vec<Placement> = Vec::new();
+
+    for (index, row) in rows.into_iter().enumerate() {
+        lines.push(row.line);
+
+        let Some(slice) = row.image else {
+            continue;
+        };
+        let screen_row = area.y + index as u16;
+        let continues = placements.last().is_some_and(|last| {
+            last.url == slice.url
+                && last.row + last.rows == screen_row
+                && last.skip_rows + last.rows == slice.row_index
+        });
+
+        match placements.last_mut() {
+            Some(last) if continues => last.rows += 1,
+            _ => placements.push(Placement {
+                url: slice.url,
+                column: area.x + slice.column,
+                row: screen_row,
+                cols: slice.cols,
+                rows: 1,
+                skip_rows: slice.row_index,
+                total_rows: slice.total_rows,
+            }),
+        }
+    }
+
+    (lines, placements)
 }
 
 fn thread_rows_for_line(
@@ -538,7 +616,7 @@ fn thread_rows_for_line(
     width: usize,
     theme: Theme,
     render_state: ThreadRenderState<'_>,
-) -> Vec<Line<'static>> {
+) -> Vec<ThreadRow<'static>> {
     let anchored: Vec<&ReviewThread> = threads
         .iter()
         .filter(|thread| !thread.is_outdated && thread.anchors_to(line))
@@ -551,7 +629,7 @@ fn outdated_thread_rows(
     width: usize,
     theme: Theme,
     render_state: ThreadRenderState<'_>,
-) -> Vec<Line<'static>> {
+) -> Vec<ThreadRow<'static>> {
     let outdated: Vec<&ReviewThread> = threads.iter().filter(|thread| thread.is_outdated).collect();
     render_thread_groups(&outdated, width, theme, render_state)
 }
@@ -612,7 +690,7 @@ fn render_thread_groups(
     width: usize,
     theme: Theme,
     render_state: ThreadRenderState<'_>,
-) -> Vec<Line<'static>> {
+) -> Vec<ThreadRow<'static>> {
     let mut rows = Vec::new();
     for state in [
         ThreadSummaryState::Open,
@@ -641,7 +719,7 @@ fn render_thread_group(
     width: usize,
     theme: Theme,
     render_state: ThreadRenderState<'_>,
-) -> Vec<Line<'static>> {
+) -> Vec<ThreadRow<'static>> {
     if threads.is_empty() {
         return Vec::new();
     }
@@ -662,20 +740,19 @@ fn render_thread_group(
     if threads.len() == 1 {
         let thread = threads[0];
         let expanded = render_state.is_expanded(thread);
-        let mut rows = vec![thread_summary_line(
+        let mut rows = vec![ThreadRow::text(thread_summary_line(
             thread,
             &format!("{} ", state.marker()),
             Some(state.label()),
             context,
-        )];
+        ))];
         if expanded {
             rows.extend(render_expanded_thread(
                 thread,
                 indent,
                 width,
                 theme,
-                render_state.scroll,
-                render_state.window,
+                render_state,
             ));
         }
         return rows;
@@ -683,7 +760,7 @@ fn render_thread_group(
 
     let count = threads.len();
     let heading = format!("{} {count} {} threads", state.marker(), state.label());
-    let mut rows = vec![thread_card_line(
+    let mut rows = vec![ThreadRow::text(thread_card_line(
         indent,
         width,
         vec![thread_span(
@@ -694,7 +771,7 @@ fn render_thread_group(
         )],
         theme,
         false,
-    )];
+    ))];
 
     let focused_position = threads
         .iter()
@@ -712,7 +789,7 @@ fn render_thread_group(
     let end = (start + MAX_VISIBLE_THREAD_SUMMARIES).min(count);
 
     if start > 0 {
-        rows.push(thread_card_line(
+        rows.push(ThreadRow::text(thread_card_line(
             indent,
             width,
             vec![
@@ -726,17 +803,17 @@ fn render_thread_group(
             ],
             theme,
             false,
-        ));
+        )));
     }
 
     for (index, thread) in threads.iter().enumerate().take(end).skip(start) {
         let is_last = index + 1 == count;
-        rows.push(thread_summary_line(
+        rows.push(ThreadRow::text(thread_summary_line(
             thread,
             if is_last { "└ " } else { "├ " },
             None,
             context,
-        ));
+        )));
 
         if render_state.is_expanded(thread) {
             rows.extend(render_expanded_thread(
@@ -744,14 +821,13 @@ fn render_thread_group(
                 indent,
                 width,
                 theme,
-                render_state.scroll,
-                render_state.window,
+                render_state,
             ));
         }
     }
 
     if end < count {
-        rows.push(thread_card_line(
+        rows.push(ThreadRow::text(thread_card_line(
             indent,
             width,
             vec![
@@ -765,7 +841,7 @@ fn render_thread_group(
             ],
             theme,
             false,
-        ));
+        )));
     }
 
     rows
@@ -848,49 +924,61 @@ fn render_expanded_thread(
     indent: usize,
     width: usize,
     theme: Theme,
-    scroll: usize,
-    window: usize,
-) -> Vec<Line<'static>> {
+    render_state: ThreadRenderState<'_>,
+) -> Vec<ThreadRow<'static>> {
     let card_width = width.saturating_sub(indent);
     let body_width = card_width.saturating_sub(3);
     if body_width == 0 {
         return Vec::new();
     }
 
-    let content = expanded_thread_content(thread, body_width, theme);
-    let start = scroll.min(content.len().saturating_sub(window));
+    let window = render_state.window;
+    let content = expanded_thread_content(thread, body_width, theme, render_state);
+    let start = render_state
+        .scroll
+        .min(content.len().saturating_sub(window));
     let end = (start + window).min(content.len());
-    let mut visible = Vec::new();
+    let mut visible: Vec<(Vec<Span<'static>>, Option<ImageSlice>)> = Vec::new();
 
     if start > 0 {
-        visible.push(vec![thread_span(
-            format!("↑ {start} earlier"),
-            theme.muted,
-            Modifier::empty(),
-            theme,
-        )]);
+        visible.push((
+            vec![thread_span(
+                format!("↑ {start} earlier"),
+                theme.muted,
+                Modifier::empty(),
+                theme,
+            )],
+            None,
+        ));
     }
     if start > 0
         && let Some(row) = content.get(start)
         && !row.is_header
     {
-        visible.push(comment_header(thread, row.comment_index, theme, true));
+        visible.push((comment_header(thread, row.comment_index, theme, true), None));
     }
-    visible.extend(content[start..end].iter().map(|row| row.spans.clone()));
+    visible.extend(
+        content[start..end]
+            .iter()
+            .map(|row| (row.spans.clone(), row.image.clone())),
+    );
     if end < content.len() {
-        visible.push(vec![thread_span(
-            format!("↓ {} more", content.len() - end),
-            theme.muted,
-            Modifier::empty(),
-            theme,
-        )]);
+        visible.push((
+            vec![thread_span(
+                format!("↓ {} more", content.len() - end),
+                theme.muted,
+                Modifier::empty(),
+                theme,
+            )],
+            None,
+        ));
     }
 
     let last = visible.len().saturating_sub(1);
     visible
         .into_iter()
         .enumerate()
-        .map(|(index, mut spans)| {
+        .map(|(index, (mut spans, image))| {
             spans.insert(
                 0,
                 thread_span(
@@ -900,7 +988,13 @@ fn render_expanded_thread(
                     theme,
                 ),
             );
-            thread_card_line(indent, width, spans, theme, false)
+            ThreadRow {
+                line: thread_card_line(indent, width, spans, theme, false),
+                image: image.map(|image| ImageSlice {
+                    column: (indent + 3) as u16,
+                    ..image
+                }),
+            }
         })
         .collect()
 }
@@ -909,6 +1003,7 @@ fn expanded_thread_content(
     thread: &ReviewThread,
     body_width: usize,
     theme: Theme,
+    render_state: ThreadRenderState<'_>,
 ) -> Vec<ExpandedThreadRow> {
     let mut content = Vec::new();
 
@@ -917,14 +1012,26 @@ fn expanded_thread_content(
             spans: comment_header(thread, comment_index, theme, false),
             comment_index,
             is_header: true,
+            image: None,
         });
 
-        for line in markdown::render(&comment.body, body_width, theme) {
-            content.push(ExpandedThreadRow {
-                spans: line.spans,
-                comment_index,
-                is_header: false,
-            });
+        for block in markdown::render_blocks(&comment.body, body_width, theme) {
+            match block {
+                MarkdownBlock::Text(line) => content.push(ExpandedThreadRow {
+                    spans: line.spans,
+                    comment_index,
+                    is_header: false,
+                    image: None,
+                }),
+                MarkdownBlock::Image { url, alt } => content.extend(image_rows(
+                    &url,
+                    &alt,
+                    comment_index,
+                    body_width,
+                    theme,
+                    render_state,
+                )),
+            }
         }
     }
 
@@ -938,10 +1045,76 @@ fn expanded_thread_content(
             )],
             comment_index: 0,
             is_header: true,
+            image: None,
         });
     }
 
     content
+}
+
+/// A loaded image becomes blank rows carrying its slice; anything else stays
+/// textual so the thread still reads on terminals that cannot draw it.
+fn image_rows(
+    url: &str,
+    alt: &str,
+    comment_index: usize,
+    body_width: usize,
+    theme: Theme,
+    render_state: ThreadRenderState<'_>,
+) -> Vec<ExpandedThreadRow> {
+    let text = |spans| ExpandedThreadRow {
+        spans,
+        comment_index,
+        is_header: false,
+        image: None,
+    };
+    let note = |content: String| {
+        text(vec![thread_span(
+            truncate_right(&content, body_width),
+            theme.muted,
+            Modifier::empty(),
+            theme,
+        )])
+    };
+    let labelled = |url: &str, alt: &str, reason: Option<&str>| -> Vec<ExpandedThreadRow> {
+        markdown::image_lines(url, alt, reason, body_width, theme)
+            .into_iter()
+            .map(|line| text(line.spans))
+            .collect()
+    };
+
+    let max_rows = image_row_cap(render_state.window);
+    match render_state
+        .images
+        .status(url, body_width as u16, max_rows as u16)
+    {
+        Status::Ready { cols, rows } if rows > 0 => (0..rows)
+            .map(|row_index| ExpandedThreadRow {
+                spans: Vec::new(),
+                comment_index,
+                is_header: false,
+                image: Some(ImageSlice {
+                    url: url.to_string(),
+                    column: 0,
+                    cols,
+                    row_index,
+                    total_rows: rows,
+                }),
+            })
+            .collect(),
+        Status::Loading => vec![note("▭ loading image…".into())],
+        // Anything that will not be drawn still reads as the link it was, with
+        // the reason attached so a missing picture is never a mystery.
+        Status::Failed(reason) => labelled(url, alt, Some(reason)),
+        Status::Off(Support::Unsupported) => labelled(url, alt, Some("no image support")),
+        Status::Off(_) | Status::Ready { .. } => labelled(url, alt, None),
+    }
+}
+
+/// Images never take the whole scroll window, so surrounding replies stay in
+/// view and a tall screenshot remains scrollable rather than jumping.
+fn image_row_cap(window: usize) -> usize {
+    window.saturating_sub(1).clamp(3, 24)
 }
 
 fn comment_header(
@@ -981,6 +1154,13 @@ fn expanded_thread_window(height: usize) -> usize {
 }
 
 fn sync_expanded_thread_scroll(app: &mut App, width: usize, window: usize, theme: Theme) {
+    let render_state = ThreadRenderState {
+        focused: app.focused_thread.as_deref(),
+        expanded: app.expanded_thread.as_deref(),
+        scroll: app.thread_scroll,
+        window,
+        images: &app.images,
+    };
     let limit = app
         .expanded_thread
         .as_deref()
@@ -993,7 +1173,7 @@ fn sync_expanded_thread_scroll(app: &mut App, width: usize, window: usize, theme
         })
         .map_or(0, |thread| {
             let body_width = width.saturating_sub(GUTTER).saturating_sub(3);
-            expanded_thread_content(thread, body_width, theme)
+            expanded_thread_content(thread, body_width, theme, render_state)
                 .len()
                 .saturating_sub(window)
         });

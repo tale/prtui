@@ -117,6 +117,51 @@ pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<serde_json::Value> {
     Ok(val)
 }
 
+/// Download a comment attachment. Attachments on github.com itself are private
+/// to the repository, so they carry the CLI's token; curl drops the header if
+/// the download redirects to a storage host.
+pub async fn fetch_asset(url: &str) -> Result<Vec<u8>> {
+    let mut args = vec![
+        "--silent".to_string(),
+        "--show-error".into(),
+        "--location".into(),
+        "--max-time".into(),
+        "20".into(),
+        "--max-filesize".into(),
+        "26214400".into(),
+    ];
+
+    if url.starts_with("https://github.com/")
+        && let Some(token) = auth_token().await
+    {
+        args.push("--header".into());
+        args.push(format!("Authorization: Bearer {token}"));
+    }
+    args.push(url.to_string());
+
+    let out = Command::new("curl")
+        .args(&args)
+        .output()
+        .await
+        .context("failed to spawn curl")?;
+
+    if !out.status.success() {
+        bail!(
+            "curl failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    Ok(out.stdout)
+}
+
+async fn auth_token() -> Option<String> {
+    let raw = run(&["auth".to_string(), "token".into()]).await.ok()?;
+    let token = String::from_utf8_lossy(&raw).trim().to_string();
+
+    (!token.is_empty()).then_some(token)
+}
+
 pub async fn current_repo() -> Result<Repo> {
     let raw = run(&[
         "repo".to_string(),
