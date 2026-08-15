@@ -271,6 +271,13 @@ impl TerminalSession {
         let mut control = SharedTerminal::open().context("opening terminal")?;
         control.enter_raw_mode().context("enabling raw mode")?;
 
+        // Termina reopens a pty and restores termios around this; the alternate
+        // screen and keyboard flags are ours to undo. The session guard's `Drop`
+        // never runs under `panic = "abort"`, so this is the only path back.
+        control.set_panic_hook(move |handle| {
+            let _ = restore_output(handle, follow_theme);
+        });
+
         let entered = (|| -> Result<(AppTerminal, EventStream, bool)> {
             let mut output = control.clone();
 

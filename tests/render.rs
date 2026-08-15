@@ -1140,3 +1140,42 @@ fn search_paints_only_the_matched_bytes_of_a_diff_line() {
     );
     assert!(screen.contains("1/1 matches"));
 }
+
+#[test]
+fn parallel_highlighting_matches_the_serial_pass_for_every_file() {
+    use prtui::model::DiffLine;
+    use prtui::renderer::Renderer;
+    use std::sync::Mutex;
+
+    // More files than cores, so workers drain the queue rather than taking one
+    // apiece and the index each result carries is actually exercised.
+    let renderer = Renderer::default();
+    let files: Vec<(String, Vec<DiffLine>)> = (0..64)
+        .map(|n| {
+            (
+                format!("file{n}.rs"),
+                vec![DiffLine {
+                    kind: LineKind::Added,
+                    text: format!("let total{n} = compute(alpha, {n});"),
+                    old_line: None,
+                    new_line: Some(1),
+                }],
+            )
+        })
+        .collect();
+
+    let published = Mutex::new(vec![None; files.len()]);
+    renderer.highlight_files_parallel(&files, |index, styled| {
+        let mut slots = published.lock().unwrap();
+        assert!(slots[index].is_none(), "file {index} published twice");
+        slots[index] = Some(styled);
+    });
+
+    let published = published.into_inner().unwrap();
+    for (index, (path, lines)) in files.iter().enumerate() {
+        let styled = published[index]
+            .as_ref()
+            .unwrap_or_else(|| panic!("file {index} was never published"));
+        assert_eq!(*styled, renderer.highlight_file(path, lines));
+    }
+}
