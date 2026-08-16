@@ -51,3 +51,4 @@ termina = { version = "0.3.3", features = ["event-stream"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process", "sync", "time"] }
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 unicode-width = "0.2.2"
+ureq = { version = "3.4.0", default-features = false, features = ["rustls", "json"] }
