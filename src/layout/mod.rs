@@ -1,11 +1,3 @@
-//! Where everything goes this frame.
-//!
-//! Layout is a value, computed once from app state and handed to both the
-//! renderer and the action handlers. Nothing here mutates the app: facts the
-//! renderer would otherwise have to discover and write back — how far a
-//! conversation can scroll, how tall a viewport is, which threads hang under
-//! which line — are computed here and read from here instead.
-
 pub mod measure;
 pub mod rows;
 pub mod wrap;
@@ -17,6 +9,9 @@ use rows::{Rows, View};
 /// Narrowest the diff is allowed to get before the tree stops taking room.
 const MIN_DIFF_WIDTH: u16 = 20;
 
+/// This represents the app's layout as a function of its state. It computes
+/// details which are passed to the renderer, cleanly bridging the app state and
+/// the UI without ugly concern mixing.
 pub struct Layout {
     pub header: Rect,
     pub body: Rect,
@@ -98,6 +93,16 @@ impl Layout {
 
     pub fn files_viewport(&self) -> usize {
         self.files_list.map_or(0, |list| list.height as usize)
+    }
+
+    /// The rows the diff keeps once an editor docks under it.
+    ///
+    /// Whatever opens an editor runs against the layout from before it existed,
+    /// so it has to pull the cursor into what will be left rather than what is
+    /// there now. Measured against the taller of the two editors, which is
+    /// visible for either and needs no guess about which is opening.
+    pub const fn viewport_once_docked(&self) -> usize {
+        self.diff_viewport().saturating_sub(SUBMIT_HEIGHT as usize)
     }
 }
 

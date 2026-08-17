@@ -310,8 +310,8 @@ impl App {
                 self.selection = None;
             }
 
-            Action::StartComment => self.start_comment(),
-            Action::StartFileComment => self.start_file_comment(),
+            Action::StartComment => self.start_comment(layout),
+            Action::StartFileComment => self.start_file_comment(layout),
             Action::CommitComment => self.commit_comment(),
             Action::CancelComment => {
                 self.composer = None;
@@ -322,7 +322,7 @@ impl App {
             Action::DeleteDraft => self.delete_draft(),
             Action::ToggleResolved => self.toggle_resolved(),
 
-            Action::StartSubmit => self.start_submit(),
+            Action::StartSubmit => self.start_submit(layout),
             Action::CommitSubmit => self.commit_submit(),
             Action::CancelSubmit => {
                 self.submission = None;
@@ -338,13 +338,13 @@ impl App {
 
     /// A focused thread takes a reply; anything else starts a fresh draft over
     /// the cursor line or the visual selection.
-    fn start_comment(&mut self) {
+    fn start_comment(&mut self, layout: &Layout) {
         if self.pane != Pane::Diff {
             return;
         }
 
         if let Some(id) = self.focused_thread.clone() {
-            self.start_reply(&id);
+            self.start_reply(&id, layout);
             return;
         }
 
@@ -371,12 +371,13 @@ impl App {
             path: file.path.clone(),
         });
         self.mode = Mode::Insert;
+        self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
     /// A file takes a single remark, so `C` revises the existing one rather than
     /// stacking another. Available from the tree too: no line is involved, so
     /// there is nothing the diff pane is needed for.
-    fn start_file_comment(&mut self) {
+    fn start_file_comment(&mut self, layout: &Layout) {
         let Some(path) = self.current_path().map(str::to_string) else {
             self.status = "no file selected".into();
             return;
@@ -398,6 +399,7 @@ impl App {
         });
         self.mode = Mode::Insert;
         self.selection = None;
+        self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
     /// Reopens the draft under the cursor with its body and span intact, so
@@ -433,7 +435,7 @@ impl App {
         self.selection = None;
     }
 
-    fn start_reply(&mut self, id: &str) {
+    fn start_reply(&mut self, id: &str, layout: &Layout) {
         let Some(thread) = self.thread(id) else {
             return;
         };
@@ -448,6 +450,7 @@ impl App {
             path: thread.path.clone(),
         });
         self.mode = Mode::Insert;
+        self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
     fn thread(&self, id: &str) -> Option<&ReviewThread> {
@@ -512,11 +515,12 @@ impl App {
         };
     }
 
-    fn start_submit(&mut self) {
+    fn start_submit(&mut self, layout: &Layout) {
         self.composer = None;
         self.selection = None;
         self.submission = Some(Submission::default());
         self.mode = Mode::Submit;
+        self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
     /// A rejected submission leaves the overlay open, so a missing summary is
@@ -1311,7 +1315,10 @@ impl App {
     /// one the renderer will slice, so a motion and the scroll that follows it
     /// agree even though the list is a frame behind.
     fn follow_cursor(&mut self, layout: &Layout) {
-        let viewport = layout.diff_viewport();
+        self.scroll_into_view(layout, layout.diff_viewport());
+    }
+
+    fn scroll_into_view(&mut self, layout: &Layout, viewport: usize) {
         if viewport == 0 {
             return;
         }

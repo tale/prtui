@@ -122,6 +122,15 @@ fn file_from(patch: &str) -> prtui::model::ChangedFile {
     parse_files(&page).unwrap().remove(0)
 }
 
+/// Sets the verdict the open submit form carries. Reaching it by tab is a
+/// separate concern, covered where the overlay's keys are.
+const fn choose(app: &mut App, event: ReviewEvent) {
+    app.submission
+        .as_mut()
+        .expect("the submit form is open")
+        .event = event;
+}
+
 fn press(app: &mut App, keys: &str) {
     let input = &mut InputRouter::default();
     for c in keys.chars() {
@@ -1326,7 +1335,7 @@ fn a_bare_approval_needs_neither_summary_nor_comments() {
 
     // Approving is the one verdict GitHub takes without a summary, and it is a
     // verdict on its own, so nothing else has to accompany it.
-    act(&mut app, &Action::CycleEvent(1));
+    choose(&mut app, ReviewEvent::Approve);
     act(&mut app, &Action::CommitSubmit);
 
     assert!(app.drafts.is_empty());
@@ -1342,13 +1351,12 @@ fn a_bare_approval_needs_neither_summary_nor_comments() {
 }
 
 #[test]
-fn the_verdicts_that_speak_for_themselves_still_want_a_summary() {
-    for (steps, label) in [(0, "comment"), (2, "request changes")] {
+fn a_verdict_that_carries_prose_is_refused_without_it() {
+    for event in [ReviewEvent::Comment, ReviewEvent::RequestChanges] {
+        let label = event.label();
         let mut app = load();
         press(&mut app, "s");
-        for _ in 0..steps {
-            act(&mut app, &Action::CycleEvent(1));
-        }
+        choose(&mut app, event);
         act(&mut app, &Action::CommitSubmit);
 
         assert_eq!(app.status, format!("{label} needs a summary"));

@@ -1330,89 +1330,95 @@ fn the_status_bar_paints_failures_and_outages_as_trouble() {
     }
 }
 
-/// Parks the cursor on a line a comment can actually anchor to; row zero of a
-/// patch is a hunk header, which GitHub will not take.
-fn park_on_code(app: &mut App) {
-    app.pane = Pane::Diff;
-    app.cursor = app
-        .current_file()
-        .expect("a file is open")
-        .lines
+/// Draws a frame and reports the cells alongside where the caret was parked,
+/// since half of wrapping is putting the caret in the right place.
+///
+/// Read off the buffer rather than `TestBackend`'s string dump, which quotes
+/// every row and so shifts each column by one.
+fn draw_cells(app: &App) -> (Vec<Vec<char>>, (usize, usize)) {
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| {
+            paint(frame, app);
+        })
+        .unwrap();
+
+    let cursor = terminal.get_cursor_position().unwrap();
+    let buffer = terminal.backend().buffer();
+    let area = buffer.area();
+    let cells = (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .flat_map(|x| buffer[(x, y)].symbol().chars())
+                .collect()
+        })
+        .collect();
+
+    (cells, (cursor.x as usize, cursor.y as usize))
+}
+
+/// The first row whose text contains `needle`.
+fn row_of(cells: &[Vec<char>], needle: &str) -> usize {
+    cells
         .iter()
-        .position(|line| line.kind != LineKind::Hunk)
-        .expect("the patch has a real line");
+        .position(|row| row.iter().collect::<String>().contains(needle))
+        .unwrap_or_else(|| panic!("{needle} should be on screen"))
 }
 
 #[test]
-fn the_composer_takes_rows_from_the_diff_instead_of_covering_it() {
+fn a_long_comment_folds_and_carries_the_caret_with_it() {
     let mut app = load();
-    park_on_code(&mut app);
-
-    let full = layout_of(&app).diff_viewport();
-    act(&mut app, &Action::StartComment);
-    let docked = layout_of(&app);
-
-    assert!(
-        docked.diff_viewport() < full,
-        "the diff gives up rows to the composer, {} vs {full}",
-        docked.diff_viewport()
-    );
-    let composer = docked.composer.expect("composer is laid out");
-    assert_eq!(
-        composer.y,
-        docked.diff.y + docked.diff.height,
-        "the composer starts where the diff stops, so nothing overlaps"
-    );
-    assert!(docked.submit.is_none());
-}
-
-#[test]
-fn the_submit_form_docks_where_the_composer_does() {
-    let mut app = load();
+    // Numbered lines so no diff content can collide with the words typed below.
+    app.set_files(vec![numbered_file(20)]);
     app.pane = Pane::Diff;
-    act(&mut app, &Action::StartSubmit);
+    press(&mut app, "j");
+    act(&mut app, &Action::StartComment);
 
-    let layout = layout_of(&app);
-    let submit = layout.submit.expect("submit form is laid out");
+    paste(
+        &mut InputRouter::default(),
+        &mut app,
+        "the quick brown fox jumps over the lazy dog and then keeps right on \
+         running well past the edge of any terminal column",
+    );
 
-    assert_eq!(submit.x, layout.diff.x, "docked full width, not centred");
-    assert_eq!(submit.width, layout.diff.width);
-    assert_eq!(submit.y, layout.diff.y + layout.diff.height);
-    assert!(layout.composer.is_none());
+    let (cells, (caret_x, caret_y)) = draw_cells(&app);
 
-    let rendered = draw(&app);
-    assert!(rendered.contains("submit review"));
-    assert!(rendered.contains("summary (optional for approve)"));
+    // Sideways scrolling would have shown only the tail near the caret.
+    assert_eq!(
+        row_of(&cells, "column"),
+        row_of(&cells, "quick") + 1,
+        "one typed line folds onto exactly one more row"
+    );
+    assert_eq!(
+        caret_y,
+        row_of(&cells, "column"),
+        "the caret follows the text onto the folded row"
+    );
+
+    let typed: String = cells[caret_y][..caret_x].iter().collect();
+    assert!(
+        typed.ends_with("column"),
+        "the caret sits on the cell after the last character typed, \
+         row up to it was {typed:?}"
+    );
+    assert_eq!(cells[caret_y][caret_x], ' ', "and that cell is still blank");
 }
 
 #[test]
-fn a_long_comment_wraps_instead_of_scrolling_sideways() {
+fn a_hard_newline_keeps_its_own_row() {
     let mut app = load();
-    park_on_code(&mut app);
+    app.set_files(vec![numbered_file(20)]);
+    app.pane = Pane::Diff;
+    press(&mut app, "j");
     act(&mut app, &Action::StartComment);
 
-    let sentence = "the quick brown fox jumps over the lazy dog and keeps on \
-                    running well past the edge of any terminal column";
-    paste(&mut InputRouter::default(), &mut app, sentence);
+    paste(&mut InputRouter::default(), &mut app, "alpha\n\nomega");
 
-    let rendered = draw(&app);
+    let (cells, (_, caret_y)) = draw_cells(&app);
 
-    // Every word survives on screen, which sideways scrolling could not manage.
-    for word in ["quick", "lazy", "terminal", "column"] {
-        assert!(rendered.contains(word), "{word} should be visible");
-    }
-    // Folding, not sideways scrolling: the start and the end of one typed line
-    // land on different rows.
-    let row_of = |needle: &str| {
-        rendered
-            .lines()
-            .position(|line| line.contains(needle))
-            .unwrap_or_else(|| panic!("{needle} should be visible"))
-    };
-    assert!(
-        row_of("quick") < row_of("column"),
-        "the sentence should fold onto later rows"
-    );
+    // The blank line between them survives instead of being folded away.
+    assert_eq!(row_of(&cells, "omega"), row_of(&cells, "alpha") + 2);
+    assert_eq!(caret_y, row_of(&cells, "omega"));
 }
 
 #[test]
@@ -1477,4 +1483,74 @@ fn a_file_note_ships_without_a_line() {
     assert!(payload.get("line").is_none(), "no line to point at");
     assert!(payload.get("side").is_none());
     assert_eq!(payload["body"], "whole-file remark");
+}
+
+/// A patch whose every line names itself, so a test can assert on the exact
+/// line it expects to find on screen rather than on a rect.
+fn numbered_file(count: usize) -> prtui::model::ChangedFile {
+    let mut patch = format!("@@ -1,{count} +1,{count} @@\n");
+    for index in 0..count {
+        let _ = writeln!(patch, "+line_{index:03}_marker");
+    }
+
+    let page = serde_json::json!([[{
+        "filename": "numbered.rs",
+        "status": "modified",
+        "additions": count,
+        "deletions": 0,
+        "patch": patch.trim_end(),
+    }]]);
+
+    parse_files(&page).unwrap().remove(0)
+}
+
+#[test]
+fn an_open_composer_leaves_the_line_it_anchors_to_on_screen() {
+    let mut app = load();
+    app.set_files(vec![numbered_file(80)]);
+    app.pane = Pane::Diff;
+    press(&mut app, "G");
+
+    let anchored = "line_079_marker";
+    assert!(draw(&app).contains(anchored));
+
+    // The composer takes rows from the diff rather than floating over them, so
+    // the cursor has to be pulled back into what is left of the pane.
+    act(&mut app, &Action::StartComment);
+    let rendered = draw(&app);
+
+    assert!(
+        rendered.contains(anchored),
+        "the line being commented on must stay visible"
+    );
+    assert!(rendered.contains("comment · numbered.rs:80"));
+}
+
+#[test]
+fn the_submit_form_leaves_the_diff_readable_behind_it() {
+    let mut app = load();
+    app.set_files(vec![numbered_file(80)]);
+    app.pane = Pane::Diff;
+    press(&mut app, "G");
+    act(&mut app, &Action::StartSubmit);
+
+    let rendered = draw(&app);
+
+    assert!(rendered.contains("submit review"));
+    assert!(rendered.contains("summary (optional for approve)"));
+    assert!(
+        rendered.contains("line_079_marker"),
+        "docked, not centred over the diff"
+    );
+
+    // A centred box would have left diff on both sides of the border; a docked
+    // one spans the pane, so no row mixes the two.
+    let border = rendered
+        .lines()
+        .find(|line| line.contains("submit review"))
+        .expect("the form has a titled border");
+    assert!(
+        !border.contains("line_0"),
+        "no diff content shares a row with the form: {border:?}"
+    );
 }
