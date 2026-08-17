@@ -5,6 +5,7 @@ use prtui::app::{App, Pane};
 use prtui::images::Placement;
 use prtui::images::{self, CellSize, Images, Support};
 use prtui::layout::Layout;
+use prtui::layout::rows::{GUTTER, Row};
 use prtui::model::{LineKind, Side, parse_files, parse_meta};
 use prtui::renderer::ThemeMode;
 use prtui::ui;
@@ -798,11 +799,16 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
         })
         .unwrap();
 
+    // A long line folds onto several rows, so where a source line landed is the
+    // layout's answer rather than an offset into the patch.
+    let layout = Layout::compute(Rect::new(0, 0, 100, 30), &app);
+    let screen_row = layout.diff.y as usize + layout.rows.code_row(added);
+
     assert_eq!(
         terminal
             .backend()
             .buffer()
-            .cell((0, (added + 2) as u16))
+            .cell((0, screen_row as u16))
             .unwrap()
             .style()
             .bg,
@@ -1553,4 +1559,128 @@ fn the_submit_form_leaves_the_diff_readable_behind_it() {
         !border.contains("line_0"),
         "no diff content shares a row with the form: {border:?}"
     );
+}
+
+/// A patch of exactly one added line, so a test can say what that line holds.
+fn single_line_file(text: &str) -> prtui::model::ChangedFile {
+    let page = serde_json::json!([[{
+        "filename": "wide.rs",
+        "status": "modified",
+        "additions": 1,
+        "deletions": 0,
+        "patch": format!("@@ -1,1 +1,1 @@\n+{text}"),
+    }]]);
+
+    parse_files(&page).unwrap().remove(0)
+}
+
+/// Rows the open file's line `source` folds across.
+fn fold_count(app: &App, source: usize) -> usize {
+    Layout::compute(FRAME, app)
+        .rows
+        .window(0, usize::MAX)
+        .iter()
+        .filter(
+            |row| matches!(row, Row::Code { source: at, .. } if *at == source),
+        )
+        .count()
+}
+
+#[test]
+fn a_diff_line_wider_than_the_pane_folds_instead_of_being_cut_off() {
+    let mut app = load();
+    let line = format!("HEAD_{}_TAIL", "0123456789".repeat(30));
+    app.set_files(vec![single_line_file(&line)]);
+    app.is_files_visible = false;
+    app.pane = Pane::Diff;
+
+    let rendered = draw(&app);
+
+    assert!(
+        rendered.contains("HEAD_"),
+        "the line starts where it always did"
+    );
+    assert!(
+        rendered.contains("_TAIL"),
+        "and its far end reaches the screen instead of being cut off"
+    );
+    assert_eq!(
+        fold_count(&app, 1),
+        3,
+        "310 columns over a 107-column budget takes three rows"
+    );
+}
+
+#[test]
+fn only_the_first_row_of_a_folded_line_carries_its_number() {
+    let mut app = load();
+    app.set_files(vec![single_line_file(&"x".repeat(400))]);
+    app.is_files_visible = false;
+    app.pane = Pane::Diff;
+
+    let (cells, _) = draw_cells(&app);
+    let layout = Layout::compute(FRAME, &app);
+    let first = layout.diff.y as usize + layout.rows.code_row(1);
+
+    let numbered: String = cells[first][..GUTTER].iter().collect();
+    let continued: String = cells[first + 1][..GUTTER].iter().collect();
+
+    assert!(
+        numbered.contains('1'),
+        "the line names itself once: {numbered:?}"
+    );
+    assert!(
+        numbered.contains('+'),
+        "and carries its sigil: {numbered:?}"
+    );
+
+    assert!(
+        !continued.contains(|c: char| c.is_ascii_digit()),
+        "a continuation must not repeat the line number: {continued:?}"
+    );
+    assert!(
+        !continued.contains('+'),
+        "nor the sigil, which would read as a second added line: {continued:?}"
+    );
+    // The text itself resumes only after the gutter's width.
+    assert_eq!(cells[first + 1][GUTTER], 'x');
+}
+
+#[test]
+fn a_hunk_header_stays_on_one_row() {
+    let mut app = load();
+    app.set_files(vec![single_line_file(&"y".repeat(400))]);
+    app.is_files_visible = false;
+
+    // The header draws a rule across the pane; folding it would break the rule
+    // into pieces for no gain.
+    assert_eq!(fold_count(&app, 0), 1);
+    assert!(fold_count(&app, 1) > 1, "the line beside it does fold");
+}
+
+#[test]
+fn the_cursor_covers_every_row_of_the_line_it_is_on() {
+    let mut app = load();
+    app.set_files(vec![single_line_file(&"z".repeat(300))]);
+    app.is_files_visible = false;
+    app.pane = Pane::Diff;
+    press(&mut app, "j");
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| {
+            paint(frame, &app);
+        })
+        .unwrap();
+
+    let layout = Layout::compute(FRAME, &app);
+    let first = layout.diff.y + layout.rows.code_row(1) as u16;
+    let buffer = terminal.backend().buffer();
+
+    // A folded line is one logical row, so the whole of it highlights together
+    // and the bar runs down its full height.
+    for offset in 0..fold_count(&app, 1) as u16 {
+        let cell = buffer.cell((0, first + offset)).unwrap();
+        assert_eq!(cell.symbol(), "▍", "row {offset} keeps the cursor bar");
+    }
 }

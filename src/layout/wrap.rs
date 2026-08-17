@@ -15,6 +15,83 @@ pub struct Row {
     pub end: usize,
 }
 
+/// The slice of one line a single row shows, once a long line folds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fragment {
+    pub start: usize,
+    pub end: usize,
+    /// Display column the slice begins at, so its tab stops line up with the
+    /// whole line instead of restarting on every row.
+    pub column: usize,
+    /// Only the first row of a line carries the line numbers and the sigil.
+    pub is_first: bool,
+}
+
+impl Fragment {
+    pub const fn whole(text: &str) -> Self {
+        Self {
+            start: 0,
+            end: text.len(),
+            column: 0,
+            is_first: true,
+        }
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+}
+
+/// The slices of `text` that each fit `width` columns.
+///
+/// Code breaks anywhere rather than on spaces: an identifier reads better split
+/// at the edge than moved whole onto the next row, and columns stay aligned with
+/// the line above.
+pub fn fragments(text: &str, width: usize) -> Vec<Fragment> {
+    // Without a tab, a scalar never occupies more columns than it does bytes, so
+    // a line this short provably fits and never needs measuring.
+    if width == 0 || (!text.contains('\t') && text.len() <= width) {
+        return vec![Fragment::whole(text)];
+    }
+
+    let mut fragments = Vec::new();
+    let mut start = 0;
+    let mut column = 0;
+
+    while start < text.len() {
+        let mut used = 0;
+        let mut end = start;
+
+        for (offset, character) in text[start..].char_indices() {
+            let character_width =
+                measure::column_width(character, column + used);
+            if used + character_width > width {
+                break;
+            }
+            used += character_width;
+            end = start + offset + character.len_utf8();
+        }
+
+        // A single scalar wider than the whole row still has to advance, or the
+        // fold would not terminate.
+        if end == start {
+            end =
+                start + text[start..].chars().next().map_or(1, char::len_utf8);
+        }
+
+        fragments.push(Fragment {
+            start,
+            end,
+            column,
+            is_first: start == 0,
+        });
+        column += used;
+        start = end;
+    }
+
+    fragments
+}
+
 pub struct Wrapped<'a> {
     lines: &'a [String],
     rows: Vec<Row>,
@@ -188,5 +265,71 @@ mod tests {
         // Four two-column scalars fill a row of eight.
         assert_eq!(rendered(&lines, 8), ["日本語の", "テキスト"]);
         assert_eq!(Wrapped::new(&lines, 8).locate(0, 12), (1, 0));
+    }
+}
+
+#[cfg(test)]
+mod fragment_tests {
+    use super::*;
+
+    fn slices(text: &str, width: usize) -> Vec<&str> {
+        fragments(text, width)
+            .into_iter()
+            .map(|fragment| &text[fragment.start..fragment.end])
+            .collect()
+    }
+
+    #[test]
+    fn a_short_line_is_one_fragment() {
+        assert_eq!(slices("fn main() {}", 40), ["fn main() {}"]);
+        assert_eq!(slices("", 40), [""]);
+        assert!(fragments("", 40)[0].is_empty());
+    }
+
+    #[test]
+    fn code_breaks_at_the_edge_rather_than_on_spaces() {
+        // Prose wrapping would have moved `world` down whole.
+        assert_eq!(slices("hello world", 8), ["hello wo", "rld"]);
+    }
+
+    #[test]
+    fn continuations_report_where_they_start() {
+        let folded = fragments("abcdefghij", 4);
+
+        assert_eq!(folded.len(), 3);
+        assert!(folded[0].is_first);
+        assert!(!folded[1].is_first);
+        assert_eq!(
+            folded.iter().map(|f| f.column).collect::<Vec<_>>(),
+            [0, 4, 8]
+        );
+    }
+
+    #[test]
+    fn tabs_keep_their_stops_across_a_fold() {
+        // The tab fills to column 4, so only four more columns fit on row one.
+        assert_eq!(slices("\tabcdefgh", 8), ["\tabcd", "efgh"]);
+
+        // A continuation resumes the column count rather than restarting it, so
+        // a tab inside it still lands on a real stop.
+        let folded = fragments("ab\tcd\tefgh", 6);
+        assert_eq!(folded[0].column, 0);
+        assert_eq!(folded[1].column, 6);
+    }
+
+    #[test]
+    fn wide_scalars_never_split_and_always_advance() {
+        assert_eq!(slices("日本語", 4), ["日本", "語"]);
+        // Narrower than one scalar: it takes the row alone instead of looping.
+        assert_eq!(slices("日本", 1), ["日", "本"]);
+    }
+
+    #[test]
+    fn every_byte_survives_the_fold() {
+        let line =
+            "let x = compute(alpha, beta, gamma) + \tdelta_epsilon_zeta;";
+        let rejoined: String = slices(line, 11).concat();
+
+        assert_eq!(rejoined, line, "folding must not drop content");
     }
 }

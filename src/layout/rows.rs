@@ -12,8 +12,9 @@
 //! length depends on how its markdown wraps — that content is rendered here
 //! because its row count is a layout fact.
 
+use super::wrap::{self, Fragment};
 use crate::images::{Images, Status, Support};
-use crate::model::{ChangedFile, ReviewThread};
+use crate::model::{ChangedFile, DiffLine, LineKind, ReviewThread};
 use crate::renderer::Theme;
 use crate::renderer::markdown::{self, Block as MarkdownBlock};
 use ratatui::style::{Color, Modifier, Style};
@@ -86,8 +87,9 @@ pub enum Connector {
 /// One row of the diff pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
-    /// A line of the patch, by index into [`ChangedFile::lines`].
-    Code(usize),
+    /// One row's worth of a line of the patch. A line too wide for the pane
+    /// folds across several of these, all naming the same `source`.
+    Code { source: usize, fragment: Fragment },
     /// The file-level draft, which answers to no line and leads the pane.
     FileDraft,
     /// A pile's heading, drawn only when the pile holds more than one thread.
@@ -278,7 +280,7 @@ impl Rows {
         let last = file.lines.len() - 1;
         for (source, anchored) in by_source.iter().enumerate() {
             builder.code.push(builder.rows.len());
-            builder.rows.push(Row::Code(source));
+            builder.emit_code(&file.lines[source], source);
             builder.emit_piles(anchored);
 
             if source == last {
@@ -383,6 +385,25 @@ impl Builder<'_> {
 
     fn is_expanded(&self, thread: usize) -> bool {
         self.view.expanded == Some(self.threads[thread].id.as_str())
+    }
+
+    /// A line wider than the pane folds onto further rows instead of being cut
+    /// off at the edge, where the rest of it could not be read at all.
+    fn emit_code(&mut self, line: &DiffLine, source: usize) {
+        // Hunk headers are structural and short, and folding one would only
+        // break up the rule it draws across the pane.
+        if line.kind == LineKind::Hunk {
+            self.rows.push(Row::Code {
+                source,
+                fragment: Fragment::whole(&line.text),
+            });
+            return;
+        }
+
+        let budget = self.view.width.saturating_sub(GUTTER);
+        for fragment in wrap::fragments(&line.text, budget) {
+            self.rows.push(Row::Code { source, fragment });
+        }
     }
 
     /// Threads sharing a line are drawn as one pile per state, open first.

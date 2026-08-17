@@ -14,7 +14,7 @@ use crate::layout::measure::{self, clip_text_to_budget, text_width, truncate};
 use crate::layout::rows::{
     self, BodyRow, Connector, GUTTER, ImageSlice, Row, ThreadState,
 };
-use crate::layout::wrap;
+use crate::layout::wrap::{self, Fragment};
 use crate::model::{LineKind, ReviewThread};
 use crate::renderer::{Theme, markdown};
 use ratatui::Frame;
@@ -336,8 +336,8 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) -> Vec<Placement> {
         .window(app.diff_scroll, area.height as usize)
         .iter()
         .map(|row| match row {
-            Row::Code(index) => PaneRow::text(code_line(
-                app, *index, &drafts, threads, width, theme,
+            Row::Code { source, fragment } => PaneRow::text(code_line(
+                app, *source, *fragment, &drafts, threads, width, theme,
             )),
             Row::FileDraft => PaneRow::text(file_draft_line(app, width, theme)),
             Row::Heading { state, count } => {
@@ -378,6 +378,7 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) -> Vec<Placement> {
 fn code_line<'a>(
     app: &'a App,
     index: usize,
+    fragment: Fragment,
     drafts: &[&Draft],
     threads: &[ReviewThread],
     width: usize,
@@ -437,22 +438,33 @@ fn code_line<'a>(
         _ => ("  ", theme.dim),
     };
 
-    let mut spans = vec![
-        Span::styled(
-            if is_cursor || is_selected { "▍" } else { " " },
-            Style::default().bg(bg).fg(theme.accent),
-        ),
-        Span::styled(
+    // The bar runs down every row of a folded line so the whole of it reads as
+    // one block, but the numbers, marker and sigil belong to its first row only.
+    let mut spans = vec![Span::styled(
+        if is_cursor || is_selected { "▍" } else { " " },
+        Style::default().bg(bg).fg(theme.accent),
+    )];
+
+    if fragment.is_first {
+        spans.push(Span::styled(
             format!(
                 "{:>4} {:>4}",
                 line.old_line.map(|n| n.to_string()).unwrap_or_default(),
                 line.new_line.map(|n| n.to_string()).unwrap_or_default(),
             ),
             Style::default().bg(bg).fg(theme.dim),
-        ),
-        Span::styled(marker, Style::default().bg(bg).fg(marker_color)),
-        Span::styled(sigil, Style::default().bg(bg).fg(theme.dim)),
-    ];
+        ));
+        spans.push(Span::styled(
+            marker,
+            Style::default().bg(bg).fg(marker_color),
+        ));
+        spans.push(Span::styled(sigil, Style::default().bg(bg).fg(theme.dim)));
+    } else {
+        spans.push(Span::styled(
+            " ".repeat(GUTTER - 1),
+            Style::default().bg(bg),
+        ));
+    }
 
     let styled = app.highlighted();
     let colored: Vec<Piece> =
@@ -480,13 +492,21 @@ fn code_line<'a>(
 
     let mut used = GUTTER;
     for piece in split_by_matches(colored, &app.line_match_ranges(index)) {
-        let Some(source) = line.text.get(piece.range.clone()) else {
+        // Syntax runs and search hits span the whole line; this row shows one
+        // slice of it, so each run is trimmed to what falls inside the fragment.
+        let start = piece.range.start.max(fragment.start);
+        let end = piece.range.end.min(fragment.end);
+        if start >= end {
+            continue;
+        }
+
+        let Some(source) = line.text.get(start..end) else {
             continue;
         };
         let (text, display_width) = clip_text_to_budget(
             source,
             width.saturating_sub(used),
-            used.saturating_sub(GUTTER),
+            fragment.column + used - GUTTER,
         );
         if text.is_empty() {
             break;
