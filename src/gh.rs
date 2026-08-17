@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
-use ureq::http::{HeaderMap, Response};
+use ureq::http::{HeaderMap, Response, StatusCode};
 use ureq::{Agent, Body};
 
 const THREADS_QUERY: &str = r"
@@ -46,6 +46,15 @@ const ASSET_LIMIT: u64 = 26_214_400;
 const ASSET_TIMEOUT: Duration = Duration::from_secs(20);
 const API_LIMIT: u64 = 64 * 1024 * 1024;
 const API_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// GitHub sheds load with 429 and 5xx during an incident, and a connection it
+/// drops mid-flight reads the same way. Two retries cover the seconds-long
+/// blips without making a real outage feel like a hang.
+const RETRY_LIMIT: u32 = 2;
+const RETRY_BACKOFF: Duration = Duration::from_millis(400);
+const RETRY_CEILING: Duration = Duration::from_secs(8);
+
+const JSON_ACCEPT: &str = "application/vnd.github+json";
 
 #[derive(Clone)]
 pub struct Repo {
@@ -214,17 +223,68 @@ fn next_page(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-fn get(url: &str, token: Option<&str>) -> Result<Response<Body>> {
-    let mut request = agent()
-        .get(url)
-        .header("accept", "application/vnd.github+json")
-        .header("x-github-api-version", "2022-11-28");
+fn is_transient_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
 
-    if let Some(token) = token {
-        request = request.header("authorization", format!("Bearer {token}"));
+const fn is_transient_transport(error: &ureq::Error) -> bool {
+    matches!(
+        error,
+        ureq::Error::Io(_)
+            | ureq::Error::Timeout(_)
+            | ureq::Error::ConnectionFailed
+    )
+}
+
+/// `Retry-After` is what GitHub sends when it is throttling rather than
+/// failing, so it beats guessing; everything else backs off exponentially.
+fn backoff(response: Option<&Response<Body>>, attempt: u32) -> Duration {
+    response
+        .and_then(|response| response.headers().get("retry-after"))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok())
+        .map_or_else(|| RETRY_BACKOFF * 2u32.pow(attempt), Duration::from_secs)
+        .min(RETRY_CEILING)
+}
+
+/// Retries the transient failures and hands back everything else — including a
+/// 4xx — for the caller to report. Runs inside `spawn_blocking`, so sleeping
+/// here parks a worker rather than the runtime.
+fn send(
+    call: impl Fn() -> Result<Response<Body>, ureq::Error>,
+) -> Result<Response<Body>> {
+    for attempt in 0..RETRY_LIMIT {
+        let delay = match call() {
+            Ok(response) if !is_transient_status(response.status()) => {
+                return Ok(response);
+            }
+            Ok(response) => backoff(Some(&response), attempt),
+            Err(error) if !is_transient_transport(&error) => {
+                return Err(error).context("request to GitHub failed");
+            }
+            Err(_) => backoff(None, attempt),
+        };
+
+        std::thread::sleep(delay);
     }
 
-    request.call().context("request to GitHub failed")
+    call().context("request to GitHub failed")
+}
+
+fn get(url: &str, accept: &str, token: Option<&str>) -> Result<Response<Body>> {
+    send(|| {
+        let mut request = agent()
+            .get(url)
+            .header("accept", accept)
+            .header("x-github-api-version", "2022-11-28");
+
+        if let Some(token) = token {
+            request =
+                request.header("authorization", format!("Bearer {token}"));
+        }
+
+        request.call()
+    })
 }
 
 fn post(
@@ -232,16 +292,19 @@ fn post(
     token: Option<&str>,
     body: &serde_json::Value,
 ) -> Result<Response<Body>> {
-    let mut request = agent()
-        .post(url)
-        .header("accept", "application/vnd.github+json")
-        .header("x-github-api-version", "2022-11-28");
+    send(|| {
+        let mut request = agent()
+            .post(url)
+            .header("accept", JSON_ACCEPT)
+            .header("x-github-api-version", "2022-11-28");
 
-    if let Some(token) = token {
-        request = request.header("authorization", format!("Bearer {token}"));
-    }
+        if let Some(token) = token {
+            request =
+                request.header("authorization", format!("Bearer {token}"));
+        }
 
-    request.send_json(body).context("request to GitHub failed")
+        request.send_json(body)
+    })
 }
 
 /// GraphQL answers 200 with an `errors` array, so a successful status alone
@@ -296,7 +359,7 @@ pub async fn fetch_files(
         let mut next = Some(first);
 
         while let Some(url) = next {
-            let mut response = get(&url, token.as_deref())?;
+            let mut response = get(&url, JSON_ACCEPT, token.as_deref())?;
             check(&mut response, "fetching changed files")?;
             next = next_page(response.headers());
 
@@ -428,18 +491,21 @@ pub async fn fetch_asset(url: &str) -> Result<Vec<u8>> {
     let url = url.to_string();
 
     tokio::task::spawn_blocking(move || {
-        let mut request = agent()
-            .get(&url)
-            .config()
-            .timeout_global(Some(ASSET_TIMEOUT))
-            .build();
+        let mut response = send(|| {
+            let mut request = agent()
+                .get(&url)
+                .config()
+                .timeout_global(Some(ASSET_TIMEOUT))
+                .build();
 
-        if let Some(token) = &token {
-            request =
-                request.header("authorization", format!("Bearer {token}"));
-        }
+            if let Some(token) = &token {
+                request =
+                    request.header("authorization", format!("Bearer {token}"));
+            }
 
-        let mut response = request.call().context("downloading attachment")?;
+            request.call()
+        })
+        .context("downloading attachment")?;
         check(&mut response, "downloading attachment")?;
 
         response
