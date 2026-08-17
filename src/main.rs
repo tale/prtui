@@ -5,6 +5,7 @@ use prtui::app::App;
 use prtui::app::input::InputRouter;
 use prtui::app::review::{Request, Sent};
 use prtui::images::{self, Image, Images, Support};
+use prtui::layout::Layout;
 use prtui::model::{self, ChangedFile, PullRequest};
 use prtui::renderer::{Renderer, Segment, ThemeMode};
 use prtui::{gh, ui};
@@ -311,10 +312,7 @@ async fn event_loop(
         }
 
         if is_dirty {
-            let pending_hint = input.pending_hint();
-            terminal::draw(terminal, |frame| {
-                ui::draw(frame, &mut app, &pending_hint)
-            })?;
+            present_frame(terminal, &mut app, &input.pending_hint())?;
             is_dirty = false;
         }
 
@@ -367,7 +365,7 @@ async fn event_loop(
                         true
                     }
                     Message::FilesFailed(err) => {
-                        app.set_files(Vec::new());
+                        app.fail_files();
                         app.status = format!("error: {err}");
                         failure = Some(err);
                         pending = pending.saturating_sub(1);
@@ -402,7 +400,10 @@ async fn event_loop(
                 let event = event
                     .context("terminal event stream closed")?
                     .context("reading terminal event")?;
-                let height = ui::diff_viewport_height(terminal.get_frame().area());
+
+                // The layout the last frame was drawn with, which is what the
+                // cursor and the scroll offset are still addressing.
+                let layout = Layout::compute(terminal.get_frame().area(), &app);
 
                 match event {
                     Event::WindowResized(_) => {
@@ -411,12 +412,12 @@ async fn event_loop(
                     }
                     Event::Key(key) => {
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                            input.dispatch_key(&mut app, key, height);
+                            input.dispatch_key(&mut app, key, &layout);
                             is_dirty = true;
                         }
                     }
                     Event::Paste(text) => {
-                        input.dispatch_paste(&mut app, &text, height);
+                        input.dispatch_paste(&mut app, &text, &layout);
                         is_dirty = true;
                     }
                     Event::Csi(Csi::Mode(CsiMode::ReportTheme(terminal_mode)))
@@ -447,6 +448,31 @@ async fn event_loop(
         bail!(err);
     }
 
+    Ok(())
+}
+
+/// Draws one frame and paints its images inside the same synchronized update.
+/// Layout is computed first and shared by both, so what the renderer slices is
+/// exactly what the next keystroke will address.
+fn present_frame(
+    terminal: &mut terminal::AppTerminal,
+    app: &mut App,
+    pending_hint: &str,
+) -> Result<()> {
+    let layout = Layout::compute(terminal.get_frame().area(), app);
+    let placements = terminal::render(terminal, |frame| {
+        ui::draw(frame, app, &layout, pending_hint)
+    });
+
+    // The update has to be closed even if the draw failed, or the terminal sits
+    // waiting to be told the frame is done.
+    let overlay = placements
+        .as_ref()
+        .map(|placements| app.images.frame_commands(placements))
+        .unwrap_or_default();
+    let presented = terminal::present(terminal, &overlay);
+
+    placements.and(presented).context("drawing a frame")?;
     Ok(())
 }
 

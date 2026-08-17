@@ -1,30 +1,98 @@
 use prtui::app::action::Action;
+use prtui::app::input::DispatchResult;
 use prtui::app::input::InputRouter;
 use prtui::app::{App, Pane};
+use prtui::images::Placement;
 use prtui::images::{self, CellSize, Images, Support};
+use prtui::layout::Layout;
 use prtui::model::{LineKind, Side, parse_files, parse_meta};
 use prtui::renderer::ThemeMode;
 use prtui::ui;
+use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
 use std::fmt::Write;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
+/// The frame every test renders at. Layout has to be computed from the same
+/// size the last frame used, since that is what the cursor still addresses.
+const FRAME: Rect = Rect {
+    x: 0,
+    y: 0,
+    width: 120,
+    height: 30,
+};
+
+fn layout_of(app: &App) -> Layout {
+    Layout::compute(FRAME, app)
+}
+
+/// How far the open conversation can scroll in a terminal of this size.
+fn thread_limit(app: &App, width: u16, height: u16) -> usize {
+    Layout::compute(Rect::new(0, 0, width, height), app)
+        .rows
+        .body_limit()
+}
+
+/// One key through the router, laid out the way the event loop lays it out.
+/// The router is threaded in because half-typed commands — a count prefix, a
+/// pending `g` — live in it across keys.
+fn send(
+    input: &mut InputRouter,
+    app: &mut App,
+    event: KeyEvent,
+) -> DispatchResult {
+    let layout = layout_of(app);
+    input.dispatch_key(app, event, &layout)
+}
+
+fn paste(input: &mut InputRouter, app: &mut App, text: &str) -> DispatchResult {
+    let layout = layout_of(app);
+    input.dispatch_paste(app, text, &layout)
+}
+
+fn act(app: &mut App, action: &Action) {
+    let layout = layout_of(app);
+    app.apply(action, &layout);
+}
+
+fn summary(app: &App) -> (usize, usize) {
+    app.search_summary(&layout_of(app))
+}
+
+/// Draws a frame and returns the escape sequences its images would be painted
+/// with, which is the pairing the event loop performs.
+fn paint_images(terminal: &mut Terminal<TestBackend>, app: &mut App) -> String {
+    let mut placements = Vec::new();
+    terminal
+        .draw(|frame| placements = paint(frame, app))
+        .unwrap();
+
+    app.images.frame_commands(&placements)
+}
+
+/// Renders one frame through the path the event loop uses: layout first, then
+/// draw against it.
+fn paint(frame: &mut Frame, app: &App) -> Vec<Placement> {
+    let layout = Layout::compute(frame.area(), app);
+    ui::draw(frame, app, &layout, "")
+}
+
 /// Drives the app the way the event loop does: raw keys through the keymap.
 fn press(app: &mut App, keys: &str) {
-    let mut input = InputRouter::default();
+    let input = &mut InputRouter::default();
     for c in keys.chars() {
-        let key = KeyEvent::new(KeyCode::Char(c), Modifiers::NONE);
-        input.dispatch_key(app, key, 20);
+        send(input, app, KeyEvent::new(KeyCode::Char(c), Modifiers::NONE));
     }
 }
 
 /// Renders a frame at the size most tests use and returns it as text.
-fn draw(app: &mut App) -> String {
+fn draw(app: &App) -> String {
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, app, "");
+            paint(frame, app);
         })
         .unwrap();
 
@@ -108,7 +176,7 @@ fn renders_unresolved_thread_summary_inline() {
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let rendered = terminal.backend().to_string();
@@ -139,7 +207,7 @@ fn collapsed_thread_summary_uses_rendered_gfm_text() {
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
 
@@ -177,7 +245,7 @@ fn focused_thread_expands_into_its_full_conversation() {
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let rendered = terminal.backend().to_string();
@@ -217,20 +285,20 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let first_page = terminal.backend().to_string();
 
-    assert!(app.thread_scroll_limit > 0);
-    let small_viewport_limit = app.thread_scroll_limit;
+    let small_viewport_limit = thread_limit(&app, 100, 24);
+    assert!(small_viewport_limit > 0);
     assert!(first_page.contains("↓"));
     assert!(first_page.contains("more"));
 
-    app.thread_scroll = app.thread_scroll_limit;
+    app.thread_scroll = small_viewport_limit;
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let last_page = terminal.backend().to_string();
@@ -244,11 +312,13 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
     let mut large_terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     large_terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
 
-    assert!(app.thread_scroll_limit < small_viewport_limit);
+    // A taller terminal gives the conversation more room, so less of it is
+    // left to scroll through.
+    assert!(thread_limit(&app, 100, 40) < small_viewport_limit);
     assert!(
         large_terminal
             .backend()
@@ -284,15 +354,15 @@ fn long_reply_keeps_its_identity_visible_while_scrolling() {
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
-    assert!(app.thread_scroll_limit > 5);
+    assert!(thread_limit(&app, 100, 24) > 5);
 
     app.thread_scroll = 5;
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let rendered = terminal.backend().to_string();
@@ -327,7 +397,7 @@ fn multiple_threads_on_one_line_render_as_one_group() {
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let rendered = terminal.backend().to_string();
@@ -340,7 +410,7 @@ fn multiple_threads_on_one_line_render_as_one_group() {
     app.expanded_thread = Some(threads[3].id.clone());
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let expanded = terminal.backend().to_string();
@@ -366,7 +436,7 @@ fn resolved_threads_render_as_compact_rows() {
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let rendered = terminal.backend().to_string();
@@ -412,7 +482,7 @@ fn left_side_threads_anchor_to_removed_lines() {
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
 
@@ -450,7 +520,7 @@ fn outdated_threads_render_compactly_after_the_diff() {
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let rendered = terminal.backend().to_string();
@@ -497,11 +567,11 @@ fn hunk_line_numbers_advance_correctly() {
 
 #[test]
 fn renders_header_and_diff() {
-    let mut app = load();
+    let app = load();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
 
@@ -537,7 +607,7 @@ fn multi_digit_thread_badge_keeps_diff_counts_visible() {
     let mut terminal = Terminal::new(TestBackend::new(52, 12)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let rendered = terminal.backend().to_string();
@@ -557,7 +627,7 @@ fn loading_state_is_centered_once_and_animates() {
 
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let first = terminal.backend().to_string();
@@ -567,7 +637,7 @@ fn loading_state_is_centered_once_and_animates() {
     app.advance_loading();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let second = terminal.backend().to_string();
@@ -585,7 +655,7 @@ fn files_release_the_loading_gate_without_metadata() {
     let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let rendered = terminal.backend().to_string();
@@ -604,7 +674,7 @@ fn metadata_can_arrive_while_the_file_loader_continues() {
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let rendered = terminal.backend().to_string();
@@ -615,11 +685,11 @@ fn metadata_can_arrive_while_the_file_loader_continues() {
 
 #[test]
 fn bottom_bar_shows_the_focused_pane_s_actions() {
-    let mut app = load();
+    let app = load();
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let rendered = terminal.backend().to_string();
@@ -633,7 +703,7 @@ fn the_filter_prompt_renders_while_typing_and_stays_after_commit() {
     let mut app = load();
     press(&mut app, "/auth_check_test");
 
-    let typing = draw(&mut app);
+    let typing = draw(&app);
     assert!(typing.contains("FILTER"));
     assert!(typing.contains("/auth_check_test"));
     assert!(typing.contains("1/1 matches"));
@@ -644,9 +714,10 @@ fn the_filter_prompt_renders_while_typing_and_stays_after_commit() {
         "non-matching paths leave the tree"
     );
 
-    InputRouter::default().dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    let mut input = InputRouter::default();
+    send(&mut input, &mut app, KeyCode::Enter.into());
 
-    let committed = draw(&mut app);
+    let committed = draw(&app);
     assert!(committed.contains("NORMAL"));
     assert!(committed.contains("/auth_check_test"));
     assert!(committed.contains("edit filter"));
@@ -723,7 +794,7 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
 
@@ -772,7 +843,7 @@ fn hiding_the_tree_forces_focus_to_the_diff() {
     assert_eq!(app.pane, Pane::Diff);
 
     // Tab is also the recovery path: it reopens and focuses the tree.
-    app.apply(&Action::TogglePane, 20);
+    act(&mut app, &Action::TogglePane);
     assert!(app.is_files_visible);
     assert_eq!(app.pane, Pane::Files);
 
@@ -800,7 +871,7 @@ fn visual_selection_paints_every_row_in_the_span() {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal
             .draw(|frame| {
-                ui::draw(frame, app, "");
+                paint(frame, app);
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
@@ -843,13 +914,13 @@ fn the_composer_opens_over_the_diff_with_its_anchor_in_the_title() {
         .position(|l| l.kind != LineKind::Hunk)
         .unwrap();
 
-    app.apply(&Action::StartComment, 20);
+    act(&mut app, &Action::StartComment);
     assert!(app.composer.is_some());
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
 
@@ -871,19 +942,19 @@ fn a_saved_draft_marks_its_lines_in_the_gutter() {
         .position(|l| l.kind != LineKind::Hunk)
         .unwrap();
 
-    app.apply(&Action::StartComment, 20);
+    act(&mut app, &Action::StartComment);
     app.composer
         .as_mut()
         .unwrap()
         .editor
         .set_text("needs a guard");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
     assert_eq!(app.drafts.len(), 1);
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
 
@@ -918,7 +989,7 @@ fn expanding_a_thread_queues_its_images() {
     app.images = Images::new(Support::Enabled);
     app.focused_thread = Some(thread.id.clone());
 
-    app.apply(&Action::Activate, 20);
+    act(&mut app, &Action::Activate);
 
     assert_eq!(app.images.take_pending(), vec![IMAGE_URL.to_string()]);
 }
@@ -942,10 +1013,7 @@ fn a_loaded_image_is_drawn_over_the_rows_it_reserves() {
     app.expanded_thread = Some(thread.id.clone());
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    let mut commands = String::new();
-    terminal
-        .draw(|frame| commands = ui::draw(frame, &mut app, ""))
-        .unwrap();
+    let commands = paint_images(&mut terminal, &mut app);
 
     // 80x80 pixels over 8x16 cells is 10 columns and 5 rows.
     assert!(commands.contains("\x1b_Ga=t,i=1,f=100,t=d,q=2,"));
@@ -980,10 +1048,7 @@ fn scrolling_past_an_image_crops_it_to_what_is_visible() {
     app.thread_scroll = 3;
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    let mut commands = String::new();
-    terminal
-        .draw(|frame| commands = ui::draw(frame, &mut app, ""))
-        .unwrap();
+    let commands = paint_images(&mut terminal, &mut app);
 
     assert!(
         commands.contains(",r=3,x=0,y=32,w=80,h=48,"),
@@ -1000,10 +1065,7 @@ fn terminals_without_graphics_support_keep_the_alt_text() {
     app.expanded_thread = Some(thread.id.clone());
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    let mut commands = String::new();
-    terminal
-        .draw(|frame| commands = ui::draw(frame, &mut app, ""))
-        .unwrap();
+    let commands = paint_images(&mut terminal, &mut app);
 
     assert!(commands.is_empty());
     assert!(terminal.backend().to_string().contains("▭ shot"));
@@ -1020,7 +1082,7 @@ fn the_file_tree_marks_files_whose_threads_are_all_resolved() {
     let mut terminal = Terminal::new(TestBackend::new(52, 12)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let rendered = terminal.backend().to_string();
@@ -1045,7 +1107,7 @@ fn an_undrawable_attachment_says_why() {
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
     let rendered = terminal.backend().to_string();
@@ -1068,7 +1130,7 @@ fn a_terminal_that_failed_the_probe_says_so() {
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
 
@@ -1101,21 +1163,21 @@ fn search_paints_only_the_matched_bytes_of_a_diff_line() {
         .expect("fixture has a line calling DisableAuthCheckFlag");
 
     let mut input = InputRouter::default();
-    input.dispatch_key(
+    send(
+        &mut input,
         &mut app,
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
-        20,
     );
-    input.dispatch_paste(&mut app, NEEDLE, 20);
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    paste(&mut input, &mut app, NEEDLE);
+    send(&mut input, &mut app, KeyCode::Enter.into());
 
     assert_eq!(app.cursor, row, "search lands on the only match");
-    assert_eq!(app.search_summary(), (1, 1));
+    assert_eq!(summary(&app), (1, 1));
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut app, "");
+            paint(frame, &app);
         })
         .unwrap();
 
@@ -1190,16 +1252,16 @@ fn the_submit_overlay_shows_the_verdict_and_the_draft_count() {
         .position(|l| l.kind != LineKind::Hunk)
         .unwrap();
 
-    app.apply(&Action::StartComment, 20);
+    act(&mut app, &Action::StartComment);
     app.composer
         .as_mut()
         .unwrap()
         .editor
         .set_text("needs a test");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
 
     press(&mut app, "s");
-    let rendered = draw(&mut app);
+    let rendered = draw(&app);
     assert!(
         rendered.contains("submit review · 1 draft"),
         "the overlay should count what it will send:\n{rendered}"
@@ -1219,9 +1281,9 @@ fn the_submit_overlay_shows_the_verdict_and_the_draft_count() {
         "an empty summary should say what it is for:\n{rendered}"
     );
 
-    app.apply(&Action::CycleEvent(1), 20);
+    act(&mut app, &Action::CycleEvent(1));
     app.submission.as_mut().unwrap().editor.set_text("ship it");
-    let rendered = draw(&mut app);
+    let rendered = draw(&app);
     assert!(rendered.contains("ship it"), "{rendered}");
     assert!(!rendered.contains("summary (optional"), "{rendered}");
 }
@@ -1243,7 +1305,7 @@ fn a_reply_composer_names_the_thread_it_answers() {
         .unwrap();
     press(&mut app, "j");
 
-    app.apply(&Action::StartComment, 20);
-    let rendered = draw(&mut app);
+    act(&mut app, &Action::StartComment);
+    let rendered = draw(&app);
     assert!(rendered.contains("reply ·"), "{rendered}");
 }

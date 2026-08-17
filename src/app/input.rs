@@ -2,6 +2,7 @@ use super::App;
 use super::action::Action;
 use super::keymap::{Keymap, Resolution};
 use super::mode::Mode;
+use crate::layout::Layout;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 /// What the input router did with an incoming terminal event.
@@ -30,7 +31,7 @@ impl InputRouter {
         &mut self,
         app: &mut App,
         key: KeyEvent,
-        viewport_height: usize,
+        layout: &Layout,
     ) -> DispatchResult {
         let mode = app.mode;
         let find_active = app.file_filter.is_some() || app.search.is_some();
@@ -45,13 +46,13 @@ impl InputRouter {
             );
         if leaves_thread {
             let action = Action::LeaveThread;
-            app.apply(&action, viewport_height);
+            app.apply(&action, layout);
             return DispatchResult::Applied(action);
         }
 
         match self.keymap.resolve(mode, find_active, key) {
             Resolution::Action(action) => {
-                app.apply(&action, viewport_height);
+                app.apply(&action, layout);
                 self.sync_mode(app.mode);
                 DispatchResult::Applied(action)
             }
@@ -87,7 +88,7 @@ impl InputRouter {
                 };
 
                 search.handle_key(key);
-                app.sync_search(viewport_height);
+                app.sync_search(layout);
                 DispatchResult::ForwardedToEditor
             }
             Resolution::Unbound => DispatchResult::Ignored,
@@ -98,7 +99,7 @@ impl InputRouter {
         &mut self,
         app: &mut App,
         text: &str,
-        viewport_height: usize,
+        layout: &Layout,
     ) -> DispatchResult {
         self.sync_mode(app.mode);
 
@@ -130,7 +131,7 @@ impl InputRouter {
                     return DispatchResult::Ignored;
                 };
                 search.insert_text(&text.replace(['\r', '\n'], ""));
-                app.sync_search(viewport_height);
+                app.sync_search(layout);
                 DispatchResult::ForwardedToEditor
             }
             Mode::Normal | Mode::Visual => DispatchResult::Ignored,

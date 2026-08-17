@@ -217,31 +217,40 @@ fn moved_one_cell(event: &Event) -> bool {
     (line, col) != (1, 1) && line <= 2 && col <= 4
 }
 
-/// Draw and present one complete frame atomically where synchronized output is
-/// supported. Unsupported terminals safely ignore private mode 2026. The render
-/// callback returns any escape sequences that must land with the same frame,
-/// such as image placements over the cells it just drew.
-pub fn draw(
+/// Draw one frame inside a synchronized update and hand back whatever the
+/// render callback produced. The update stays open until [`present`] closes it,
+/// so anything that has to land with these cells still can — which is what lets
+/// the caller borrow app state again to build its image commands.
+///
+/// Every call must be followed by `present`, even on error, or the terminal is
+/// left waiting to be told the frame is complete.
+pub fn render<T>(
     terminal: &mut AppTerminal,
-    render: impl FnOnce(&mut Frame) -> String,
-) -> io::Result<()> {
+    render: impl FnOnce(&mut Frame) -> T,
+) -> io::Result<T> {
     write!(
         terminal.backend_mut(),
         "{}",
         set_mode(DecPrivateModeCode::SynchronizedOutput)
     )?;
 
-    let mut overlay = String::new();
-    let drawn = terminal.draw(|frame| overlay = render(frame)).map(|_| ());
-    let finished = (|| {
-        write!(
-            terminal.backend_mut(),
-            "{overlay}{}",
-            reset_mode(DecPrivateModeCode::SynchronizedOutput)
-        )?;
-        terminal.backend_mut().flush()
-    })();
-    drawn.and(finished)
+    let mut produced = None;
+    terminal.draw(|frame| produced = Some(render(frame)))?;
+
+    // `Terminal::draw` always runs the callback, so the slot is filled unless
+    // it returned an error, which the `?` above already took.
+    produced.ok_or_else(|| io::Error::other("frame was never rendered"))
+}
+
+/// Write anything that belongs with the frame just drawn, close the
+/// synchronized update, and flush. Unsupported terminals ignore mode 2026.
+pub fn present(terminal: &mut AppTerminal, overlay: &str) -> io::Result<()> {
+    write!(
+        terminal.backend_mut(),
+        "{overlay}{}",
+        reset_mode(DecPrivateModeCode::SynchronizedOutput)
+    )?;
+    terminal.backend_mut().flush()
 }
 
 /// Pixel size of one cell, when the platform reports the window in pixels.

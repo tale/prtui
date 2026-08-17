@@ -8,6 +8,8 @@ pub mod review;
 pub mod search;
 
 use crate::images::Images;
+use crate::layout::Layout;
+use crate::layout::rows;
 use crate::model::{ChangedFile, PullRequest, ReviewThread};
 use crate::renderer::{Renderer, Segment, Theme, ThemeMode, markdown};
 use action::{Action, Motion};
@@ -58,6 +60,14 @@ struct SearchOrigin {
     diff_scroll: usize,
 }
 
+/// The patches drive the whole review surface, so what the file pane shows
+/// when it is empty depends on why it is empty.
+enum FilesState {
+    Loading,
+    Loaded,
+    Failed,
+}
+
 pub struct App {
     pub pr: Option<PullRequest>,
     pub files: Vec<ChangedFile>,
@@ -76,7 +86,9 @@ pub struct App {
     pub focused_thread: Option<String>,
     pub expanded_thread: Option<String>,
     pub thread_scroll: usize,
-    pub thread_scroll_limit: usize,
+    /// First virtual row of the diff pane on screen. Rows are not source lines:
+    /// a line's threads occupy rows of their own, so the offset addresses the
+    /// row list the layout builds rather than the patch.
     pub diff_scroll: usize,
     pub pane: Pane,
     pub is_files_visible: bool,
@@ -92,7 +104,7 @@ pub struct App {
     highlights: HashMap<usize, Vec<Vec<Segment>>>,
     filter_snapshot: Option<FileFilterSnapshot>,
     search_origin: Option<SearchOrigin>,
-    files_loaded: bool,
+    files_state: FilesState,
 }
 
 impl Default for App {
@@ -124,7 +136,6 @@ impl App {
             focused_thread: None,
             expanded_thread: None,
             thread_scroll: 0,
-            thread_scroll_limit: 0,
             diff_scroll: 0,
             pane: Pane::Files,
             is_files_visible: true,
@@ -137,7 +148,7 @@ impl App {
             highlights: HashMap::new(),
             filter_snapshot: None,
             search_origin: None,
-            files_loaded: false,
+            files_state: FilesState::Loading,
         }
     }
 
@@ -146,7 +157,7 @@ impl App {
     }
 
     pub const fn is_loading(&self) -> bool {
-        !self.files_loaded
+        matches!(self.files_state, FilesState::Loading)
     }
 
     pub const fn advance_loading(&mut self) {
@@ -157,7 +168,22 @@ impl App {
     /// useful. PR metadata and review threads may arrive independently later.
     pub fn set_files(&mut self, files: Vec<ChangedFile>) {
         self.files = files;
-        self.files_loaded = true;
+        self.files_state = FilesState::Loaded;
+    }
+
+    /// Threads arrive over GraphQL, which stays up independently of the REST
+    /// endpoint the patches come from, so a failed diff still leaves a review
+    /// surface worth showing — as long as it does not claim the PR is empty.
+    pub fn fail_files(&mut self) {
+        self.files = Vec::new();
+        self.files_state = FilesState::Failed;
+    }
+
+    pub const fn files_placeholder(&self) -> &'static str {
+        match self.files_state {
+            FilesState::Failed => "diff unavailable",
+            _ => "no changed files",
+        }
     }
 
     /// Swap the complete renderer palette and discard syntax colors produced
@@ -189,6 +215,10 @@ impl App {
         self.files.get(self.selected_file)
     }
 
+    pub fn current_path(&self) -> Option<&str> {
+        self.current_file().map(|file| file.path.as_str())
+    }
+
     pub fn diff_len(&self) -> usize {
         self.current_file().map_or(0, |f| f.lines.len())
     }
@@ -218,7 +248,7 @@ impl App {
             .map(std::vec::Vec::as_slice)
     }
 
-    pub fn apply(&mut self, action: &Action, viewport_height: usize) {
+    pub fn apply(&mut self, action: &Action, layout: &Layout) {
         match *action {
             Action::Quit => self.should_quit = true,
             Action::TogglePane => self.toggle_pane(),
@@ -238,15 +268,15 @@ impl App {
             Action::ClearFind => self.clear_find(),
             Action::AcceptFileFilter => self.accept_file_filter(),
             Action::CancelFileFilter => self.cancel_file_filter(),
-            Action::AcceptSearch => self.accept_search(),
+            Action::AcceptSearch => self.accept_search(layout),
             Action::CancelSearch => self.cancel_search(),
-            Action::NextMatch => self.jump_match(1, viewport_height),
-            Action::PrevMatch => self.jump_match(-1, viewport_height),
+            Action::NextMatch => self.jump_match(1, layout),
+            Action::PrevMatch => self.jump_match(-1, layout),
             Action::NextFile => self.step_file(1),
             Action::PrevFile => self.step_file(-1),
-            Action::NextComment => self.jump_comment(1, viewport_height),
-            Action::PrevComment => self.jump_comment(-1, viewport_height),
-            Action::Move(motion) => self.travel(motion, viewport_height),
+            Action::NextComment => self.jump_comment(1, layout),
+            Action::PrevComment => self.jump_comment(-1, layout),
+            Action::Move(motion) => self.travel(motion, layout),
 
             Action::EnterVisual => {
                 if self.pane == Pane::Diff {
@@ -373,6 +403,13 @@ impl App {
             .values()
             .flatten()
             .find(|thread| thread.id == id)
+    }
+
+    /// The open file's threads, which is what the row list indexes into.
+    pub fn file_threads(&self) -> &[ReviewThread] {
+        self.current_file()
+            .and_then(|file| self.threads_by_path.get(&file.path))
+            .map_or(&[], Vec::as_slice)
     }
 
     fn draft_at_cursor(&self) -> Option<usize> {
@@ -575,7 +612,7 @@ impl App {
         self.selection = None;
     }
 
-    fn accept_search(&mut self) {
+    fn accept_search(&mut self, layout: &Layout) {
         if self.mode != Mode::Search {
             return;
         }
@@ -589,7 +626,7 @@ impl App {
             return;
         };
 
-        if self.search_matches().is_empty() {
+        if self.search_matches(layout).is_empty() {
             self.status = format!("pattern not found: {query}");
         }
     }
@@ -613,7 +650,7 @@ impl App {
 
     /// Incremental search: every keystroke previews the first match from where
     /// the search began, so the diff tracks the query as it is typed.
-    pub fn sync_search(&mut self, viewport_height: usize) {
+    pub fn sync_search(&mut self, layout: &Layout) {
         let Some(origin) = self.search_origin.as_ref() else {
             return;
         };
@@ -621,7 +658,7 @@ impl App {
         self.cursor = origin.cursor;
         self.diff_scroll = origin.diff_scroll;
 
-        let matches = self.search_matches();
+        let matches = self.search_matches(layout);
         let Some(hit) = matches
             .iter()
             .find(|hit| hit.row() >= self.cursor)
@@ -631,11 +668,7 @@ impl App {
             return;
         };
 
-        self.land_on(
-            hit.row(),
-            hit.thread_id().map(str::to_string),
-            viewport_height,
-        );
+        self.land_on(hit.row(), hit.thread_id().map(str::to_string), layout);
     }
 
     pub fn search_query(&self) -> Option<String> {
@@ -644,7 +677,7 @@ impl App {
 
     /// Every hit in the open file, ordered the way the diff renders them: a code
     /// line, then the threads that hang beneath it.
-    pub fn search_matches(&self) -> Vec<search::Match> {
+    pub fn search_matches(&self, layout: &Layout) -> Vec<search::Match> {
         let Some(query) = self.search_query().filter(|query| !query.is_empty())
         else {
             return Vec::new();
@@ -653,9 +686,12 @@ impl App {
             return Vec::new();
         };
 
-        let hits: Vec<(usize, String)> = self
-            .thread_rows(self.selected_file)
-            .into_iter()
+        let threads = self.file_threads();
+        let hits: Vec<(usize, String)> = layout
+            .rows
+            .stops()
+            .iter()
+            .map(|stop| (stop.source, &threads[stop.thread]))
             .filter(|(_, thread)| {
                 thread.comments.iter().any(|comment| {
                     search::is_match(&comment.body, &query)
@@ -684,8 +720,8 @@ impl App {
 
     /// One-based cursor position within the match list, plus the total. A zero
     /// position means the cursor is currently between matches.
-    pub fn search_summary(&self) -> (usize, usize) {
-        let matches = self.search_matches();
+    pub fn search_summary(&self, layout: &Layout) -> (usize, usize) {
+        let matches = self.search_matches(layout);
         let current =
             self.match_position(&matches).map_or(0, |index| index + 1);
 
@@ -714,14 +750,14 @@ impl App {
         })
     }
 
-    fn jump_match(&mut self, direction: isize, viewport_height: usize) {
+    fn jump_match(&mut self, direction: isize, layout: &Layout) {
         let Some(query) = self.search_query().filter(|query| !query.is_empty())
         else {
             self.status = "no search pattern".into();
             return;
         };
 
-        let matches = self.search_matches();
+        let matches = self.search_matches(layout);
         if matches.is_empty() {
             self.status = format!("pattern not found: {query}");
             return;
@@ -743,11 +779,7 @@ impl App {
         };
 
         let hit = matches[target].clone();
-        self.land_on(
-            hit.row(),
-            hit.thread_id().map(str::to_string),
-            viewport_height,
-        );
+        self.land_on(hit.row(), hit.thread_id().map(str::to_string), layout);
     }
 
     pub fn filter_query(&self) -> Option<String> {
@@ -859,7 +891,6 @@ impl App {
         self.expanded_thread =
             (self.expanded_thread.as_deref() != Some(&id)).then_some(id);
         self.thread_scroll = 0;
-        self.thread_scroll_limit = 0;
 
         if let Some(expanded) = self.expanded_thread.clone() {
             self.request_thread_images(&expanded);
@@ -945,95 +976,42 @@ impl App {
         }
     }
 
-    fn travel(&mut self, motion: Motion, viewport_height: usize) {
+    fn travel(&mut self, motion: Motion, layout: &Layout) {
         if self.pane == Pane::Files {
-            if self.file_filter.is_some() {
-                let matches = self.filtered_file_indices();
-                let Some(position) = matches
-                    .iter()
-                    .position(|&index| index == self.selected_file)
-                else {
-                    return;
-                };
-                let target = match motion {
-                    Motion::Down(n) => position.saturating_add(n),
-                    Motion::Up(n) => position.saturating_sub(n),
-                    Motion::HalfPageDown => {
-                        position.saturating_add(viewport_height / 2)
-                    }
-                    Motion::HalfPageUp => {
-                        position.saturating_sub(viewport_height / 2)
-                    }
-                    Motion::Top => 0,
-                    Motion::Bottom => matches.len().saturating_sub(1),
-                }
-                .min(matches.len().saturating_sub(1));
-                self.set_selected_file(matches[target], false);
-                return;
-            }
-
-            let target = match motion {
-                Motion::Down(n) => self.selected_file.saturating_add(n),
-                Motion::Up(n) => self.selected_file.saturating_sub(n),
-                Motion::HalfPageDown => {
-                    self.selected_file.saturating_add(viewport_height / 2)
-                }
-                Motion::HalfPageUp => {
-                    self.selected_file.saturating_sub(viewport_height / 2)
-                }
-                Motion::Top => 0,
-                Motion::Bottom => self.files.len().saturating_sub(1),
-            };
-
-            self.select_file(target);
+            self.travel_files(motion, layout.files_viewport());
             return;
         }
 
-        let last = self.diff_len().saturating_sub(1);
-        if self.mode == Mode::Visual {
-            self.cursor = match motion {
-                Motion::Down(n) => self.cursor.saturating_add(n).min(last),
-                Motion::Up(n) => self.cursor.saturating_sub(n),
-                Motion::HalfPageDown => {
-                    self.cursor.saturating_add(viewport_height / 2).min(last)
-                }
-                Motion::HalfPageUp => {
-                    self.cursor.saturating_sub(viewport_height / 2)
-                }
-                Motion::Top => 0,
-                Motion::Bottom => last,
-            };
-        } else if self.expanded_thread.is_some() {
-            self.thread_scroll = match motion {
-                Motion::Down(n) => self.thread_scroll.saturating_add(n),
-                Motion::Up(n) => self.thread_scroll.saturating_sub(n),
-                Motion::HalfPageDown => {
-                    self.thread_scroll.saturating_add(viewport_height / 2)
-                }
-                Motion::HalfPageUp => {
-                    self.thread_scroll.saturating_sub(viewport_height / 2)
-                }
-                Motion::Top => 0,
-                Motion::Bottom => self.thread_scroll_limit,
-            }
-            .min(self.thread_scroll_limit);
+        let viewport = layout.diff_viewport();
+
+        // An open conversation captures the cursor: motions scroll through it
+        // rather than walking away from it. Visual mode overrides that, since a
+        // selection is being extended over code.
+        if self.mode != Mode::Visual && self.expanded_thread.is_some() {
+            let limit = layout.rows.body_limit();
+            self.thread_scroll =
+                step(motion, self.thread_scroll, limit + 1, viewport);
             return;
+        }
+
+        if self.mode == Mode::Visual {
+            self.cursor = step(motion, self.cursor, self.diff_len(), viewport);
         } else {
             match motion {
-                Motion::Down(n) => self.move_diff_stops(1, n),
-                Motion::Up(n) => self.move_diff_stops(-1, n),
+                Motion::Down(n) => self.move_diff_stops(1, n, layout),
+                Motion::Up(n) => self.move_diff_stops(-1, n, layout),
                 Motion::HalfPageDown => {
-                    self.move_diff_stops(1, viewport_height / 2);
+                    self.move_diff_stops(1, viewport / 2, layout);
                 }
                 Motion::HalfPageUp => {
-                    self.move_diff_stops(-1, viewport_height / 2);
+                    self.move_diff_stops(-1, viewport / 2, layout);
                 }
                 Motion::Top => {
                     self.cursor = 0;
                     self.set_focused_thread(None);
                 }
                 Motion::Bottom => {
-                    self.cursor = last;
+                    self.cursor = self.diff_len().saturating_sub(1);
                     self.set_focused_thread(None);
                 }
             }
@@ -1043,25 +1021,46 @@ impl App {
             selection.head = self.cursor;
         }
 
-        self.follow_cursor(viewport_height);
+        self.follow_cursor(layout);
     }
 
-    fn move_diff_stops(&mut self, direction: isize, count: usize) {
-        let max_steps = self.diff_len().saturating_add(
-            self.current_file()
-                .and_then(|file| self.threads_by_path.get(&file.path))
-                .map_or(0, Vec::len),
-        );
+    fn travel_files(&mut self, motion: Motion, viewport: usize) {
+        if self.file_filter.is_none() {
+            let target =
+                step(motion, self.selected_file, self.files.len(), viewport);
+            self.select_file(target);
+            return;
+        }
+
+        let matches = self.filtered_file_indices();
+        let Some(position) = matches
+            .iter()
+            .position(|&index| index == self.selected_file)
+        else {
+            return;
+        };
+
+        let target = step(motion, position, matches.len(), viewport);
+        self.set_selected_file(matches[target], false);
+    }
+
+    fn move_diff_stops(
+        &mut self,
+        direction: isize,
+        count: usize,
+        layout: &Layout,
+    ) {
+        let max_steps = layout.rows.len();
 
         for _ in 0..count.min(max_steps) {
-            if !self.move_diff_stop(direction) {
+            if !self.move_diff_stop(direction, layout) {
                 break;
             }
         }
     }
 
-    fn move_diff_stop(&mut self, direction: isize) -> bool {
-        let ids = self.thread_ids_at_row(self.cursor);
+    fn move_diff_stop(&mut self, direction: isize, layout: &Layout) -> bool {
+        let ids = self.thread_ids_at(self.cursor, layout);
 
         if direction > 0 {
             if let Some(focused) = self.focused_thread.as_deref() {
@@ -1107,14 +1106,14 @@ impl App {
             return false;
         }
         self.cursor -= 1;
-        let previous = self.thread_ids_at_row(self.cursor);
+        let previous = self.thread_ids_at(self.cursor, layout);
         self.set_focused_thread(previous.last().cloned());
         true
     }
 
-    fn jump_comment(&mut self, direction: isize, viewport_height: usize) {
+    fn jump_comment(&mut self, direction: isize, layout: &Layout) {
         if let Some((row, id)) = self.comment_stop_here(direction) {
-            self.land_on(row, Some(id), viewport_height);
+            self.land_on(row, Some(id), layout);
             return;
         }
 
@@ -1125,62 +1124,34 @@ impl App {
         };
 
         self.set_selected_file(index, false);
-        self.land_on(row, Some(id), viewport_height);
+        self.land_on(row, Some(id), layout);
     }
 
     /// Puts the cursor on a diff row, optionally focusing one of its threads,
     /// and scrolls the row into view.
-    fn land_on(
-        &mut self,
-        row: usize,
-        thread: Option<String>,
-        viewport_height: usize,
-    ) {
+    fn land_on(&mut self, row: usize, thread: Option<String>, layout: &Layout) {
         self.pane = Pane::Diff;
         self.selection = None;
         self.cursor = row;
         self.set_focused_thread(thread);
-        self.follow_cursor(viewport_height);
+        self.follow_cursor(layout);
         self.status.clear();
     }
 
-    /// Every thread in a file paired with the diff row it renders under, in the
-    /// order the cursor visits them. Outdated threads have no live anchor and
-    /// are pinned after the last row, matching how they are drawn.
-    fn thread_rows(&self, index: usize) -> Vec<(usize, &ReviewThread)> {
+    /// The subset of threads that `}` and `{` stop at. Jumps cross files, so
+    /// this anchors a file the layout has not laid out.
+    fn comment_stops(&self, index: usize) -> Vec<(usize, String)> {
         let Some(file) = self.files.get(index) else {
             return Vec::new();
         };
-        let Some(threads) = self.threads_by_path.get(&file.path) else {
-            return Vec::new();
-        };
-        let last = file.lines.len().saturating_sub(1);
+        let threads = self
+            .threads_by_path
+            .get(&file.path)
+            .map_or(&[][..], Vec::as_slice);
 
-        let mut rows: Vec<(usize, u8, &ReviewThread)> = threads
-            .iter()
-            .filter_map(|thread| {
-                if thread.is_outdated {
-                    return Some((last, 2, thread));
-                }
-
-                let row = file
-                    .lines
-                    .iter()
-                    .position(|line| thread.anchors_to(line))?;
-                Some((row, u8::from(thread.is_resolved), thread))
-            })
-            .collect();
-
-        rows.sort_by_key(|(row, rank, _)| (*row, *rank));
-        rows.into_iter()
-            .map(|(row, _, thread)| (row, thread))
-            .collect()
-    }
-
-    /// The subset of threads that `}` and `{` stop at.
-    fn comment_stops(&self, index: usize) -> Vec<(usize, String)> {
-        self.thread_rows(index)
+        rows::stops_for(file, threads)
             .into_iter()
+            .map(|stop| (stop.source, &threads[stop.thread]))
             .filter(|(_, thread)| !thread.is_resolved && !thread.is_outdated)
             .map(|(row, thread)| (row, thread.id.clone()))
             .collect()
@@ -1238,57 +1209,70 @@ impl App {
         if self.focused_thread != focused {
             self.expanded_thread = None;
             self.thread_scroll = 0;
-            self.thread_scroll_limit = 0;
         }
         self.focused_thread = focused;
     }
 
-    fn thread_ids_at_row(&self, row: usize) -> Vec<String> {
-        let Some(file) = self.current_file() else {
-            return Vec::new();
-        };
-        let Some(line) = file.lines.get(row) else {
-            return Vec::new();
-        };
-        let is_last = row + 1 == file.lines.len();
-        let mut threads: Vec<&ReviewThread> = self
-            .threads_by_path
-            .get(&file.path)
-            .into_iter()
-            .flatten()
-            .filter(|thread| {
-                (thread.is_outdated && is_last)
-                    || (!thread.is_outdated && thread.anchors_to(line))
-            })
-            .collect();
-        threads.sort_by_key(|thread| {
-            if thread.is_outdated {
-                2
-            } else {
-                i32::from(thread.is_resolved)
-            }
+    /// The threads hanging under one source line, in the order `j` visits them.
+    fn thread_ids_at(&self, source: usize, layout: &Layout) -> Vec<String> {
+        let threads = self.file_threads();
+
+        layout
+            .rows
+            .stops_at(source)
+            .iter()
+            .map(|stop| threads[stop.thread].id.clone())
+            .collect()
+    }
+
+    /// The row the cursor sits on: a focused thread's summary when one is
+    /// focused, otherwise the source line itself.
+    fn cursor_row(&self, layout: &Layout) -> usize {
+        let threads = self.file_threads();
+        let focused = self.focused_thread.as_deref().and_then(|id| {
+            let thread = threads.iter().position(|thread| thread.id == id)?;
+            layout.rows.summary_row(thread)
         });
-        threads.iter().map(|thread| thread.id.clone()).collect()
+
+        focused.unwrap_or_else(|| layout.rows.code_row(self.cursor))
     }
 
     /// Keeps the cursor inside the viewport with a small scroll-off margin.
-    fn follow_cursor(&mut self, viewport_height: usize) {
-        if viewport_height == 0 {
+    ///
+    /// The row list is the one built before this keystroke, which is also the
+    /// one the renderer will slice, so a motion and the scroll that follows it
+    /// agree even though the list is a frame behind.
+    fn follow_cursor(&mut self, layout: &Layout) {
+        let viewport = layout.diff_viewport();
+        if viewport == 0 {
             return;
         }
 
-        let margin = 3.min(viewport_height / 4);
+        let row = self.cursor_row(layout);
+        let margin = 3.min(viewport / 4);
 
-        if self.cursor < self.diff_scroll + margin {
-            self.diff_scroll = self.cursor.saturating_sub(margin);
+        if row < self.diff_scroll + margin {
+            self.diff_scroll = row.saturating_sub(margin);
             return;
         }
 
-        let bottom =
-            self.diff_scroll + viewport_height.saturating_sub(margin + 1);
-        if self.cursor > bottom {
-            self.diff_scroll =
-                (self.cursor + margin + 1).saturating_sub(viewport_height);
+        let bottom = self.diff_scroll + viewport.saturating_sub(margin + 1);
+        if row > bottom {
+            self.diff_scroll = (row + margin + 1).saturating_sub(viewport);
         }
+    }
+}
+
+/// Resolves a motion to an absolute position in a list of `len` items.
+fn step(motion: Motion, current: usize, len: usize, viewport: usize) -> usize {
+    let last = len.saturating_sub(1);
+
+    match motion {
+        Motion::Down(n) => current.saturating_add(n).min(last),
+        Motion::Up(n) => current.saturating_sub(n),
+        Motion::HalfPageDown => current.saturating_add(viewport / 2).min(last),
+        Motion::HalfPageUp => current.saturating_sub(viewport / 2),
+        Motion::Top => 0,
+        Motion::Bottom => last,
     }
 }

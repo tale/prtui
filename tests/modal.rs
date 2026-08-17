@@ -6,8 +6,54 @@ use prtui::app::mode::Mode;
 use prtui::app::review::{Request, ReviewEvent, Sent};
 use prtui::app::search::Match;
 use prtui::app::{App, Pane};
+use prtui::layout::Layout;
 use prtui::model::{parse_files, parse_meta};
+use ratatui::layout::Rect;
+use std::fmt::Write;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
+
+/// The frame every test renders at. Layout has to be computed from the same
+/// size the last frame used, since that is what the cursor still addresses.
+const FRAME: Rect = Rect {
+    x: 0,
+    y: 0,
+    width: 120,
+    height: 30,
+};
+
+fn layout_of(app: &App) -> Layout {
+    Layout::compute(FRAME, app)
+}
+
+/// One key through the router, laid out the way the event loop lays it out.
+/// The router is threaded in because half-typed commands — a count prefix, a
+/// pending `g` — live in it across keys.
+fn send(
+    input: &mut InputRouter,
+    app: &mut App,
+    event: KeyEvent,
+) -> DispatchResult {
+    let layout = layout_of(app);
+    input.dispatch_key(app, event, &layout)
+}
+
+fn paste(input: &mut InputRouter, app: &mut App, text: &str) -> DispatchResult {
+    let layout = layout_of(app);
+    input.dispatch_paste(app, text, &layout)
+}
+
+fn act(app: &mut App, action: &Action) {
+    let layout = layout_of(app);
+    app.apply(action, &layout);
+}
+
+fn found(app: &App) -> Vec<prtui::app::search::Match> {
+    app.search_matches(&layout_of(app))
+}
+
+fn summary(app: &App) -> (usize, usize) {
+    app.search_summary(&layout_of(app))
+}
 
 fn load() -> App {
     let files: serde_json::Value =
@@ -77,10 +123,9 @@ fn file_from(patch: &str) -> prtui::model::ChangedFile {
 }
 
 fn press(app: &mut App, keys: &str) {
-    let mut input = InputRouter::default();
+    let input = &mut InputRouter::default();
     for c in keys.chars() {
-        let key = KeyEvent::new(KeyCode::Char(c), Modifiers::NONE);
-        input.dispatch_key(app, key, 20);
+        send(input, app, KeyEvent::new(KeyCode::Char(c), Modifiers::NONE));
     }
 }
 
@@ -117,15 +162,12 @@ fn gg_needs_both_keys() {
     // A lone `g` is incomplete and must not move the cursor.
     let mut input = InputRouter::default();
     let key = KeyEvent::new(KeyCode::Char('g'), Modifiers::NONE);
-    assert_eq!(
-        input.dispatch_key(&mut app, key, 20),
-        DispatchResult::Pending
-    );
+    assert_eq!(send(&mut input, &mut app, key), DispatchResult::Pending);
     assert_eq!(app.cursor, 9);
     assert_eq!(input.pending_hint(), "g");
 
     assert_eq!(
-        input.dispatch_key(&mut app, key, 20),
+        send(&mut input, &mut app, key),
         DispatchResult::Applied(Action::Move(Motion::Top))
     );
     assert_eq!(app.cursor, 0);
@@ -203,23 +245,33 @@ fn enter_toggles_the_focused_thread() {
     assert_eq!(app.focused_thread.as_deref(), Some(thread.id.as_str()));
 
     let mut input = InputRouter::default();
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
     assert_eq!(app.expanded_thread.as_deref(), Some(thread.id.as_str()));
 
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
     assert!(app.expanded_thread.is_none());
 }
 
 #[test]
 fn expanded_thread_movement_scrolls_without_losing_focus() {
     let mut app = load();
-    let thread = park_on_unresolved_thread(&mut app);
-    press(&mut app, "j");
+    let mut thread = park_on_unresolved_thread(&mut app);
 
+    // Long enough that the conversation genuinely overflows its window, which
+    // is what gives the motion something to scroll.
+    thread.comments[0].body =
+        (1..=40).fold(String::new(), |mut body, index| {
+            let _ = writeln!(body, "line {index}\n");
+            body
+        });
+    app.threads_by_path
+        .insert(thread.path.clone(), vec![thread.clone()]);
+
+    press(&mut app, "j");
     let mut input = InputRouter::default();
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
     assert!(app.expanded_thread.is_some());
-    app.thread_scroll_limit = 4;
+    assert!(layout_of(&app).rows.body_limit() > 4);
 
     press(&mut app, "j");
     assert_eq!(app.thread_scroll, 1);
@@ -239,7 +291,7 @@ fn escape_returns_from_a_thread_to_its_source_line() {
 
     let mut input = InputRouter::default();
     assert_eq!(
-        input.dispatch_key(&mut app, KeyCode::Escape.into(), 20),
+        send(&mut input, &mut app, KeyCode::Escape.into()),
         DispatchResult::Applied(Action::LeaveThread)
     );
     assert_eq!(app.cursor, source_row);
@@ -291,7 +343,7 @@ fn commenting_a_selection_produces_one_multiline_draft() {
     let composer = app.composer.as_mut().unwrap();
     composer.editor.set_text("this allocates on every call");
 
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
 
     assert_eq!(app.mode, Mode::Normal);
     assert!(app.selection.is_none());
@@ -324,7 +376,7 @@ fn a_selection_across_both_sides_keeps_the_whole_block() {
         .unwrap()
         .editor
         .set_text("rewrite this");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
 
     let anchor = app.drafts[0].anchor;
     assert_eq!(anchor.start_side, Side::Left, "starts on the deletions");
@@ -353,7 +405,7 @@ fn a_selection_ending_in_deletions_stays_on_the_old_side() {
     press(&mut app, "V2j");
     press(&mut app, "c");
     app.composer.as_mut().unwrap().editor.set_text("drop these");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
 
     let anchor = app.drafts[0].anchor;
     assert_eq!(anchor.start_side, Side::Left);
@@ -369,7 +421,7 @@ fn an_empty_comment_is_discarded() {
     press(&mut app, "c");
     assert_eq!(app.mode, Mode::Insert);
 
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
     assert!(app.drafts.is_empty());
     assert_eq!(app.mode, Mode::Normal);
 }
@@ -386,7 +438,7 @@ fn cancelling_keeps_the_buffer_out_of_the_drafts() {
     let mut input = InputRouter::default();
     let cancel = KeyEvent::new(KeyCode::Escape, Modifiers::NONE);
     assert_eq!(
-        input.dispatch_key(&mut app, cancel, 20),
+        send(&mut input, &mut app, cancel),
         DispatchResult::Applied(Action::CancelComment)
     );
     assert!(app.composer.is_none());
@@ -405,7 +457,7 @@ fn insert_mode_reserves_app_chords_and_forwards_editor_keys() {
     // A bare letter belongs to the editor widget, not the app keymap.
     let letter = KeyEvent::new(KeyCode::Char('s'), Modifiers::NONE);
     assert_eq!(
-        input.dispatch_key(&mut app, letter, 20),
+        send(&mut input, &mut app, letter),
         DispatchResult::ForwardedToEditor
     );
     assert_eq!(app.composer.as_ref().unwrap().editor.text(), "s");
@@ -414,7 +466,7 @@ fn insert_mode_reserves_app_chords_and_forwards_editor_keys() {
     let modified =
         KeyEvent::new(KeyCode::Char('s'), Modifiers::CONTROL | Modifiers::ALT);
     assert_eq!(
-        input.dispatch_key(&mut app, modified, 20),
+        send(&mut input, &mut app, modified),
         DispatchResult::ForwardedToEditor
     );
     assert!(app.composer.is_some());
@@ -422,13 +474,13 @@ fn insert_mode_reserves_app_chords_and_forwards_editor_keys() {
     // Shifted Enter is the newline; the bare one saves.
     let newline = KeyEvent::new(KeyCode::Enter, Modifiers::SHIFT);
     assert_eq!(
-        input.dispatch_key(&mut app, newline, 20),
+        send(&mut input, &mut app, newline),
         DispatchResult::ForwardedToEditor
     );
     assert_eq!(app.composer.as_ref().unwrap().editor.text(), "s\n");
 
     assert_eq!(
-        input.dispatch_key(&mut app, KeyEvent::from(KeyCode::Enter), 20),
+        send(&mut input, &mut app, KeyEvent::from(KeyCode::Enter)),
         DispatchResult::Applied(Action::CommitComment)
     );
     assert!(app.composer.is_none());
@@ -451,7 +503,7 @@ fn ctrl_s_no_longer_commits_anything() {
         assert_eq!(app.mode, mode);
 
         let mut input = InputRouter::default();
-        input.dispatch_key(&mut app, chord, 20);
+        send(&mut input, &mut app, chord);
         assert_eq!(app.mode, mode, "ctrl-s is inert in {mode:?}");
         assert!(app.drafts.is_empty());
         assert!(app.take_requests().is_empty());
@@ -464,14 +516,14 @@ fn paste_is_routed_only_to_an_open_composer() {
     let mut input = InputRouter::default();
 
     assert_eq!(
-        input.dispatch_paste(&mut app, "ignored", 20),
+        paste(&mut input, &mut app, "ignored"),
         DispatchResult::Ignored
     );
 
     park_on_code(&mut app);
     press(&mut app, "c");
     assert_eq!(
-        input.dispatch_paste(&mut app, "pasted text", 20),
+        paste(&mut input, &mut app, "pasted text"),
         DispatchResult::ForwardedToEditor
     );
     assert_eq!(app.composer.as_ref().unwrap().editor.text(), "pasted text");
@@ -483,10 +535,7 @@ fn alt_modified_normal_bindings_are_ignored() {
     let mut input = InputRouter::default();
     let alt_j = KeyEvent::new(KeyCode::Char('j'), Modifiers::ALT);
 
-    assert_eq!(
-        input.dispatch_key(&mut app, alt_j, 20),
-        DispatchResult::Ignored
-    );
+    assert_eq!(send(&mut input, &mut app, alt_j), DispatchResult::Ignored);
     assert_eq!(app.cursor, 0);
 }
 
@@ -522,7 +571,7 @@ fn escape_and_ctrl_bracket_both_cancel_the_composer() {
         assert_eq!(app.mode, Mode::Insert);
 
         let mut input = InputRouter::default();
-        input.dispatch_key(&mut app, key, 20);
+        send(&mut input, &mut app, key);
 
         assert_eq!(app.mode, Mode::Normal, "{key:?} should leave insert mode");
         assert!(app.composer.is_none(), "{key:?} should close the composer");
@@ -561,7 +610,7 @@ fn ctrl_c_quits_from_every_mode() {
 
         let mut input = InputRouter::default();
         assert_eq!(
-            input.dispatch_key(&mut app, ctrl_c, 20),
+            send(&mut input, &mut app, ctrl_c),
             DispatchResult::Applied(Action::Quit)
         );
         assert!(app.should_quit, "Ctrl+C should quit from {mode:?}");
@@ -577,7 +626,7 @@ fn escape_and_ctrl_bracket_quit_from_normal_mode() {
         let mut app = load();
         let mut input = InputRouter::default();
         assert_eq!(
-            input.dispatch_key(&mut app, key, 20),
+            send(&mut input, &mut app, key),
             DispatchResult::Applied(Action::Quit)
         );
         assert!(app.should_quit);
@@ -591,10 +640,10 @@ fn ctrl_bracket_leaves_visual_mode() {
     assert_eq!(app.mode, Mode::Visual);
 
     let mut input = InputRouter::default();
-    input.dispatch_key(
+    send(
+        &mut input,
         &mut app,
         KeyEvent::new(KeyCode::Char('['), Modifiers::CONTROL),
-        20,
     );
 
     assert_eq!(app.mode, Mode::Normal);
@@ -629,16 +678,16 @@ fn pane_focus_has_tab_directional_and_enter_routes() {
 
     app.is_files_visible = false;
     let mut input = InputRouter::default();
-    input.dispatch_key(&mut app, KeyCode::Tab.into(), 20);
+    send(&mut input, &mut app, KeyCode::Tab.into());
     assert!(app.is_files_visible);
     assert_eq!(app.pane, Pane::Files);
 
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
     assert_eq!(app.pane, Pane::Diff);
 
-    input.dispatch_key(&mut app, KeyCode::Left.into(), 20);
+    send(&mut input, &mut app, KeyCode::Left.into());
     assert_eq!(app.pane, Pane::Files);
-    input.dispatch_key(&mut app, KeyCode::Right.into(), 20);
+    send(&mut input, &mut app, KeyCode::Right.into());
     assert_eq!(app.pane, Pane::Diff);
 }
 
@@ -652,14 +701,14 @@ fn filtering_narrows_the_tree_and_survives_commit() {
     assert_eq!(app.mode, Mode::Filter);
     assert_eq!(app.filtered_file_indices(), vec![2, 3]);
 
-    input.dispatch_key(
+    send(
+        &mut input,
         &mut app,
         KeyEvent::new(KeyCode::Char('p'), Modifiers::CONTROL),
-        20,
     );
     assert_eq!(app.selected_file, 2, "ctrl-p steps back through matches");
 
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.filter_query().as_deref(), Some("auth_check"));
 
@@ -671,7 +720,7 @@ fn filtering_narrows_the_tree_and_survives_commit() {
         );
     }
 
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
     assert_eq!(app.pane, Pane::Diff, "enter opens the selected match");
 }
 
@@ -683,30 +732,30 @@ fn escape_restores_whatever_the_filter_replaced() {
     let mut input = InputRouter::default();
 
     press(&mut app, "/");
-    input.dispatch_paste(&mut app, "nothing\nwill\rmatch", 20);
+    paste(&mut input, &mut app, "nothing\nwill\rmatch");
     assert!(app.filtered_file_indices().is_empty());
 
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
     assert_eq!(
         app.mode,
         Mode::Filter,
         "enter will not commit an empty result"
     );
 
-    input.dispatch_key(&mut app, KeyCode::Escape.into(), 20);
+    send(&mut input, &mut app, KeyCode::Escape.into());
     assert!(app.file_filter.is_none());
     assert_eq!(app.selected_file, original_file);
 
     // Escaping an edit rewinds to the committed query, not to no filter at all.
     press(&mut app, "/auth_check");
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
     app.selected_file = 2;
 
     press(&mut app, "/_test");
     assert_eq!(app.filter_query().as_deref(), Some("auth_check_test"));
     assert_eq!(app.selected_file, 3, "the edit previews its narrower match");
 
-    input.dispatch_key(&mut app, KeyCode::Escape.into(), 20);
+    send(&mut input, &mut app, KeyCode::Escape.into());
     assert_eq!(app.filter_query().as_deref(), Some("auth_check"));
     assert_eq!(app.selected_file, 2);
 }
@@ -720,23 +769,23 @@ fn escape_clears_a_committed_filter_before_quitting() {
         let mut app = load();
         app.pane = Pane::Files;
         let mut input = InputRouter::default();
-        input.dispatch_key(
+        send(
+            &mut input,
             &mut app,
             KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
-            20,
         );
-        input.dispatch_paste(&mut app, "auth_check", 20);
-        input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+        paste(&mut input, &mut app, "auth_check");
+        send(&mut input, &mut app, KeyCode::Enter.into());
 
         assert_eq!(
-            input.dispatch_key(&mut app, clear, 20),
+            send(&mut input, &mut app, clear),
             DispatchResult::Applied(Action::ClearFind)
         );
         assert!(app.file_filter.is_none());
         assert!(!app.should_quit);
 
         assert_eq!(
-            input.dispatch_key(&mut app, clear, 20),
+            send(&mut input, &mut app, clear),
             DispatchResult::Applied(Action::Quit)
         );
         assert!(app.should_quit);
@@ -835,12 +884,12 @@ fn search_for(app: &mut App, query: &str) -> InputRouter {
     let mut input = InputRouter::default();
 
     app.pane = Pane::Diff;
-    input.dispatch_key(
+    send(
+        &mut input,
         app,
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
-        20,
     );
-    input.dispatch_paste(app, query, 20);
+    paste(&mut input, app, query);
 
     input
 }
@@ -851,19 +900,19 @@ fn slash_filters_the_tree_from_the_files_pane_and_searches_from_the_diff() {
     let mut input = InputRouter::default();
 
     app.pane = Pane::Files;
-    input.dispatch_key(
+    send(
+        &mut input,
         &mut app,
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
-        20,
     );
     assert_eq!(app.mode, Mode::Filter);
-    input.dispatch_key(&mut app, KeyCode::Escape.into(), 20);
+    send(&mut input, &mut app, KeyCode::Escape.into());
 
     app.pane = Pane::Diff;
-    input.dispatch_key(
+    send(
+        &mut input,
         &mut app,
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
-        20,
     );
     assert_eq!(app.mode, Mode::Search);
     assert!(app.file_filter.is_none());
@@ -873,16 +922,12 @@ fn slash_filters_the_tree_from_the_files_pane_and_searches_from_the_diff() {
 fn n_cycles_every_match_and_wraps_at_the_end() {
     let mut app = load();
     let mut input = search_for(&mut app, "cobra");
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
 
     assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(
-        app.search_summary().0,
-        1,
-        "accepting lands on the first match"
-    );
+    assert_eq!(summary(&app).0, 1, "accepting lands on the first match");
 
-    let total = app.search_matches().len();
+    let total = found(&app).len();
     assert!(total > 1, "a one-match needle cannot exercise wrapping");
 
     let mut visited = vec![app.cursor];
@@ -890,7 +935,7 @@ fn n_cycles_every_match_and_wraps_at_the_end() {
         press(&mut app, "n");
         visited.push(app.cursor);
     }
-    assert_eq!(app.search_summary().0, total, "n reaches the last match");
+    assert_eq!(summary(&app).0, total, "n reaches the last match");
 
     let mut distinct = visited.clone();
     distinct.dedup();
@@ -898,7 +943,7 @@ fn n_cycles_every_match_and_wraps_at_the_end() {
 
     press(&mut app, "n");
     assert_eq!(app.cursor, visited[0], "the last match wraps to the first");
-    assert_eq!(app.search_summary().0, 1);
+    assert_eq!(summary(&app).0, 1);
 
     press(&mut app, "N");
     assert_eq!(
@@ -911,7 +956,7 @@ fn n_cycles_every_match_and_wraps_at_the_end() {
         press(&mut app, "N");
         assert_eq!(app.cursor, *expected, "N retraces the list in reverse");
     }
-    assert_eq!(app.search_summary().0, 1);
+    assert_eq!(summary(&app).0, 1);
 }
 
 #[test]
@@ -929,9 +974,9 @@ fn search_matches_comment_bodies_and_focuses_the_thread() {
         .to_string();
 
     let mut input = search_for(&mut app, &word);
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
 
-    let matches = app.search_matches();
+    let matches = found(&app);
     assert!(
         matches
             .iter()
@@ -963,7 +1008,7 @@ fn escape_restores_the_diff_position_the_search_previewed_away_from() {
     let mut input = search_for(&mut app, &needle);
     assert_eq!(app.cursor, 9, "typing previews the first match");
 
-    input.dispatch_key(&mut app, KeyCode::Escape.into(), 20);
+    send(&mut input, &mut app, KeyCode::Escape.into());
 
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.cursor, 3);
@@ -989,15 +1034,14 @@ fn smartcase_ignores_case_until_the_query_carries_some() {
 fn escape_clears_a_committed_search_before_it_quits() {
     let mut app = load();
     let mut input = search_for(&mut app, "cobra");
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
     assert!(app.search.is_some());
 
-    let mut input = InputRouter::default();
-    input.dispatch_key(&mut app, KeyCode::Escape.into(), 20);
+    send(&mut input, &mut app, KeyCode::Escape.into());
     assert!(app.search.is_none());
     assert!(!app.should_quit, "the first escape only clears the pattern");
 
-    input.dispatch_key(&mut app, KeyCode::Escape.into(), 20);
+    send(&mut input, &mut app, KeyCode::Escape.into());
     assert!(app.should_quit);
 }
 
@@ -1005,7 +1049,7 @@ fn escape_clears_a_committed_search_before_it_quits() {
 fn match_and_comment_motions_are_normal_mode_only() {
     let mut app = load();
     let mut input = search_for(&mut app, "cobra");
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
 
     press(&mut app, "V");
     let anchored = app.cursor;
@@ -1025,12 +1069,12 @@ fn ctrl_d_and_ctrl_u_step_by_half_a_viewport() {
     let mut app = load();
     app.pane = Pane::Diff;
     let mut input = InputRouter::default();
-    let half = 10;
+    let half = layout_of(&app).diff_viewport() / 2;
 
-    input.dispatch_key(
+    send(
+        &mut input,
         &mut app,
         KeyEvent::new(KeyCode::Char('d'), Modifiers::CONTROL),
-        half * 2,
     );
     assert!(
         (1..=half).contains(&app.cursor),
@@ -1038,10 +1082,10 @@ fn ctrl_d_and_ctrl_u_step_by_half_a_viewport() {
         app.cursor
     );
 
-    input.dispatch_key(
+    send(
+        &mut input,
         &mut app,
         KeyEvent::new(KeyCode::Char('u'), Modifiers::CONTROL),
-        half * 2,
     );
     assert_eq!(app.cursor, 0, "ctrl-u walks the same distance back");
 }
@@ -1050,10 +1094,9 @@ fn ctrl_d_and_ctrl_u_step_by_half_a_viewport() {
 fn match_motions_find_the_nearest_hit_from_an_unmatched_row() {
     let mut app = load();
     let mut input = search_for(&mut app, "cobra");
-    input.dispatch_key(&mut app, KeyCode::Enter.into(), 20);
+    send(&mut input, &mut app, KeyCode::Enter.into());
 
-    let rows: Vec<usize> =
-        app.search_matches().iter().map(Match::row).collect();
+    let rows: Vec<usize> = found(&app).iter().map(Match::row).collect();
     let gap = (rows[0] + 1..rows[1])
         .next()
         .expect("fixture needs a gap between the first two hits");
@@ -1125,18 +1168,17 @@ fn both_prompts_step_with_arrows_and_control_keys() {
         (ctrl('p'), 2),
         (ctrl('n'), 3),
     ] {
-        input.dispatch_key(&mut app, key, 20);
+        send(&mut input, &mut app, key);
         assert_eq!(app.selected_file, expected, "{key:?} steps the filter");
     }
 
-    input.dispatch_key(&mut app, ctrl('['), 20);
+    send(&mut input, &mut app, ctrl('['));
     assert_eq!(app.mode, Mode::Normal, "ctrl-[ cancels the filter prompt");
     assert!(app.file_filter.is_none());
 
     let mut app = load();
     let mut input = search_for(&mut app, "cobra");
-    let rows: Vec<usize> =
-        app.search_matches().iter().map(Match::row).collect();
+    let rows: Vec<usize> = found(&app).iter().map(Match::row).collect();
 
     for (key, expected) in [
         (KeyEvent::from(KeyCode::Down), rows[1]),
@@ -1144,11 +1186,11 @@ fn both_prompts_step_with_arrows_and_control_keys() {
         (ctrl('n'), rows[1]),
         (ctrl('p'), rows[0]),
     ] {
-        input.dispatch_key(&mut app, key, 20);
+        send(&mut input, &mut app, key);
         assert_eq!(app.cursor, expected, "{key:?} steps the search prompt");
     }
 
-    input.dispatch_key(&mut app, ctrl('['), 20);
+    send(&mut input, &mut app, ctrl('['));
     assert_eq!(app.mode, Mode::Normal, "ctrl-[ cancels the search prompt");
     assert!(app.search.is_none());
 }
@@ -1167,13 +1209,13 @@ fn submitting_ships_every_draft_as_one_review() {
     app.cursor = added[0];
     press(&mut app, "c");
     app.composer.as_mut().unwrap().editor.set_text("first");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
 
     // Well clear of the first draft, so this is a second one and not a revision.
     app.cursor = *added.iter().find(|row| **row > added[0] + 4).unwrap();
     press(&mut app, "V2jc");
     app.composer.as_mut().unwrap().editor.set_text("spanning");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
     assert_eq!(app.drafts.len(), 2);
 
     press(&mut app, "s");
@@ -1183,8 +1225,8 @@ fn submitting_ships_every_draft_as_one_review() {
         .unwrap()
         .editor
         .set_text("looks good");
-    app.apply(&Action::CycleEvent(1), 20);
-    app.apply(&Action::CommitSubmit, 20);
+    act(&mut app, &Action::CycleEvent(1));
+    act(&mut app, &Action::CommitSubmit);
 
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.in_flight, 1);
@@ -1224,7 +1266,7 @@ fn a_failed_submission_keeps_the_drafts() {
     park_on_code(&mut app);
     press(&mut app, "c");
     app.composer.as_mut().unwrap().editor.set_text("keep me");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
 
     press(&mut app, "s");
     app.submission
@@ -1232,7 +1274,7 @@ fn a_failed_submission_keeps_the_drafts() {
         .unwrap()
         .editor
         .set_text("a summary");
-    app.apply(&Action::CommitSubmit, 20);
+    act(&mut app, &Action::CommitSubmit);
     assert_eq!(app.take_requests().len(), 1);
 
     app.finish(Err("HTTP 422: line must be part of the diff".into()));
@@ -1246,7 +1288,7 @@ fn a_draft_written_during_a_submission_survives_it() {
     park_on_code(&mut app);
     press(&mut app, "c");
     app.composer.as_mut().unwrap().editor.set_text("sent");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
 
     press(&mut app, "s");
     app.submission
@@ -1254,7 +1296,7 @@ fn a_draft_written_during_a_submission_survives_it() {
         .unwrap()
         .editor
         .set_text("a summary");
-    app.apply(&Action::CommitSubmit, 20);
+    act(&mut app, &Action::CommitSubmit);
     assert_eq!(app.take_requests().len(), 1);
 
     app.cursor += 1;
@@ -1264,7 +1306,7 @@ fn a_draft_written_during_a_submission_survives_it() {
         .unwrap()
         .editor
         .set_text("written later");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
 
     app.finish(Ok(Sent::Review(1)));
     assert_eq!(app.drafts.len(), 1);
@@ -1277,8 +1319,8 @@ fn nothing_to_submit_never_reaches_the_network() {
     press(&mut app, "s");
 
     // Approving is the one verdict GitHub takes without a summary.
-    app.apply(&Action::CycleEvent(1), 20);
-    app.apply(&Action::CommitSubmit, 20);
+    act(&mut app, &Action::CycleEvent(1));
+    act(&mut app, &Action::CommitSubmit);
 
     assert_eq!(app.status, "nothing to submit");
     assert_eq!(app.in_flight, 0);
@@ -1297,7 +1339,7 @@ fn a_verdict_that_needs_a_summary_says_so_before_sending() {
         .unwrap()
         .editor
         .set_text("inline only");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
 
     for (event, label) in [
         (ReviewEvent::Comment, "comment needs a summary"),
@@ -1308,22 +1350,22 @@ fn a_verdict_that_needs_a_summary_says_so_before_sending() {
     ] {
         press(&mut app, "s");
         while app.submission.as_ref().unwrap().event != event {
-            app.apply(&Action::CycleEvent(1), 20);
+            act(&mut app, &Action::CycleEvent(1));
         }
 
-        app.apply(&Action::CommitSubmit, 20);
+        act(&mut app, &Action::CommitSubmit);
         assert_eq!(app.status, label);
         assert_eq!(app.mode, Mode::Submit, "the overlay stays open to type in");
         assert!(app.take_requests().is_empty());
         assert_eq!(app.drafts.len(), 1, "the draft is untouched");
 
-        app.apply(&Action::CancelSubmit, 20);
+        act(&mut app, &Action::CancelSubmit);
     }
 
     // Approving carries the same draft with no summary at all.
     press(&mut app, "s");
-    app.apply(&Action::CycleEvent(1), 20);
-    app.apply(&Action::CommitSubmit, 20);
+    act(&mut app, &Action::CycleEvent(1));
+    act(&mut app, &Action::CommitSubmit);
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.in_flight, 1);
     assert!(matches!(
@@ -1345,7 +1387,7 @@ fn commenting_on_a_focused_thread_replies_to_it() {
     press(&mut app, "c");
     assert_eq!(app.mode, Mode::Insert);
     app.composer.as_mut().unwrap().editor.set_text("good catch");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
 
     assert!(app.drafts.is_empty(), "a reply is not a review draft");
     assert_eq!(
@@ -1376,7 +1418,7 @@ fn resolving_toggles_the_focused_thread() {
         }]
     );
 
-    app.apply(&Action::LeaveThread, 20);
+    act(&mut app, &Action::LeaveThread);
     press(&mut app, "R");
     assert_eq!(app.status, "no thread selected");
     assert!(app.take_requests().is_empty());
@@ -1388,7 +1430,7 @@ fn e_reopens_the_draft_instead_of_stacking_another() {
     park_on_code(&mut app);
     press(&mut app, "c");
     app.composer.as_mut().unwrap().editor.set_text("first pass");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
     let rows = app.drafts[0].rows.clone();
 
     press(&mut app, "e");
@@ -1402,7 +1444,7 @@ fn e_reopens_the_draft_instead_of_stacking_another() {
         .unwrap()
         .editor
         .set_text("second pass");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
 
     assert_eq!(app.drafts.len(), 1);
     assert_eq!(app.drafts[0].body, "second pass");
@@ -1411,7 +1453,7 @@ fn e_reopens_the_draft_instead_of_stacking_another() {
     // Emptying a reopened draft is how it gets thrown away.
     press(&mut app, "e");
     app.composer.as_mut().unwrap().editor.set_text("");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
     assert!(app.drafts.is_empty());
 
     press(&mut app, "e");
@@ -1429,7 +1471,7 @@ fn c_always_starts_a_new_comment() {
     for body in ["one", "two"] {
         press(&mut app, "c");
         app.composer.as_mut().unwrap().editor.set_text(body);
-        app.apply(&Action::CommitComment, 20);
+        act(&mut app, &Action::CommitComment);
     }
 
     assert_eq!(app.drafts.len(), 2);
@@ -1444,12 +1486,12 @@ fn d_discards_only_the_draft_under_the_cursor() {
 
     press(&mut app, "c");
     app.composer.as_mut().unwrap().editor.set_text("one");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
 
     app.cursor = first + 1;
     press(&mut app, "c");
     app.composer.as_mut().unwrap().editor.set_text("two");
-    app.apply(&Action::CommitComment, 20);
+    act(&mut app, &Action::CommitComment);
     assert_eq!(app.drafts.len(), 2);
 
     press(&mut app, "d");
@@ -1469,9 +1511,9 @@ fn the_submit_overlay_types_its_summary_and_tabs_the_verdict() {
     press(&mut app, "s");
 
     let mut input = InputRouter::default();
-    input.dispatch_key(&mut app, KeyCode::Tab.into(), 20);
+    send(&mut input, &mut app, KeyCode::Tab.into());
     assert_eq!(app.submission.as_ref().unwrap().event, ReviewEvent::Approve);
-    input.dispatch_key(&mut app, KeyCode::BackTab.into(), 20);
+    send(&mut input, &mut app, KeyCode::BackTab.into());
     assert_eq!(app.submission.as_ref().unwrap().event, ReviewEvent::Comment);
 
     // Plain keys belong to the summary, including ones bound in normal mode.
@@ -1480,20 +1522,20 @@ fn the_submit_overlay_types_its_summary_and_tabs_the_verdict() {
     assert_eq!(app.mode, Mode::Submit);
 
     // Shifted Enter breaks the line; the bare one sends.
-    input.dispatch_key(
+    send(
+        &mut input,
         &mut app,
         KeyEvent::new(KeyCode::Enter, Modifiers::SHIFT),
-        20,
     );
     assert_eq!(app.submission.as_ref().unwrap().editor.text(), "ship it\n");
 
-    input.dispatch_key(&mut app, KeyEvent::from(KeyCode::Escape), 20);
+    send(&mut input, &mut app, KeyEvent::from(KeyCode::Escape));
     assert_eq!(app.mode, Mode::Normal);
     assert!(app.submission.is_none());
 
     press(&mut app, "s");
     app.submission.as_mut().unwrap().editor.set_text("ship it");
-    input.dispatch_key(&mut app, KeyEvent::from(KeyCode::Enter), 20);
+    send(&mut input, &mut app, KeyEvent::from(KeyCode::Enter));
     assert_eq!(app.mode, Mode::Normal, "enter sends the review");
     assert_eq!(app.in_flight, 1);
 }

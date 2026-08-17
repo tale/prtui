@@ -1,124 +1,73 @@
+//! Drawing.
+//!
+//! Every function here reads app state and the frame's [`Layout`] and writes
+//! only to the frame. Where things go and how tall they are was decided by the
+//! layout, so nothing has to be discovered mid-render and written back.
+
 use crate::app::draft::{Draft, Side};
 use crate::app::mode::Mode;
 use crate::app::review::ReviewEvent;
 use crate::app::{App, Pane, Target};
-use crate::images::{Images, Placement, Status, Support};
-use crate::model::{DiffLine, LineKind, ReviewThread};
-use crate::renderer::markdown::Block as MarkdownBlock;
+use crate::images::Placement;
+use crate::layout::Layout;
+use crate::layout::measure::{self, clip_text_to_budget, text_width, truncate};
+use crate::layout::rows::{
+    self, BodyRow, Connector, GUTTER, ImageSlice, Row, ThreadState,
+};
+use crate::model::{LineKind, ReviewThread};
 use crate::renderer::{Theme, markdown};
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
-use std::borrow::Cow;
-use std::fmt::Write;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const GUTTER: usize = 13;
-const MAX_VISIBLE_THREAD_SUMMARIES: usize = 4;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// One rendered row, plus the horizontal slice of an image it stands in for.
 /// The row itself stays blank: the terminal paints over it after the frame.
-struct ThreadRow<'a> {
+struct PaneRow<'a> {
     line: Line<'a>,
     image: Option<ImageSlice>,
 }
 
-impl<'a> ThreadRow<'a> {
+impl<'a> PaneRow<'a> {
     const fn text(line: Line<'a>) -> Self {
         Self { line, image: None }
     }
 }
 
-#[derive(Clone)]
-struct ImageSlice {
-    url: String,
-    column: u16,
-    cols: u16,
-    row_index: u16,
-    total_rows: u16,
-}
-
-#[derive(Clone)]
-struct ExpandedThreadRow {
-    spans: Vec<Span<'static>>,
-    comment_index: usize,
-    is_header: bool,
-    image: Option<ImageSlice>,
-}
-
-#[derive(Clone, Copy)]
-struct ThreadRenderState<'a> {
-    focused: Option<&'a str>,
-    expanded: Option<&'a str>,
-    scroll: usize,
-    window: usize,
-    images: &'a Images,
-}
-
-impl ThreadRenderState<'_> {
-    fn is_focused(self, thread: &ReviewThread) -> bool {
-        self.focused == Some(thread.id.as_str())
-    }
-
-    fn is_expanded(self, thread: &ReviewThread) -> bool {
-        self.expanded == Some(thread.id.as_str())
-    }
-}
-
-/// Returns the terminal escape sequences that paint this frame's images, which
-/// the caller writes inside the same synchronized update as the cells.
-pub fn draw(frame: &mut Frame, app: &mut App, pending_hint: &str) -> String {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
-
-    draw_header(frame, app, rows[0]);
+/// Returns where this frame's images land, which the caller turns into escape
+/// sequences and writes inside the same synchronized update as the cells.
+pub fn draw(
+    frame: &mut Frame,
+    app: &App,
+    layout: &Layout,
+    pending_hint: &str,
+) -> Vec<Placement> {
+    draw_header(frame, app, layout.header);
 
     if app.is_loading() {
-        draw_loading(frame, app, rows[1]);
-        draw_bottom_bar(frame, app, pending_hint, rows[2]);
-        return app.images.frame_commands(&[]);
+        draw_loading(frame, app, layout.body);
+        draw_bottom_bar(frame, app, layout, pending_hint);
+        return Vec::new();
     }
 
-    let (diff_area, placements) = if app.is_files_visible {
-        let width = files_width(rows[1].width);
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(width), Constraint::Min(20)])
-            .split(rows[1]);
+    if layout.files_pane.is_some() {
+        draw_files(frame, app, layout);
+    }
+    let placements = draw_diff(frame, app, layout);
 
-        draw_files(frame, app, cols[0]);
-        (cols[1], draw_diff(frame, app, cols[1]))
-    } else {
-        (rows[1], draw_diff(frame, app, rows[1]))
-    };
-
-    draw_bottom_bar(frame, app, pending_hint, rows[2]);
-    draw_composer(frame, app, diff_area);
-    draw_submit(frame, app, rows[1]);
+    draw_bottom_bar(frame, app, layout, pending_hint);
+    draw_composer(frame, app, layout.diff);
+    draw_submit(frame, app, layout.body);
 
     // Images sit above the cells, so they would hide the floating overlays.
-    let placements = if app.composer.is_some() || app.submission.is_some() {
-        Vec::new()
-    } else {
-        placements
-    };
+    if app.composer.is_some() || app.submission.is_some() {
+        return Vec::new();
+    }
 
-    app.images.frame_commands(&placements)
-}
-
-/// Roughly a quarter of the terminal, clamped so the tree neither crowds the
-/// diff on a narrow window nor sprawls on a wide one.
-fn files_width(total: u16) -> u16 {
-    (total / 4).clamp(22, 34).min(total.saturating_sub(20))
+    placements
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -153,7 +102,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    truncate_right(&pr.title, area.width as usize / 2),
+                    truncate(&pr.title, area.width as usize / 2),
                     Style::default()
                         .fg(theme.heading)
                         .add_modifier(Modifier::BOLD),
@@ -173,16 +122,8 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
-    let theme = app.theme();
-    let is_focused = app.pane == Pane::Files;
-    let title = if app.files.is_empty() {
-        " Files ".to_string()
-    } else {
-        format!(" Files · {} ", app.files.len())
-    };
-    let block = Block::default()
-        .borders(Borders::TOP | Borders::RIGHT)
+fn pane_block<'a>(title: String, is_focused: bool, theme: Theme) -> Block<'a> {
+    Block::default()
         .border_style(Style::default().fg(if is_focused {
             theme.accent
         } else {
@@ -201,50 +142,66 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Modifier::empty()
                 }),
-        ));
+        ))
+}
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+fn draw_files(frame: &mut Frame, app: &App, layout: &Layout) {
+    let theme = app.theme();
+    let is_focused = app.pane == Pane::Files;
+    let title = if app.files.is_empty() {
+        " Files ".to_string()
+    } else {
+        format!(" Files · {} ", app.files.len())
+    };
+
+    let Some(pane) = layout.files_pane else {
+        return;
+    };
+    frame.render_widget(
+        pane_block(title, is_focused, theme)
+            .borders(Borders::TOP | Borders::RIGHT),
+        pane,
+    );
+
+    let Some(list_area) = layout.files_list else {
+        return;
+    };
 
     if app.files.is_empty() {
-        draw_empty_pane(frame, app, inner, "no changed files");
+        draw_centered(frame, list_area, app.files_placeholder(), theme.dim);
         return;
     }
 
-    let list_area = if let Some(filter) = app.file_filter.as_ref() {
-        if inner.height == 0 {
-            return;
-        }
-
+    if let (Some(filter), Some(prompt)) =
+        (app.file_filter.as_ref(), layout.files_prompt)
+    {
         let query = &filter.lines()[0];
         let (_, cursor_byte) = filter.cursor();
-        let prompt_width = inner.width.saturating_sub(2) as usize;
-        let cursor_column = terminal_width(&query[..cursor_byte]);
+        let budget = prompt.width.saturating_sub(2) as usize;
+        let cursor_column = text_width(&query[..cursor_byte]);
         let first_column =
-            cursor_column.saturating_sub(prompt_width.saturating_sub(1));
-        let text = clip_window(query, first_column, prompt_width);
+            cursor_column.saturating_sub(budget.saturating_sub(1));
+
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" /", Style::default().fg(theme.accent)),
-                Span::styled(text, Style::default().fg(theme.heading)),
+                Span::styled(
+                    measure::window(query, first_column, budget),
+                    Style::default().fg(theme.heading),
+                ),
             ])),
-            Rect { height: 1, ..inner },
+            prompt,
         );
+
         if app.mode == Mode::Filter {
             frame.set_cursor_position((
-                inner.x + 2 + cursor_column.saturating_sub(first_column) as u16,
-                inner.y,
+                prompt.x
+                    + 2
+                    + cursor_column.saturating_sub(first_column) as u16,
+                prompt.y,
             ));
         }
-
-        Rect {
-            y: inner.y + 1,
-            height: inner.height - 1,
-            ..inner
-        }
-    } else {
-        inner
-    };
+    }
 
     let height = list_area.height as usize;
     let width = list_area.width as usize;
@@ -257,81 +214,82 @@ fn draw_files(frame: &mut Frame, app: &App, area: Rect) {
         .saturating_sub(height / 2)
         .min(matches.len().saturating_sub(height));
 
-    let mut rows: Vec<Line> = matches
+    let mut list: Vec<Line> = matches
         .iter()
         .skip(start)
         .take(height)
-        .map(|&index| {
-            let file = &app.files[index];
-            let is_selected = index == app.selected_file;
-            let threads = app
-                .threads_by_path
-                .get(&file.path)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            let unresolved = threads.iter().filter(|t| !t.is_resolved).count();
-
-            // A settled conversation still says something about the file, so it
-            // keeps a hollow marker instead of disappearing from the tree.
-            let (marker, marker_color) = match (unresolved, threads.len()) {
-                (0, 0) => ("  ".to_string(), theme.dim),
-                (0, total) => (format!(" ◇ {total}"), theme.muted),
-                (open, _) => (format!(" ◆ {open}"), theme.purple),
-            };
-            let adds = format!("+{}", file.additions);
-            let dels = format!("-{}", file.deletions);
-
-            let counts_width = adds.len().max(5) + dels.len().max(5) + 1;
-            let name_width = width
-                .saturating_sub(counts_width + terminal_width(&marker) + 2);
-
-            let base = if is_selected {
-                Style::default()
-                    .bg(theme.cursor)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-
-            let (dir, name) = split_path(&file.path, name_width);
-            let status_color = match file.status.as_str() {
-                "added" => theme.success,
-                "removed" => theme.danger,
-                "renamed" => theme.warning,
-                _ => theme.muted,
-            };
-
-            let pad = name_width
-                .saturating_sub(terminal_width(&dir) + terminal_width(&name));
-
-            Line::from(vec![
-                Span::styled(
-                    if is_selected { " ▍" } else { "  " },
-                    base.fg(theme.accent),
-                ),
-                Span::styled(dir, base.fg(theme.dim)),
-                Span::styled(name, base.fg(status_color)),
-                Span::styled(" ".repeat(pad), base),
-                Span::styled(marker, base.fg(marker_color)),
-                Span::styled(format!("{adds:>5}"), base.fg(theme.success)),
-                Span::styled(format!(" {dels:>5}"), base.fg(theme.danger)),
-            ])
-        })
+        .map(|&index| file_line(app, index, width, theme))
         .collect();
 
-    if rows.is_empty() && app.file_filter.is_some() {
-        rows.push(Line::styled(
+    if list.is_empty() && app.file_filter.is_some() {
+        list.push(Line::styled(
             "  no matching files",
             Style::default().fg(theme.dim),
         ));
     }
 
-    frame.render_widget(Paragraph::new(rows), list_area);
+    frame.render_widget(Paragraph::new(list), list_area);
 }
 
-fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<Placement> {
+fn file_line(app: &App, index: usize, width: usize, theme: Theme) -> Line<'_> {
+    let file = &app.files[index];
+    let is_selected = index == app.selected_file;
+    let threads = app
+        .threads_by_path
+        .get(&file.path)
+        .map_or(&[][..], Vec::as_slice);
+    let unresolved = threads.iter().filter(|t| !t.is_resolved).count();
+
+    // A settled conversation still says something about the file, so it keeps a
+    // hollow marker instead of disappearing from the tree.
+    let (marker, marker_color) = match (unresolved, threads.len()) {
+        (0, 0) => ("  ".to_string(), theme.dim),
+        (0, total) => (format!(" ◇ {total}"), theme.muted),
+        (open, _) => (format!(" ◆ {open}"), theme.purple),
+    };
+    let adds = format!("+{}", file.additions);
+    let dels = format!("-{}", file.deletions);
+
+    let counts_width = adds.len().max(5) + dels.len().max(5) + 1;
+    let name_width =
+        width.saturating_sub(counts_width + text_width(&marker) + 2);
+
+    let base = if is_selected {
+        Style::default()
+            .bg(theme.cursor)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    let (dir, name) = measure::split_path(&file.path, name_width);
+    let status_color = match file.status.as_str() {
+        "added" => theme.success,
+        "removed" => theme.danger,
+        "renamed" => theme.warning,
+        _ => theme.muted,
+    };
+
+    let pad = name_width.saturating_sub(text_width(&dir) + text_width(&name));
+
+    Line::from(vec![
+        Span::styled(
+            if is_selected { " ▍" } else { "  " },
+            base.fg(theme.accent),
+        ),
+        Span::styled(dir, base.fg(theme.dim)),
+        Span::styled(name, base.fg(status_color)),
+        Span::styled(" ".repeat(pad), base),
+        Span::styled(marker, base.fg(marker_color)),
+        Span::styled(format!("{adds:>5}"), base.fg(theme.success)),
+        Span::styled(format!(" {dels:>5}"), base.fg(theme.danger)),
+    ])
+}
+
+fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) -> Vec<Placement> {
     let theme = app.theme();
     let is_focused = app.pane == Pane::Diff;
+    let area = layout.diff;
     let title = app.current_file().map_or_else(
         || " Diff ".to_string(),
         |file| {
@@ -347,272 +305,214 @@ fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<Placement> {
                     file.additions, file.deletions
                 )
             };
-            let available = area.width.saturating_sub(4) as usize;
+            let available = layout.diff_pane.width.saturating_sub(4) as usize;
             format!(
                 " {}{} ",
-                truncate_right(
+                truncate(
                     &file.path,
-                    available.saturating_sub(terminal_width(&suffix)),
+                    available.saturating_sub(text_width(&suffix))
                 ),
                 suffix
             )
         },
     );
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(if is_focused {
-            theme.accent
-        } else {
-            theme.dim
-        }))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(if is_focused {
-                    theme.heading
-                } else {
-                    theme.muted
-                })
-                .add_modifier(if is_focused {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-        ));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
 
-    sync_expanded_thread_scroll(
-        app,
-        inner.width as usize,
-        expanded_thread_window(inner.height as usize),
-        theme,
+    frame.render_widget(
+        pane_block(title, is_focused, theme).borders(Borders::TOP),
+        layout.diff_pane,
     );
 
-    let Some(file) = app.current_file() else {
-        draw_empty_pane(frame, app, inner, "no diff selected");
+    if app.current_file().is_none() {
+        draw_centered(frame, area, "no diff selected", theme.dim);
         return Vec::new();
-    };
-
-    let height = inner.height as usize;
-    let width = inner.width as usize;
-    let threads = app
-        .threads_by_path
-        .get(&file.path)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let styled = app.highlighted();
-
-    let drafts: Vec<&Draft> =
-        app.drafts.iter().filter(|d| d.path == file.path).collect();
-    let thread_state = ThreadRenderState {
-        focused: app.focused_thread.as_deref(),
-        expanded: app.expanded_thread.as_deref(),
-        scroll: app.thread_scroll,
-        window: expanded_thread_window(height),
-        images: &app.images,
-    };
-
-    if file.lines.is_empty() {
-        let all: Vec<&ReviewThread> = threads.iter().collect();
-        let rows: Vec<ThreadRow<'_>> =
-            render_thread_groups(&all, width, theme, thread_state)
-                .into_iter()
-                .take(height)
-                .collect();
-        let (lines, placements) = split_image_rows(rows, inner);
-        frame.render_widget(Paragraph::new(lines), inner);
-        return placements;
     }
 
-    // Keep enough room below the source cursor for its inline thread preview.
-    // `diff_scroll` remains source-line based until the virtual-row work in
-    // slice 2, but a comment block can no longer push the cursor off screen.
-    let cursor = app.cursor.min(file.lines.len().saturating_sub(1));
-    let mut visible_start = cursor;
-    let cursor_height = file.lines.get(cursor).map_or(1, |line| {
-        let anchored =
-            thread_rows_for_line(threads, line, width, theme, thread_state)
-                .len();
-        let outdated = if cursor + 1 == file.lines.len() {
-            outdated_thread_rows(threads, width, theme, thread_state).len()
-        } else {
-            0
-        };
-        1 + anchored + outdated
-    });
-    let mut remaining = height.saturating_sub(cursor_height.min(height));
-    let lower_bound = app.diff_scroll.min(cursor);
+    let width = area.width as usize;
+    let threads = app.file_threads();
+    let drafts: Vec<&Draft> = app
+        .drafts
+        .iter()
+        .filter(|draft| Some(draft.path.as_str()) == app.current_path())
+        .collect();
 
-    for index in (lower_bound..cursor).rev() {
-        let row_height = 1 + thread_rows_for_line(
-            threads,
-            &file.lines[index],
-            width,
-            theme,
-            thread_state,
-        )
-        .len();
-        if row_height > remaining {
-            break;
-        }
-        remaining -= row_height;
-        visible_start = index;
-    }
-
-    // Only source lines in and immediately around the viewport are converted
-    // to spans; large diffs retain their constant steady-state render cost.
-    let mut rows: Vec<ThreadRow<'_>> = Vec::with_capacity(height);
-    for (index, line) in file.lines.iter().enumerate().skip(visible_start) {
-        if rows.len() >= height {
-            break;
-        }
-
-        let is_cursor =
-            is_focused && index == app.cursor && app.focused_thread.is_none();
-        let is_selected = app.selection.is_some_and(|s| s.contains(index));
-
-        if line.kind == LineKind::Hunk {
-            let text = format!("{:<width$}", line.text, width = width);
-            let bg = if is_selected {
-                theme.selection
-            } else {
-                theme.hunk
-            };
-
-            rows.push(ThreadRow::text(Line::from(Span::styled(
-                text,
-                Style::default()
-                    .bg(bg)
-                    .fg(theme.muted)
-                    .add_modifier(Modifier::ITALIC),
-            ))));
-            continue;
-        }
-
-        let (base_bg, strong_bg, sigil) = match line.kind {
-            LineKind::Added => (theme.add, theme.add_emphasis, "+"),
-            LineKind::Removed => (theme.delete, theme.delete_emphasis, "-"),
-            _ => (theme.background, theme.background, " "),
-        };
-
-        // Selected rows keep their add/remove identity and are shifted instead
-        // of flattened; the left bar is what makes the span read as contiguous.
-        let bg = match (is_selected, is_cursor) {
-            (true, _) => theme.selection_background(base_bg),
-            (false, true) => theme.cursor_background(base_bg),
-            _ => base_bg,
-        };
-
-        let has_thread = threads.iter().any(|thread| {
-            !thread.is_outdated
-                && thread.anchors_to(line)
-                && !thread.is_resolved
-        });
-
-        let has_draft = drafts.iter().any(|draft| draft.rows.contains(&index));
-
-        let (marker, marker_color) = match (has_draft, has_thread) {
-            (true, _) => (" ✎", theme.orange),
-            (false, true) => (" ◆", theme.purple),
-            _ => ("  ", theme.dim),
-        };
-
-        let mut spans = vec![
-            Span::styled(
-                if is_cursor || is_selected { "▍" } else { " " },
-                Style::default().bg(bg).fg(theme.accent),
-            ),
-            Span::styled(
-                format!(
-                    "{:>4} {:>4}",
-                    line.old_line.map(|n| n.to_string()).unwrap_or_default(),
-                    line.new_line.map(|n| n.to_string()).unwrap_or_default(),
-                ),
-                Style::default().bg(bg).fg(theme.dim),
-            ),
-            Span::styled(marker, Style::default().bg(bg).fg(marker_color)),
-            Span::styled(sigil, Style::default().bg(bg).fg(theme.dim)),
-        ];
-
-        let colored: Vec<Piece> =
-            match styled.and_then(|s| s.get(index)).filter(|s| !s.is_empty()) {
-                Some(segments) => segments
-                    .iter()
-                    .map(|segment| Piece {
-                        range: segment.range.clone(),
-                        color: Color::Rgb(
-                            segment.color.0,
-                            segment.color.1,
-                            segment.color.2,
-                        ),
-                        is_emphasis: segment.is_emphasis,
-                        is_match: false,
-                    })
-                    .collect(),
-                None => vec![Piece {
-                    range: 0..line.text.len(),
-                    color: theme.code,
-                    is_emphasis: false,
-                    is_match: false,
-                }],
-            };
-
-        let mut used = GUTTER;
-        for piece in split_by_matches(colored, &app.line_match_ranges(index)) {
-            let Some(source) = line.text.get(piece.range.clone()) else {
-                continue;
-            };
-            let (text, display_width) = clip(
-                source,
-                width.saturating_sub(used),
-                used.saturating_sub(GUTTER),
-            );
-            if text.is_empty() {
-                break;
+    let rendered: Vec<PaneRow<'_>> = layout
+        .rows
+        .window(app.diff_scroll, area.height as usize)
+        .iter()
+        .map(|row| match row {
+            Row::Code(index) => PaneRow::text(code_line(
+                app, *index, &drafts, threads, width, theme,
+            )),
+            Row::Heading { state, count } => {
+                PaneRow::text(heading_line(*state, *count, width, theme))
             }
-            used += display_width;
+            Row::Hidden {
+                state,
+                count,
+                is_tail,
+            } => PaneRow::text(hidden_line(
+                *state, *count, *is_tail, width, theme,
+            )),
+            Row::Summary {
+                thread,
+                state,
+                connector,
+                has_state_label,
+            } => PaneRow::text(summary_line(
+                app,
+                &threads[*thread],
+                *state,
+                *connector,
+                *has_state_label,
+                width,
+                theme,
+            )),
+            Row::Body { index, is_last } => {
+                body_row(layout.rows.body(*index), *is_last, width, theme)
+            }
+        })
+        .collect();
 
-            let is_plain = !is_cursor && !is_selected;
-            let seg_bg = match (piece.is_match, piece.is_emphasis && is_plain) {
-                (true, _) if is_cursor => theme.search_current,
-                (true, _) => theme.search,
-                (false, true) => strong_bg,
-                (false, false) => bg,
-            };
-            spans.push(Span::styled(
-                text,
-                Style::default().bg(seg_bg).fg(piece.color),
-            ));
-        }
+    let (lines, placements) = split_image_rows(rendered, area);
+    frame.render_widget(Paragraph::new(lines), area);
+    placements
+}
 
-        spans.push(Span::styled(
-            " ".repeat(width.saturating_sub(used)),
-            Style::default().bg(bg),
+fn code_line<'a>(
+    app: &'a App,
+    index: usize,
+    drafts: &[&Draft],
+    threads: &[ReviewThread],
+    width: usize,
+    theme: Theme,
+) -> Line<'a> {
+    let Some(line) = app.current_file().and_then(|file| file.lines.get(index))
+    else {
+        return Line::default();
+    };
+
+    let is_cursor = app.pane == Pane::Diff
+        && index == app.cursor
+        && app.focused_thread.is_none();
+    let is_selected = app.selection.is_some_and(|s| s.contains(index));
+
+    if line.kind == LineKind::Hunk {
+        let text = format!("{:<width$}", line.text, width = width);
+        let bg = if is_selected {
+            theme.selection
+        } else {
+            theme.hunk
+        };
+
+        return Line::from(Span::styled(
+            text,
+            Style::default()
+                .bg(bg)
+                .fg(theme.muted)
+                .add_modifier(Modifier::ITALIC),
         ));
-
-        rows.push(ThreadRow::text(Line::from(spans)));
-
-        let available = height.saturating_sub(rows.len());
-        rows.extend(
-            thread_rows_for_line(threads, line, width, theme, thread_state)
-                .into_iter()
-                .take(available),
-        );
-
-        if index + 1 == file.lines.len() && rows.len() < height {
-            let available = height - rows.len();
-            rows.extend(
-                outdated_thread_rows(threads, width, theme, thread_state)
-                    .into_iter()
-                    .take(available),
-            );
-        }
     }
 
-    let (lines, placements) = split_image_rows(rows, inner);
-    frame.render_widget(Paragraph::new(lines), inner);
-    placements
+    let (base_bg, strong_bg, sigil) = match line.kind {
+        LineKind::Added => (theme.add, theme.add_emphasis, "+"),
+        LineKind::Removed => (theme.delete, theme.delete_emphasis, "-"),
+        _ => (theme.background, theme.background, " "),
+    };
+
+    // Selected rows keep their add/remove identity and are shifted instead of
+    // flattened; the left bar is what makes the span read as contiguous.
+    let bg = match (is_selected, is_cursor) {
+        (true, _) => theme.selection_background(base_bg),
+        (false, true) => theme.cursor_background(base_bg),
+        _ => base_bg,
+    };
+
+    let has_thread = threads.iter().any(|thread| {
+        !thread.is_outdated && thread.anchors_to(line) && !thread.is_resolved
+    });
+    let has_draft = drafts.iter().any(|draft| draft.rows.contains(&index));
+
+    let (marker, marker_color) = match (has_draft, has_thread) {
+        (true, _) => (" ✎", theme.orange),
+        (false, true) => (" ◆", theme.purple),
+        _ => ("  ", theme.dim),
+    };
+
+    let mut spans = vec![
+        Span::styled(
+            if is_cursor || is_selected { "▍" } else { " " },
+            Style::default().bg(bg).fg(theme.accent),
+        ),
+        Span::styled(
+            format!(
+                "{:>4} {:>4}",
+                line.old_line.map(|n| n.to_string()).unwrap_or_default(),
+                line.new_line.map(|n| n.to_string()).unwrap_or_default(),
+            ),
+            Style::default().bg(bg).fg(theme.dim),
+        ),
+        Span::styled(marker, Style::default().bg(bg).fg(marker_color)),
+        Span::styled(sigil, Style::default().bg(bg).fg(theme.dim)),
+    ];
+
+    let styled = app.highlighted();
+    let colored: Vec<Piece> =
+        match styled.and_then(|s| s.get(index)).filter(|s| !s.is_empty()) {
+            Some(segments) => segments
+                .iter()
+                .map(|segment| Piece {
+                    range: segment.range.clone(),
+                    color: Color::Rgb(
+                        segment.color.0,
+                        segment.color.1,
+                        segment.color.2,
+                    ),
+                    is_emphasis: segment.is_emphasis,
+                    is_match: false,
+                })
+                .collect(),
+            None => vec![Piece {
+                range: 0..line.text.len(),
+                color: theme.code,
+                is_emphasis: false,
+                is_match: false,
+            }],
+        };
+
+    let mut used = GUTTER;
+    for piece in split_by_matches(colored, &app.line_match_ranges(index)) {
+        let Some(source) = line.text.get(piece.range.clone()) else {
+            continue;
+        };
+        let (text, display_width) = clip_text_to_budget(
+            source,
+            width.saturating_sub(used),
+            used.saturating_sub(GUTTER),
+        );
+        if text.is_empty() {
+            break;
+        }
+        used += display_width;
+
+        let is_plain = !is_cursor && !is_selected;
+        let seg_bg = match (piece.is_match, piece.is_emphasis && is_plain) {
+            (true, _) if is_cursor => theme.search_current,
+            (true, _) => theme.search,
+            (false, true) => strong_bg,
+            (false, false) => bg,
+        };
+        spans.push(Span::styled(
+            text,
+            Style::default().bg(seg_bg).fg(piece.color),
+        ));
+    }
+
+    spans.push(Span::styled(
+        " ".repeat(width.saturating_sub(used)),
+        Style::default().bg(bg),
+    ));
+
+    Line::from(spans)
 }
 
 /// One run of diff text that shares a foreground color and a background role.
@@ -621,6 +521,21 @@ struct Piece {
     color: Color,
     is_emphasis: bool,
     is_match: bool,
+}
+
+impl Piece {
+    const fn slice(
+        &self,
+        range: std::ops::Range<usize>,
+        is_match: bool,
+    ) -> Self {
+        Self {
+            range,
+            color: self.color,
+            is_emphasis: self.is_emphasis,
+            is_match,
+        }
+    }
 }
 
 /// Cuts syntax runs at search-hit boundaries so a match repaints exactly the
@@ -660,31 +575,16 @@ fn split_by_matches(
     pieces
 }
 
-impl Piece {
-    const fn slice(
-        &self,
-        range: std::ops::Range<usize>,
-        is_match: bool,
-    ) -> Self {
-        Self {
-            range,
-            color: self.color,
-            is_emphasis: self.is_emphasis,
-            is_match,
-        }
-    }
-}
-
 /// Splits rendered rows into the text the buffer draws and the image placements
 /// the terminal paints over them, merging each image's rows into one placement.
 fn split_image_rows(
-    rows: Vec<ThreadRow<'_>>,
+    rendered: Vec<PaneRow<'_>>,
     area: Rect,
 ) -> (Vec<Line<'_>>, Vec<Placement>) {
-    let mut lines = Vec::with_capacity(rows.len());
+    let mut lines = Vec::with_capacity(rendered.len());
     let mut placements: Vec<Placement> = Vec::new();
 
-    for (index, row) in rows.into_iter().enumerate() {
+    for (index, row) in rendered.into_iter().enumerate() {
         lines.push(row.line);
 
         let Some(slice) = row.image else {
@@ -714,263 +614,89 @@ fn split_image_rows(
     (lines, placements)
 }
 
-fn thread_rows_for_line(
-    threads: &[ReviewThread],
-    line: &DiffLine,
+const fn state_color(state: ThreadState, theme: Theme) -> Color {
+    match state {
+        ThreadState::Open => theme.purple,
+        ThreadState::Resolved => theme.success,
+        ThreadState::Outdated => theme.warning,
+    }
+}
+
+fn card_indent(width: usize) -> usize {
+    GUTTER.min(width.saturating_sub(1))
+}
+
+fn heading_line(
+    state: ThreadState,
+    count: usize,
     width: usize,
     theme: Theme,
-    render_state: ThreadRenderState<'_>,
-) -> Vec<ThreadRow<'static>> {
-    let anchored: Vec<&ReviewThread> = threads
-        .iter()
-        .filter(|thread| !thread.is_outdated && thread.anchors_to(line))
-        .collect();
-    render_thread_groups(&anchored, width, theme, render_state)
-}
-
-fn outdated_thread_rows(
-    threads: &[ReviewThread],
-    width: usize,
-    theme: Theme,
-    render_state: ThreadRenderState<'_>,
-) -> Vec<ThreadRow<'static>> {
-    let outdated: Vec<&ReviewThread> =
-        threads.iter().filter(|thread| thread.is_outdated).collect();
-    render_thread_groups(&outdated, width, theme, render_state)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ThreadSummaryState {
-    Open,
-    Resolved,
-    Outdated,
-}
-
-impl ThreadSummaryState {
-    const fn for_thread(thread: &ReviewThread) -> Self {
-        if thread.is_outdated {
-            Self::Outdated
-        } else if thread.is_resolved {
-            Self::Resolved
-        } else {
-            Self::Open
-        }
-    }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Open => "open",
-            Self::Resolved => "resolved",
-            Self::Outdated => "outdated",
-        }
-    }
-
-    const fn marker(self) -> &'static str {
-        match self {
-            Self::Open => "◆",
-            Self::Resolved | Self::Outdated => "◇",
-        }
-    }
-
-    const fn color(self, theme: Theme) -> Color {
-        match self {
-            Self::Open => theme.purple,
-            Self::Resolved => theme.success,
-            Self::Outdated => theme.warning,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ThreadGroupContext<'a> {
-    indent: usize,
-    width: usize,
-    state: ThreadSummaryState,
-    theme: Theme,
-    render_state: ThreadRenderState<'a>,
-}
-
-fn render_thread_groups(
-    threads: &[&ReviewThread],
-    width: usize,
-    theme: Theme,
-    render_state: ThreadRenderState<'_>,
-) -> Vec<ThreadRow<'static>> {
-    let mut rows = Vec::new();
-    for state in [
-        ThreadSummaryState::Open,
-        ThreadSummaryState::Resolved,
-        ThreadSummaryState::Outdated,
-    ] {
-        let group: Vec<&ReviewThread> = threads
-            .iter()
-            .copied()
-            .filter(|thread| ThreadSummaryState::for_thread(thread) == state)
-            .collect();
-        rows.extend(render_thread_group(
-            &group,
-            state,
-            width,
-            theme,
-            render_state,
-        ));
-    }
-    rows
-}
-
-fn render_thread_group(
-    threads: &[&ReviewThread],
-    state: ThreadSummaryState,
-    width: usize,
-    theme: Theme,
-    render_state: ThreadRenderState<'_>,
-) -> Vec<ThreadRow<'static>> {
-    if threads.is_empty() {
-        return Vec::new();
-    }
-
-    let indent = GUTTER.min(width.saturating_sub(1));
-    let card_width = width.saturating_sub(indent);
-    if card_width < 4 {
-        return Vec::new();
-    }
-    let context = ThreadGroupContext {
-        indent,
-        width,
-        state,
-        theme,
-        render_state,
-    };
-
-    if threads.len() == 1 {
-        let thread = threads[0];
-        let expanded = render_state.is_expanded(thread);
-        let mut rows = vec![ThreadRow::text(thread_summary_line(
-            thread,
-            &format!("{} ", state.marker()),
-            Some(state.label()),
-            context,
-        ))];
-        if expanded {
-            rows.extend(render_expanded_thread(
-                thread,
-                indent,
-                width,
-                theme,
-                render_state,
-            ));
-        }
-        return rows;
-    }
-
-    let count = threads.len();
+) -> Line<'static> {
+    let indent = card_indent(width);
     let heading =
         format!("{} {count} {} threads", state.marker(), state.label());
-    let mut rows = vec![ThreadRow::text(thread_card_line(
+
+    thread_card_line(
         indent,
         width,
-        vec![thread_span(
-            truncate_right(&heading, card_width),
-            state.color(theme),
+        vec![rows::card_span(
+            truncate(&heading, width.saturating_sub(indent)),
+            state_color(state, theme),
             Modifier::BOLD,
             theme,
         )],
         theme,
         false,
-    ))];
-
-    let focused_position = threads
-        .iter()
-        .position(|thread| render_state.is_focused(thread));
-    let max_start = count.saturating_sub(MAX_VISIBLE_THREAD_SUMMARIES);
-    let expanded_position = threads
-        .iter()
-        .position(|thread| render_state.is_expanded(thread));
-    let start = expanded_position.unwrap_or_else(|| {
-        focused_position
-            .map_or(0, |position| {
-                position.saturating_sub(MAX_VISIBLE_THREAD_SUMMARIES - 1)
-            })
-            .min(max_start)
-    });
-    let end = (start + MAX_VISIBLE_THREAD_SUMMARIES).min(count);
-
-    if start > 0 {
-        rows.push(ThreadRow::text(thread_card_line(
-            indent,
-            width,
-            vec![
-                thread_span("├ ", state.color(theme), Modifier::BOLD, theme),
-                thread_span(
-                    format!("… {start} earlier"),
-                    theme.muted,
-                    Modifier::empty(),
-                    theme,
-                ),
-            ],
-            theme,
-            false,
-        )));
-    }
-
-    for (index, thread) in threads.iter().enumerate().take(end).skip(start) {
-        let is_last = index + 1 == count;
-        rows.push(ThreadRow::text(thread_summary_line(
-            thread,
-            if is_last { "└ " } else { "├ " },
-            None,
-            context,
-        )));
-
-        if render_state.is_expanded(thread) {
-            rows.extend(render_expanded_thread(
-                thread,
-                indent,
-                width,
-                theme,
-                render_state,
-            ));
-        }
-    }
-
-    if end < count {
-        rows.push(ThreadRow::text(thread_card_line(
-            indent,
-            width,
-            vec![
-                thread_span("└ ", state.color(theme), Modifier::BOLD, theme),
-                thread_span(
-                    format!("… {} more", count - end),
-                    theme.muted,
-                    Modifier::empty(),
-                    theme,
-                ),
-            ],
-            theme,
-            false,
-        )));
-    }
-
-    rows
+    )
 }
 
-fn thread_summary_line(
-    thread: &ReviewThread,
-    prefix: &str,
-    state_label: Option<&str>,
-    context: ThreadGroupContext<'_>,
+fn hidden_line(
+    state: ThreadState,
+    count: usize,
+    is_tail: bool,
+    width: usize,
+    theme: Theme,
 ) -> Line<'static> {
-    let ThreadGroupContext {
-        indent,
+    let (connector, label) = if is_tail {
+        ("└ ", format!("… {count} more"))
+    } else {
+        ("├ ", format!("… {count} earlier"))
+    };
+
+    thread_card_line(
+        card_indent(width),
         width,
-        state,
+        vec![
+            rows::card_span(
+                connector,
+                state_color(state, theme),
+                Modifier::BOLD,
+                theme,
+            ),
+            rows::card_span(label, theme.muted, Modifier::empty(), theme),
+        ],
         theme,
-        render_state,
-    } = context;
-    let focused = render_state.is_focused(thread);
-    let expanded = render_state.is_expanded(thread);
+        false,
+    )
+}
+
+fn summary_line(
+    app: &App,
+    thread: &ReviewThread,
+    state: ThreadState,
+    connector: Connector,
+    has_state_label: bool,
+    width: usize,
+    theme: Theme,
+) -> Line<'static> {
+    let indent = card_indent(width);
     let card_width = width.saturating_sub(indent);
-    let author = if expanded {
+    let is_focused = app.focused_thread.as_deref() == Some(&thread.id);
+    let is_expanded = app.is_thread_expanded(&thread.id);
+
+    // An expanded card gives its one line to the conversation's shape instead of
+    // repeating the first comment, which is about to be printed underneath.
+    let author = if is_expanded {
         String::new()
     } else {
         thread.comments.first().map_or_else(
@@ -978,8 +704,8 @@ fn thread_summary_line(
             |comment| format!("@{}", comment.author),
         )
     };
-    let separator = if expanded { "" } else { "  " };
-    let summary = if expanded {
+    let separator = if is_expanded { "" } else { "  " };
+    let summary = if is_expanded {
         comment_count(thread.comments.len())
     } else {
         thread.comments.first().map_or_else(
@@ -987,321 +713,80 @@ fn thread_summary_line(
             |comment| comment_summary(&comment.body, theme),
         )
     };
+
     let replies = thread.comments.len().saturating_sub(1);
-    let mut suffix = match (expanded, replies) {
+    let mut suffix = match (is_expanded, replies) {
         (true, _) | (_, 0) => String::new(),
         (false, 1) => " · 1 reply".into(),
         (false, count) => format!(" · {count} replies"),
     };
-    if let Some(state) = state_label {
+    if has_state_label {
         suffix.push_str(" · ");
-        suffix.push_str(state);
+        suffix.push_str(state.label());
     }
 
-    let prefix = if expanded {
+    let prefix = match connector {
+        Connector::Only => format!("{} ", state.marker()),
+        Connector::Branch => "├ ".to_string(),
+        Connector::Last => "└ ".to_string(),
+    };
+    let prefix = if is_expanded {
         format!("{prefix}▾ ")
     } else {
-        prefix.to_string()
+        prefix
     };
-    let fixed_width = terminal_width(&prefix)
-        + terminal_width(&author)
-        + terminal_width(separator)
-        + terminal_width(&suffix);
-    let summary =
-        truncate_right(&summary, card_width.saturating_sub(fixed_width));
+
+    let fixed = text_width(&prefix)
+        + text_width(&author)
+        + text_width(separator)
+        + text_width(&suffix);
+    let summary = truncate(&summary, card_width.saturating_sub(fixed));
 
     thread_card_line(
         indent,
         width,
         vec![
-            thread_span(prefix, state.color(theme), Modifier::BOLD, theme),
-            thread_span(author, theme.heading, Modifier::BOLD, theme),
-            thread_span(separator, theme.muted, Modifier::empty(), theme),
-            thread_span(summary, theme.code, Modifier::empty(), theme),
-            thread_span(suffix, theme.muted, Modifier::empty(), theme),
+            rows::card_span(
+                prefix,
+                state_color(state, theme),
+                Modifier::BOLD,
+                theme,
+            ),
+            rows::card_span(author, theme.heading, Modifier::BOLD, theme),
+            rows::card_span(separator, theme.muted, Modifier::empty(), theme),
+            rows::card_span(summary, theme.code, Modifier::empty(), theme),
+            rows::card_span(suffix, theme.muted, Modifier::empty(), theme),
         ],
         theme,
-        focused,
+        is_focused,
     )
 }
 
-fn render_expanded_thread(
-    thread: &ReviewThread,
-    indent: usize,
+fn body_row(
+    body: Option<&BodyRow>,
+    is_last: bool,
     width: usize,
     theme: Theme,
-    render_state: ThreadRenderState<'_>,
-) -> Vec<ThreadRow<'static>> {
-    let card_width = width.saturating_sub(indent);
-    let body_width = card_width.saturating_sub(3);
-    if body_width == 0 {
-        return Vec::new();
-    }
-
-    let window = render_state.window;
-    let content =
-        expanded_thread_content(thread, body_width, theme, render_state);
-    let start = render_state
-        .scroll
-        .min(content.len().saturating_sub(window));
-    let end = (start + window).min(content.len());
-    let mut visible: Vec<(Vec<Span<'static>>, Option<ImageSlice>)> = Vec::new();
-
-    if start > 0 {
-        visible.push((
-            vec![thread_span(
-                format!("↑ {start} earlier"),
-                theme.muted,
-                Modifier::empty(),
-                theme,
-            )],
-            None,
-        ));
-    }
-    if start > 0
-        && let Some(row) = content.get(start)
-        && !row.is_header
-    {
-        visible.push((
-            comment_header(thread, row.comment_index, theme, true),
-            None,
-        ));
-    }
-    visible.extend(
-        content[start..end]
-            .iter()
-            .map(|row| (row.spans.clone(), row.image.clone())),
-    );
-    if end < content.len() {
-        visible.push((
-            vec![thread_span(
-                format!("↓ {} more", content.len() - end),
-                theme.muted,
-                Modifier::empty(),
-                theme,
-            )],
-            None,
-        ));
-    }
-
-    let last = visible.len().saturating_sub(1);
-    visible
-        .into_iter()
-        .enumerate()
-        .map(|(index, (mut spans, image))| {
-            spans.insert(
-                0,
-                thread_span(
-                    if index == last { "└  " } else { "│  " },
-                    theme.purple,
-                    Modifier::empty(),
-                    theme,
-                ),
-            );
-            ThreadRow {
-                line: thread_card_line(indent, width, spans, theme, false),
-                image: image.map(|image| ImageSlice {
-                    column: (indent + 3) as u16,
-                    ..image
-                }),
-            }
-        })
-        .collect()
-}
-
-fn expanded_thread_content(
-    thread: &ReviewThread,
-    body_width: usize,
-    theme: Theme,
-    render_state: ThreadRenderState<'_>,
-) -> Vec<ExpandedThreadRow> {
-    let mut content = Vec::new();
-
-    for (comment_index, comment) in thread.comments.iter().enumerate() {
-        content.push(ExpandedThreadRow {
-            spans: comment_header(thread, comment_index, theme, false),
-            comment_index,
-            is_header: true,
-            image: None,
-        });
-
-        for block in markdown::render_blocks(&comment.body, body_width, theme) {
-            match block {
-                MarkdownBlock::Text(line) => content.push(ExpandedThreadRow {
-                    spans: line.spans,
-                    comment_index,
-                    is_header: false,
-                    image: None,
-                }),
-                MarkdownBlock::Image { url, alt } => {
-                    content.extend(image_rows(
-                        &url,
-                        &alt,
-                        comment_index,
-                        body_width,
-                        theme,
-                        render_state,
-                    ));
-                }
-            }
-        }
-    }
-
-    if content.is_empty() {
-        content.push(ExpandedThreadRow {
-            spans: vec![thread_span(
-                "no comments",
-                theme.muted,
-                Modifier::empty(),
-                theme,
-            )],
-            comment_index: 0,
-            is_header: true,
-            image: None,
-        });
-    }
-
-    content
-}
-
-/// A loaded image becomes blank rows carrying its slice; anything else stays
-/// textual so the thread still reads on terminals that cannot draw it.
-fn image_rows(
-    url: &str,
-    alt: &str,
-    comment_index: usize,
-    body_width: usize,
-    theme: Theme,
-    render_state: ThreadRenderState<'_>,
-) -> Vec<ExpandedThreadRow> {
-    let text = |spans| ExpandedThreadRow {
-        spans,
-        comment_index,
-        is_header: false,
-        image: None,
+) -> PaneRow<'static> {
+    let Some(body) = body else {
+        return PaneRow::text(Line::default());
     };
-    let note = |content: String| {
-        text(vec![thread_span(
-            truncate_right(&content, body_width),
-            theme.muted,
+
+    let mut spans = body.spans.clone();
+    spans.insert(
+        0,
+        rows::card_span(
+            if is_last { "└  " } else { "│  " },
+            theme.purple,
             Modifier::empty(),
             theme,
-        )])
-    };
-    let labelled = |url: &str,
-                    alt: &str,
-                    reason: Option<&str>|
-     -> Vec<ExpandedThreadRow> {
-        markdown::image_lines(url, alt, reason, body_width, theme)
-            .into_iter()
-            .map(|line| text(line.spans))
-            .collect()
-    };
+        ),
+    );
 
-    let max_rows = image_row_cap(render_state.window);
-    match render_state
-        .images
-        .status(url, body_width as u16, max_rows as u16)
-    {
-        Status::Ready { cols, rows } if rows > 0 => (0..rows)
-            .map(|row_index| ExpandedThreadRow {
-                spans: Vec::new(),
-                comment_index,
-                is_header: false,
-                image: Some(ImageSlice {
-                    url: url.to_string(),
-                    column: 0,
-                    cols,
-                    row_index,
-                    total_rows: rows,
-                }),
-            })
-            .collect(),
-        Status::Loading => vec![note("▭ loading image…".into())],
-        // Anything that will not be drawn still reads as the link it was, with
-        // the reason attached so a missing picture is never a mystery.
-        Status::Failed(reason) => labelled(url, alt, Some(reason)),
-        Status::Off(Support::Unsupported) => {
-            labelled(url, alt, Some("no image support"))
-        }
-        Status::Off(_) | Status::Ready { .. } => labelled(url, alt, None),
+    PaneRow {
+        line: thread_card_line(card_indent(width), width, spans, theme, false),
+        image: body.image.clone(),
     }
-}
-
-/// Images never take the whole scroll window, so surrounding replies stay in
-/// view and a tall screenshot remains scrollable rather than jumping.
-fn image_row_cap(window: usize) -> usize {
-    window.saturating_sub(1).clamp(3, 24)
-}
-
-fn comment_header(
-    thread: &ReviewThread,
-    comment_index: usize,
-    theme: Theme,
-    continued: bool,
-) -> Vec<Span<'static>> {
-    let Some(comment) = thread.comments.get(comment_index) else {
-        return Vec::new();
-    };
-    let date = display_date(&comment.created_at);
-    let mut header = if comment_index == 0 {
-        format!("@{}", comment.author)
-    } else {
-        format!("↳ @{}", comment.author)
-    };
-    if !date.is_empty() {
-        header.push_str(" · ");
-        header.push_str(date);
-    }
-    if comment_index > 0 {
-        let replies = thread.comments.len().saturating_sub(1);
-        let _ = write!(header, " · reply {comment_index}/{replies}");
-    }
-    if continued {
-        header.push_str(" · continued");
-    }
-
-    vec![thread_span(header, theme.heading, Modifier::BOLD, theme)]
-}
-
-fn expanded_thread_window(height: usize) -> usize {
-    (height.saturating_mul(2) / 3)
-        .max(1)
-        .min(height.saturating_sub(6).max(1))
-}
-
-fn sync_expanded_thread_scroll(
-    app: &mut App,
-    width: usize,
-    window: usize,
-    theme: Theme,
-) {
-    let render_state = ThreadRenderState {
-        focused: app.focused_thread.as_deref(),
-        expanded: app.expanded_thread.as_deref(),
-        scroll: app.thread_scroll,
-        window,
-        images: &app.images,
-    };
-    let limit = app
-        .expanded_thread
-        .as_deref()
-        .and_then(|expanded| {
-            let file = app.current_file()?;
-            app.threads_by_path
-                .get(&file.path)?
-                .iter()
-                .find(|thread| thread.id == expanded)
-        })
-        .map_or(0, |thread| {
-            let body_width = width.saturating_sub(GUTTER).saturating_sub(3);
-            expanded_thread_content(thread, body_width, theme, render_state)
-                .len()
-                .saturating_sub(window)
-        });
-
-    app.thread_scroll_limit = limit;
-    app.thread_scroll = app.thread_scroll.min(limit);
 }
 
 fn comment_count(count: usize) -> String {
@@ -1309,10 +794,6 @@ fn comment_count(count: usize) -> String {
         1 => "1 comment".into(),
         count => format!("{count} comments"),
     }
-}
-
-fn display_date(timestamp: &str) -> &str {
-    timestamp.get(..10).unwrap_or(timestamp)
 }
 
 fn comment_summary(body: &str, theme: Theme) -> String {
@@ -1333,17 +814,18 @@ fn thread_card_line(
     width: usize,
     mut spans: Vec<Span<'static>>,
     theme: Theme,
-    focused: bool,
+    is_focused: bool,
 ) -> Line<'static> {
-    let background = if focused { theme.cursor } else { theme.hunk };
+    let background = if is_focused { theme.cursor } else { theme.hunk };
     for span in &mut spans {
-        if focused || span.style.bg.is_none() {
+        if is_focused || span.style.bg.is_none() {
             span.style = span.style.bg(background);
         }
     }
+
     let used = spans.iter().map(Span::width).sum::<usize>();
     let card_width = width.saturating_sub(indent);
-    let gutter = if focused && indent > 0 {
+    let gutter = if is_focused && indent > 0 {
         vec![
             Span::raw(" ".repeat(indent - 1)),
             Span::styled("▍", Style::default().fg(theme.accent)),
@@ -1351,6 +833,7 @@ fn thread_card_line(
     } else {
         vec![Span::raw(" ".repeat(indent))]
     };
+
     for span in gutter.into_iter().rev() {
         spans.insert(0, span);
     }
@@ -1358,22 +841,8 @@ fn thread_card_line(
         " ".repeat(card_width.saturating_sub(used)),
         Style::default().bg(background),
     ));
-    Line::from(spans)
-}
 
-fn thread_span(
-    text: impl Into<Cow<'static, str>>,
-    color: Color,
-    modifier: Modifier,
-    theme: Theme,
-) -> Span<'static> {
-    Span::styled(
-        text,
-        Style::default()
-            .bg(theme.hunk)
-            .fg(color)
-            .add_modifier(modifier),
-    )
+    Line::from(spans)
 }
 
 /// Floats over the diff so the anchored lines stay visible while typing.
@@ -1426,17 +895,7 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.orange))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(theme.orange)
-                .add_modifier(Modifier::BOLD),
-        ));
-
+    let block = overlay_block(title, theme.orange);
     let inner = block.inner(rect);
 
     frame.render_widget(Clear, rect);
@@ -1446,29 +905,62 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let (cursor_row, cursor_byte) = composer.editor.cursor();
-    let lines = composer.editor.lines();
-    let first_row =
-        cursor_row.saturating_sub(inner.height.saturating_sub(1) as usize);
-    let cursor_column = terminal_width(&lines[cursor_row][..cursor_byte]);
-    let first_column =
-        cursor_column.saturating_sub(inner.width.saturating_sub(1) as usize);
+    draw_editor_body(frame, &composer.editor, inner, theme, None);
+}
 
-    let visible: Vec<Line> = lines
-        .iter()
-        .skip(first_row)
-        .take(inner.height as usize)
-        .map(|line| {
-            Line::styled(
-                clip_window(line, first_column, inner.width as usize),
-                Style::default().fg(theme.code),
-            )
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(visible), inner);
+fn overlay_block<'a>(title: String, color: Color) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(
+            title,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))
+}
+
+/// Draws a multiline editor scrolled to keep its cursor visible, and parks the
+/// terminal cursor where the next character will land.
+fn draw_editor_body(
+    frame: &mut Frame,
+    editor: &crate::app::editor::CommentEditor,
+    area: Rect,
+    theme: Theme,
+    placeholder: Option<&str>,
+) {
+    let (cursor_row, cursor_byte) = editor.cursor();
+    let lines = editor.lines();
+    let first_row =
+        cursor_row.saturating_sub(area.height.saturating_sub(1) as usize);
+    let cursor_column = text_width(&lines[cursor_row][..cursor_byte]);
+    let first_column =
+        cursor_column.saturating_sub(area.width.saturating_sub(1) as usize);
+
+    let is_empty = lines.iter().all(String::is_empty);
+    let visible: Vec<Line> = match placeholder.filter(|_| is_empty) {
+        Some(hint) => vec![Line::styled(
+            hint.to_string(),
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
+        )],
+        None => lines
+            .iter()
+            .skip(first_row)
+            .take(area.height as usize)
+            .map(|line| {
+                Line::styled(
+                    measure::window(line, first_column, area.width as usize),
+                    Style::default().fg(theme.code),
+                )
+            })
+            .collect(),
+    };
+
+    frame.render_widget(Paragraph::new(visible), area);
     frame.set_cursor_position((
-        inner.x + cursor_column.saturating_sub(first_column) as u16,
-        inner.y + cursor_row.saturating_sub(first_row) as u16,
+        area.x + cursor_column.saturating_sub(first_column) as u16,
+        area.y + cursor_row.saturating_sub(first_row) as u16,
     ));
 }
 
@@ -1478,14 +970,13 @@ fn event_chips(active: ReviewEvent, theme: Theme) -> Vec<Span<'static>> {
     ReviewEvent::ALL
         .iter()
         .map(|event| {
-            let is_active = *event == active;
             let color = match event {
                 ReviewEvent::Approve => theme.success,
                 ReviewEvent::RequestChanges => theme.danger,
                 ReviewEvent::Comment => theme.accent,
             };
 
-            if is_active {
+            if *event == active {
                 Span::styled(
                     format!(" {} ", event.label()),
                     Style::default()
@@ -1524,17 +1015,7 @@ fn draw_submit(frame: &mut Frame, app: &App, area: Rect) {
         count => format!(" submit review · {count} drafts "),
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.accent))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
-
+    let block = overlay_block(title, theme.accent);
     let inner = block.inner(rect);
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
@@ -1559,55 +1040,26 @@ fn draw_submit(frame: &mut Frame, app: &App, area: Rect) {
         },
     );
 
-    let body = Rect {
-        y: inner.y + 2,
-        height: inner.height - 2,
-        ..inner
-    };
-
-    let (cursor_row, cursor_byte) = submission.editor.cursor();
-    let lines = submission.editor.lines();
-    let first_row =
-        cursor_row.saturating_sub(body.height.saturating_sub(1) as usize);
-    let cursor_column = terminal_width(&lines[cursor_row][..cursor_byte]);
-    let first_column =
-        cursor_column.saturating_sub(body.width.saturating_sub(1) as usize);
-
-    let is_empty = lines.iter().all(String::is_empty);
-    let visible: Vec<Line> = if is_empty {
-        vec![Line::styled(
-            "summary (optional for approve)",
-            Style::default()
-                .fg(theme.dim)
-                .add_modifier(Modifier::ITALIC),
-        )]
-    } else {
-        lines
-            .iter()
-            .skip(first_row)
-            .take(body.height as usize)
-            .map(|line| {
-                Line::styled(
-                    clip_window(line, first_column, body.width as usize),
-                    Style::default().fg(theme.code),
-                )
-            })
-            .collect()
-    };
-
-    frame.render_widget(Paragraph::new(visible), body);
-    frame.set_cursor_position((
-        body.x + cursor_column.saturating_sub(first_column) as u16,
-        body.y + cursor_row.saturating_sub(first_row) as u16,
-    ));
+    draw_editor_body(
+        frame,
+        &submission.editor,
+        Rect {
+            y: inner.y + 2,
+            height: inner.height - 2,
+            ..inner
+        },
+        theme,
+        Some("summary (optional for approve)"),
+    );
 }
 
 fn draw_bottom_bar(
     frame: &mut Frame,
     app: &App,
+    layout: &Layout,
     pending_hint: &str,
-    area: Rect,
 ) {
+    let area = layout.status;
     let theme = app.theme();
     let bar = Style::default().bg(theme.hunk);
     let mode_bg = match app.mode {
@@ -1635,7 +1087,7 @@ fn draw_bottom_bar(
         app.current_file(),
     ) {
         (true, _, _) => {
-            let (current, total) = app.search_summary();
+            let (current, total) = app.search_summary(layout);
             format!("  {current}/{total} matches")
         }
         (false, true, _) => {
@@ -1675,7 +1127,7 @@ fn draw_bottom_bar(
         search_column = Some(
             Line::from(spans.clone()).width()
                 + 3
-                + terminal_width(&query[..cursor_byte]),
+                + text_width(&query[..cursor_byte]),
         );
         spans.push(Span::styled("  /", bar.fg(theme.warning)));
         spans.push(Span::styled(query, bar.fg(theme.heading)));
@@ -1751,6 +1203,17 @@ fn draw_bottom_bar(
         frame.set_cursor_position((area.x + column as u16, area.y));
     }
 
+    draw_key_hints(frame, app, area, left_width, bar, theme);
+}
+
+fn draw_key_hints(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    left_width: usize,
+    bar: Style,
+    theme: Theme,
+) {
     let keys: &[(&str, &str)] = match (app.mode, app.pane) {
         (Mode::Filter, _) => {
             &[("↑↓", "select"), ("↵", "apply"), ("esc", "cancel")]
@@ -1825,7 +1288,7 @@ fn draw_bottom_bar(
     let mut hint_spans = Vec::new();
     let mut hint_width = 0;
     for &(key, label) in keys {
-        let pair_width = terminal_width(key) + terminal_width(label) + 3;
+        let pair_width = text_width(key) + text_width(label) + 3;
         if hint_width + pair_width > available {
             break;
         }
@@ -1837,17 +1300,18 @@ fn draw_bottom_bar(
         hint_width += pair_width;
     }
 
-    if hint_width > 0 {
-        let hint_area = Rect {
+    if hint_width == 0 {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(hint_spans)).alignment(Alignment::Right),
+        Rect {
             x: area.x + area.width.saturating_sub(hint_width as u16),
             width: hint_width as u16,
             ..area
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(hint_spans)).alignment(Alignment::Right),
-            hint_area,
-        );
-    }
+        },
+    );
 }
 
 fn draw_loading(frame: &mut Frame, app: &App, area: Rect) {
@@ -1865,156 +1329,29 @@ fn draw_loading(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled("  loading changes", Style::default().fg(theme.dim)),
     ]);
-    let y = area.y + area.height.saturating_sub(1) / 2;
+
     frame.render_widget(
         Paragraph::new(line).alignment(Alignment::Center),
         Rect {
-            y,
+            y: area.y + area.height.saturating_sub(1) / 2,
             height: 1,
             ..area
         },
     );
 }
 
-fn draw_empty_pane(frame: &mut Frame, app: &App, area: Rect, message: &str) {
+fn draw_centered(frame: &mut Frame, area: Rect, message: &str, color: Color) {
     if area.is_empty() {
         return;
     }
 
-    let y = area.y + area.height.saturating_sub(1) / 2;
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            message,
-            Style::default().fg(app.theme().dim),
-        ))
-        .alignment(Alignment::Center),
+        Paragraph::new(Line::styled(message, Style::default().fg(color)))
+            .alignment(Alignment::Center),
         Rect {
-            y,
+            y: area.y + area.height.saturating_sub(1) / 2,
             height: 1,
             ..area
         },
     );
-}
-
-/// Expand tabs at real tab stops and clip by terminal cells, not scalar count.
-fn clip(text: &str, width: usize, column: usize) -> (Cow<'_, str>, usize) {
-    if width == 0 {
-        return (Cow::Borrowed(""), 0);
-    }
-
-    let display_width = UnicodeWidthStr::width(text);
-    if !text.contains('\t') && display_width <= width {
-        return (Cow::Borrowed(text), display_width);
-    }
-
-    let mut rendered = String::with_capacity(text.len().min(width));
-    let mut used = 0;
-    for character in text.chars() {
-        if character == '\t' {
-            let tab_width = 4 - ((column + used) % 4);
-            if used + tab_width > width {
-                break;
-            }
-            rendered.extend(std::iter::repeat_n(' ', tab_width));
-            used += tab_width;
-            continue;
-        }
-
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if used + character_width > width {
-            break;
-        }
-        rendered.push(character);
-        used += character_width;
-    }
-
-    (Cow::Owned(rendered), used)
-}
-
-fn terminal_width(text: &str) -> usize {
-    text.chars().fold(0, |column, character| {
-        column
-            + if character == '\t' {
-                4 - (column % 4)
-            } else {
-                UnicodeWidthChar::width(character).unwrap_or(0)
-            }
-    })
-}
-
-fn clip_window(text: &str, start: usize, width: usize) -> String {
-    let mut rendered = String::with_capacity(text.len().min(width));
-    let end = start.saturating_add(width);
-    let mut column = 0;
-
-    for character in text.chars() {
-        let character_width = if character == '\t' {
-            4 - (column % 4)
-        } else {
-            UnicodeWidthChar::width(character).unwrap_or(0)
-        };
-        let next = column + character_width;
-
-        if next <= start {
-            column = next;
-            continue;
-        }
-        if column < start || next > end {
-            column = next;
-            if column >= end {
-                break;
-            }
-            continue;
-        }
-
-        if character == '\t' {
-            rendered.extend(std::iter::repeat_n(' ', character_width));
-        } else {
-            rendered.push(character);
-        }
-        column = next;
-    }
-
-    rendered
-}
-
-fn truncate_right(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-
-    let head: String = text.chars().take(width.saturating_sub(1)).collect();
-    format!("{head}…")
-}
-
-/// Splits `a/b/c.rs` into a dimmed `a/b/` and a bright `c.rs`, eliding from
-/// the left when it will not fit.
-fn split_path(path: &str, width: usize) -> (String, String) {
-    let name = path.rsplit('/').next().unwrap_or(path).to_string();
-
-    if name.chars().count() >= width {
-        let tail: String = name
-            .chars()
-            .skip(name.chars().count() + 1 - width)
-            .collect();
-        return (String::new(), format!("…{tail}"));
-    }
-
-    let dir_width = width - name.chars().count();
-    let dir = path.strip_suffix(&name).unwrap_or("");
-
-    if dir.chars().count() <= dir_width {
-        return (dir.to_string(), name);
-    }
-
-    let tail: String = dir
-        .chars()
-        .skip(dir.chars().count() + 1 - dir_width)
-        .collect();
-    (format!("…{tail}"), name)
-}
-
-pub const fn diff_viewport_height(area: Rect) -> usize {
-    // Header, pane title rule, and the compact bottom bar each consume a row.
-    area.height.saturating_sub(3) as usize
 }
