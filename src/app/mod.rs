@@ -529,13 +529,10 @@ impl App {
         let event = submission.event;
         let body = submission.editor.text().trim().to_string();
 
+        // An approval is a verdict in itself, so a bare one with no summary and
+        // no inline comments is the whole point rather than an empty review.
         if body.is_empty() && event.requires_body() {
             self.status = format!("{} needs a summary", event.label());
-            return;
-        }
-
-        if body.is_empty() && self.drafts.is_empty() {
-            self.status = "nothing to submit".into();
             return;
         }
 

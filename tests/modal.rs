@@ -1320,17 +1320,43 @@ fn a_draft_written_during_a_submission_survives_it() {
 }
 
 #[test]
-fn nothing_to_submit_never_reaches_the_network() {
+fn a_bare_approval_needs_neither_summary_nor_comments() {
     let mut app = load();
     press(&mut app, "s");
 
-    // Approving is the one verdict GitHub takes without a summary.
+    // Approving is the one verdict GitHub takes without a summary, and it is a
+    // verdict on its own, so nothing else has to accompany it.
     act(&mut app, &Action::CycleEvent(1));
     act(&mut app, &Action::CommitSubmit);
 
-    assert_eq!(app.status, "nothing to submit");
-    assert_eq!(app.in_flight, 0);
-    assert!(app.take_requests().is_empty());
+    assert!(app.drafts.is_empty());
+    assert_eq!(app.in_flight, 1);
+    assert_eq!(
+        app.take_requests(),
+        vec![Request::Review {
+            event: ReviewEvent::Approve,
+            body: String::new(),
+            comments: Vec::new(),
+        }]
+    );
+}
+
+#[test]
+fn the_verdicts_that_speak_for_themselves_still_want_a_summary() {
+    for (steps, label) in [(0, "comment"), (2, "request changes")] {
+        let mut app = load();
+        press(&mut app, "s");
+        for _ in 0..steps {
+            act(&mut app, &Action::CycleEvent(1));
+        }
+        act(&mut app, &Action::CommitSubmit);
+
+        assert_eq!(app.status, format!("{label} needs a summary"));
+        assert_eq!(app.in_flight, 0);
+        assert!(app.take_requests().is_empty());
+        // The overlay stays open so the summary is typed, not retyped.
+        assert!(app.submission.is_some());
+    }
 }
 
 /// GitHub answers a blank `COMMENT` or `REQUEST_CHANGES` with a bare 422, so

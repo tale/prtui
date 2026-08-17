@@ -423,11 +423,15 @@ pub async fn submit_review(
         "/repos/{}/{}/pulls/{number}/reviews",
         repo.owner, repo.name
     ));
-    let payload = serde_json::json!({
+    // An approval carries no summary, and GitHub reads an empty string as one
+    // rather than as its absence, so the field goes out only when it has text.
+    let mut payload = serde_json::json!({
         "event": event,
-        "body": body,
         "comments": comments,
     });
+    if !body.is_empty() {
+        payload["body"] = body.into();
+    }
 
     tokio::task::spawn_blocking(move || {
         let mut response = post(&url, Some(&token), &payload)?;
