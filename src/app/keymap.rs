@@ -56,6 +56,9 @@ impl Keymap {
         if mode == Mode::Search {
             return Self::resolve_search(key);
         }
+        if mode == Mode::Submit {
+            return Self::resolve_submit(key);
+        }
 
         let KeyCode::Char(c) = key.code else {
             return self.resolve_special(mode, find_active, key);
@@ -122,6 +125,10 @@ impl Keymap {
                 }
             }
             'c' => Action::StartComment,
+            'e' if mode == Mode::Normal => Action::EditDraft,
+            'd' if mode == Mode::Normal => Action::DeleteDraft,
+            'R' if mode == Mode::Normal => Action::ToggleResolved,
+            's' if mode == Mode::Normal => Action::StartSubmit,
             'q' => Action::Quit,
             _ => {
                 self.clear();
@@ -188,7 +195,36 @@ impl Keymap {
             Mode::Insert => Action::CancelComment,
             Mode::Filter => Action::CancelFileFilter,
             Mode::Search => Action::CancelSearch,
+            Mode::Submit => Action::CancelSubmit,
         })
+    }
+
+    /// The verdict has to be reachable without stealing letters from the
+    /// summary, so it moves on tab rather than on a mnemonic.
+    fn resolve_submit(key: KeyEvent) -> Resolution {
+        if key.modifiers == Modifiers::CONTROL {
+            return match key.code {
+                KeyCode::Char('c') => Resolution::Action(Action::Quit),
+                KeyCode::Char('[') => Self::resolve_escape(Mode::Submit, false),
+                _ => Resolution::Unbound,
+            };
+        }
+
+        match (key.code, key.modifiers) {
+            (KeyCode::Escape, Modifiers::NONE) => {
+                Self::resolve_escape(Mode::Submit, false)
+            }
+            (KeyCode::Enter, Modifiers::NONE) => {
+                Resolution::Action(Action::CommitSubmit)
+            }
+            (KeyCode::Tab, Modifiers::NONE) => {
+                Resolution::Action(Action::CycleEvent(1))
+            }
+            (KeyCode::BackTab, _) | (KeyCode::Tab, Modifiers::SHIFT) => {
+                Resolution::Action(Action::CycleEvent(-1))
+            }
+            _ => Resolution::Unbound,
+        }
     }
 
     /// Searching mirrors filtering: printable keys build the query while the
@@ -249,13 +285,20 @@ impl Keymap {
         }
     }
 
-    /// While composing, only submit, cancel, and the global quit chord are
-    /// ours; every other key belongs to the editor widget. Escape and Ctrl+[
-    /// are the same byte on a legacy terminal but arrive as distinct events
-    /// once the Kitty protocol disambiguates them, so both are bound.
+    /// While composing, only save, cancel, and the global quit chord are ours;
+    /// every other key belongs to the editor widget, shifted Enter included.
+    /// Escape and Ctrl+[ are the same byte on a legacy terminal but arrive as
+    /// distinct events once the Kitty protocol disambiguates them, so both are
+    /// bound.
     fn resolve_insert(key: KeyEvent) -> Resolution {
-        if key.code == KeyCode::Escape && key.modifiers == Modifiers::NONE {
-            return Self::resolve_escape(Mode::Insert, false);
+        match (key.code, key.modifiers) {
+            (KeyCode::Escape, Modifiers::NONE) => {
+                return Self::resolve_escape(Mode::Insert, false);
+            }
+            (KeyCode::Enter, Modifiers::NONE) => {
+                return Resolution::Action(Action::CommitComment);
+            }
+            _ => {}
         }
 
         if key.modifiers != Modifiers::CONTROL {
@@ -263,7 +306,6 @@ impl Keymap {
         }
 
         match key.code {
-            KeyCode::Char('s') => Resolution::Action(Action::CommitComment),
             KeyCode::Char('c') => Resolution::Action(Action::Quit),
             KeyCode::Char('[') => Self::resolve_escape(Mode::Insert, false),
             _ => Resolution::Unbound,

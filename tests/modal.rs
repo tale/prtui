@@ -3,6 +3,7 @@ use prtui::app::draft::Side;
 use prtui::app::input::{DispatchResult, InputRouter};
 use prtui::app::keymap::{Keymap, Resolution};
 use prtui::app::mode::Mode;
+use prtui::app::review::{Request, ReviewEvent, Sent};
 use prtui::app::search::Match;
 use prtui::app::{App, Pane};
 use prtui::model::{parse_files, parse_meta};
@@ -60,6 +61,19 @@ fn park_on_unresolved_thread(app: &mut App) -> prtui::model::ReviewThread {
         .position(|line| thread.anchors_to(line))
         .unwrap();
     thread
+}
+
+/// A synthetic patch, for diff shapes the captured fixture does not contain.
+fn file_from(patch: &str) -> prtui::model::ChangedFile {
+    let page = serde_json::json!([[{
+        "filename": "synthetic.go",
+        "status": "modified",
+        "additions": 1,
+        "deletions": 2,
+        "patch": patch,
+    }]]);
+
+    parse_files(&page).unwrap().remove(0)
 }
 
 fn press(app: &mut App, keys: &str) {
@@ -284,10 +298,68 @@ fn commenting_a_selection_produces_one_multiline_draft() {
     assert_eq!(app.drafts.len(), 1);
 
     let draft = &app.drafts[0];
-    assert_eq!(draft.side, Side::Right);
+    assert_eq!(draft.anchor.side, Side::Right);
     assert_eq!(draft.body, "this allocates on every call");
-    assert!(draft.is_multiline());
-    assert!(draft.start_line < draft.end_line);
+    assert!(draft.anchor.is_multiline());
+    assert!(draft.anchor.start_line < draft.anchor.end_line);
+    assert_eq!(draft.rows, added..=added + 2, "the whole block is covered");
+}
+
+/// A selection running from deletions into additions used to collapse onto the
+/// one line that had a new-file number; it spans both sides now.
+#[test]
+fn a_selection_across_both_sides_keeps_the_whole_block() {
+    let mut app = load();
+
+    app.files[app.selected_file] = file_from(
+        "@@ -1,4 +1,4 @@\n context\n-gone one\n-gone two\n+added one\n context after",
+    );
+    app.cursor = 1;
+
+    // context, -gone one, -gone two, +added one
+    press(&mut app, "V3j");
+    press(&mut app, "c");
+    app.composer
+        .as_mut()
+        .unwrap()
+        .editor
+        .set_text("rewrite this");
+    app.apply(&Action::CommitComment, 20);
+
+    let anchor = app.drafts[0].anchor;
+    assert_eq!(anchor.start_side, Side::Left, "starts on the deletions");
+    assert_eq!(anchor.start_line, 2, "the first deleted line");
+    assert_eq!(anchor.side, Side::Right, "ends on the addition");
+    assert_eq!(anchor.end_line, 2, "the added line");
+    assert!(anchor.is_multiline(), "a cross-side span is never one line");
+
+    let comment = app.drafts[0].to_api();
+    assert_eq!(comment["start_line"], 2);
+    assert_eq!(comment["start_side"], "LEFT");
+    assert_eq!(comment["line"], 2);
+    assert_eq!(comment["side"], "RIGHT");
+}
+
+/// Ending back on a deletion has no cross-side form, so it stays on the left
+/// rather than pairing a right-hand start with a left-hand end.
+#[test]
+fn a_selection_ending_in_deletions_stays_on_the_old_side() {
+    let mut app = load();
+
+    app.files[app.selected_file] =
+        file_from("@@ -1,3 +1,3 @@\n context\n-gone one\n-gone two\n");
+    app.cursor = 1;
+
+    press(&mut app, "V2j");
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("drop these");
+    app.apply(&Action::CommitComment, 20);
+
+    let anchor = app.drafts[0].anchor;
+    assert_eq!(anchor.start_side, Side::Left);
+    assert_eq!(anchor.side, Side::Left);
+    assert_eq!((anchor.start_line, anchor.end_line), (2, 3));
+    assert_eq!(app.drafts[0].to_api()["start_side"], "LEFT");
 }
 
 #[test]
@@ -347,13 +419,43 @@ fn insert_mode_reserves_app_chords_and_forwards_editor_keys() {
     );
     assert!(app.composer.is_some());
 
-    let chord = KeyEvent::new(KeyCode::Char('s'), Modifiers::CONTROL);
+    // Shifted Enter is the newline; the bare one saves.
+    let newline = KeyEvent::new(KeyCode::Enter, Modifiers::SHIFT);
     assert_eq!(
-        input.dispatch_key(&mut app, chord, 20),
+        input.dispatch_key(&mut app, newline, 20),
+        DispatchResult::ForwardedToEditor
+    );
+    assert_eq!(app.composer.as_ref().unwrap().editor.text(), "s\n");
+
+    assert_eq!(
+        input.dispatch_key(&mut app, KeyEvent::from(KeyCode::Enter), 20),
         DispatchResult::Applied(Action::CommitComment)
     );
     assert!(app.composer.is_none());
-    assert_eq!(app.drafts[0].body, "s");
+    assert_eq!(app.drafts[0].body, "s", "the trailing newline is trimmed");
+}
+
+#[test]
+fn ctrl_s_no_longer_commits_anything() {
+    let chord = KeyEvent::new(KeyCode::Char('s'), Modifiers::CONTROL);
+
+    for mode in [Mode::Insert, Mode::Submit] {
+        let mut app = load();
+        match mode {
+            Mode::Insert => {
+                park_on_code(&mut app);
+                press(&mut app, "c");
+            }
+            _ => press(&mut app, "s"),
+        }
+        assert_eq!(app.mode, mode);
+
+        let mut input = InputRouter::default();
+        input.dispatch_key(&mut app, chord, 20);
+        assert_eq!(app.mode, mode, "ctrl-s is inert in {mode:?}");
+        assert!(app.drafts.is_empty());
+        assert!(app.take_requests().is_empty());
+    }
 }
 
 #[test]
@@ -438,6 +540,7 @@ fn ctrl_c_quits_from_every_mode() {
         Mode::Insert,
         Mode::Filter,
         Mode::Search,
+        Mode::Submit,
     ] {
         let mut app = load();
         match mode {
@@ -452,6 +555,7 @@ fn ctrl_c_quits_from_every_mode() {
                 press(&mut app, "/");
             }
             Mode::Search => press(&mut app, "/"),
+            Mode::Submit => press(&mut app, "s"),
         }
         assert_eq!(app.mode, mode);
 
@@ -1047,4 +1151,349 @@ fn both_prompts_step_with_arrows_and_control_keys() {
     input.dispatch_key(&mut app, ctrl('['), 20);
     assert_eq!(app.mode, Mode::Normal, "ctrl-[ cancels the search prompt");
     assert!(app.search.is_none());
+}
+
+#[test]
+fn submitting_ships_every_draft_as_one_review() {
+    let mut app = load();
+    let added: Vec<usize> = app.files[app.selected_file]
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.kind == prtui::model::LineKind::Added)
+        .map(|(row, _)| row)
+        .collect();
+
+    app.cursor = added[0];
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("first");
+    app.apply(&Action::CommitComment, 20);
+
+    // Well clear of the first draft, so this is a second one and not a revision.
+    app.cursor = *added.iter().find(|row| **row > added[0] + 4).unwrap();
+    press(&mut app, "V2jc");
+    app.composer.as_mut().unwrap().editor.set_text("spanning");
+    app.apply(&Action::CommitComment, 20);
+    assert_eq!(app.drafts.len(), 2);
+
+    press(&mut app, "s");
+    assert_eq!(app.mode, Mode::Submit);
+    app.submission
+        .as_mut()
+        .unwrap()
+        .editor
+        .set_text("looks good");
+    app.apply(&Action::CycleEvent(1), 20);
+    app.apply(&Action::CommitSubmit, 20);
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.in_flight, 1);
+
+    let requests = app.take_requests();
+    let Request::Review {
+        event,
+        body,
+        comments,
+    } = &requests[0]
+    else {
+        panic!("expected a review request, got {:?}", requests[0]);
+    };
+
+    assert_eq!(*event, ReviewEvent::Approve);
+    assert_eq!(body, "looks good");
+    assert_eq!(comments.len(), 2);
+    assert_eq!(comments[0]["body"], "first");
+    assert_eq!(comments[0]["side"], "RIGHT");
+    assert!(
+        comments[0].get("start_line").is_none(),
+        "a single-line comment sends no span"
+    );
+    assert!(comments[1]["start_line"].as_u64() < comments[1]["line"].as_u64());
+    assert_eq!(comments[1]["start_side"], "RIGHT");
+
+    // The drafts only retire once GitHub has actually taken them.
+    assert_eq!(app.drafts.len(), 2);
+    app.finish(Ok(Sent::Review(2)));
+    assert!(app.drafts.is_empty());
+    assert_eq!(app.in_flight, 0);
+}
+
+#[test]
+fn a_failed_submission_keeps_the_drafts() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("keep me");
+    app.apply(&Action::CommitComment, 20);
+
+    press(&mut app, "s");
+    app.submission
+        .as_mut()
+        .unwrap()
+        .editor
+        .set_text("a summary");
+    app.apply(&Action::CommitSubmit, 20);
+    assert_eq!(app.take_requests().len(), 1);
+
+    app.finish(Err("HTTP 422: line must be part of the diff".into()));
+    assert_eq!(app.drafts.len(), 1);
+    assert!(app.status.starts_with("error:"), "{}", app.status);
+}
+
+#[test]
+fn a_draft_written_during_a_submission_survives_it() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("sent");
+    app.apply(&Action::CommitComment, 20);
+
+    press(&mut app, "s");
+    app.submission
+        .as_mut()
+        .unwrap()
+        .editor
+        .set_text("a summary");
+    app.apply(&Action::CommitSubmit, 20);
+    assert_eq!(app.take_requests().len(), 1);
+
+    app.cursor += 1;
+    press(&mut app, "c");
+    app.composer
+        .as_mut()
+        .unwrap()
+        .editor
+        .set_text("written later");
+    app.apply(&Action::CommitComment, 20);
+
+    app.finish(Ok(Sent::Review(1)));
+    assert_eq!(app.drafts.len(), 1);
+    assert_eq!(app.drafts[0].body, "written later");
+}
+
+#[test]
+fn nothing_to_submit_never_reaches_the_network() {
+    let mut app = load();
+    press(&mut app, "s");
+
+    // Approving is the one verdict GitHub takes without a summary.
+    app.apply(&Action::CycleEvent(1), 20);
+    app.apply(&Action::CommitSubmit, 20);
+
+    assert_eq!(app.status, "nothing to submit");
+    assert_eq!(app.in_flight, 0);
+    assert!(app.take_requests().is_empty());
+}
+
+/// GitHub answers a blank `COMMENT` or `REQUEST_CHANGES` with a bare 422, so
+/// the overlay catches it first and keeps what was typed.
+#[test]
+fn a_verdict_that_needs_a_summary_says_so_before_sending() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer
+        .as_mut()
+        .unwrap()
+        .editor
+        .set_text("inline only");
+    app.apply(&Action::CommitComment, 20);
+
+    for (event, label) in [
+        (ReviewEvent::Comment, "comment needs a summary"),
+        (
+            ReviewEvent::RequestChanges,
+            "request changes needs a summary",
+        ),
+    ] {
+        press(&mut app, "s");
+        while app.submission.as_ref().unwrap().event != event {
+            app.apply(&Action::CycleEvent(1), 20);
+        }
+
+        app.apply(&Action::CommitSubmit, 20);
+        assert_eq!(app.status, label);
+        assert_eq!(app.mode, Mode::Submit, "the overlay stays open to type in");
+        assert!(app.take_requests().is_empty());
+        assert_eq!(app.drafts.len(), 1, "the draft is untouched");
+
+        app.apply(&Action::CancelSubmit, 20);
+    }
+
+    // Approving carries the same draft with no summary at all.
+    press(&mut app, "s");
+    app.apply(&Action::CycleEvent(1), 20);
+    app.apply(&Action::CommitSubmit, 20);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.in_flight, 1);
+    assert!(matches!(
+        app.take_requests().as_slice(),
+        [Request::Review {
+            event: ReviewEvent::Approve,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn commenting_on_a_focused_thread_replies_to_it() {
+    let mut app = load();
+    let thread = park_on_unresolved_thread(&mut app);
+    press(&mut app, "j");
+    assert_eq!(app.focused_thread.as_deref(), Some(thread.id.as_str()));
+
+    press(&mut app, "c");
+    assert_eq!(app.mode, Mode::Insert);
+    app.composer.as_mut().unwrap().editor.set_text("good catch");
+    app.apply(&Action::CommitComment, 20);
+
+    assert!(app.drafts.is_empty(), "a reply is not a review draft");
+    assert_eq!(
+        app.take_requests(),
+        vec![Request::Reply {
+            in_reply_to: thread.reply_target().unwrap(),
+            body: "good catch".into(),
+        }]
+    );
+    assert_eq!(app.in_flight, 1);
+
+    app.finish(Ok(Sent::Reply));
+    assert_eq!(app.status, "reply posted");
+}
+
+#[test]
+fn resolving_toggles_the_focused_thread() {
+    let mut app = load();
+    let thread = park_on_unresolved_thread(&mut app);
+    press(&mut app, "j");
+
+    press(&mut app, "R");
+    assert_eq!(
+        app.take_requests(),
+        vec![Request::Resolve {
+            thread_id: thread.id,
+            is_resolved: true,
+        }]
+    );
+
+    app.apply(&Action::LeaveThread, 20);
+    press(&mut app, "R");
+    assert_eq!(app.status, "no thread selected");
+    assert!(app.take_requests().is_empty());
+}
+
+#[test]
+fn e_reopens_the_draft_instead_of_stacking_another() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("first pass");
+    app.apply(&Action::CommitComment, 20);
+    let rows = app.drafts[0].rows.clone();
+
+    press(&mut app, "e");
+    assert_eq!(
+        app.composer.as_ref().unwrap().editor.text(),
+        "first pass",
+        "the composer reopens the draft it will replace"
+    );
+    app.composer
+        .as_mut()
+        .unwrap()
+        .editor
+        .set_text("second pass");
+    app.apply(&Action::CommitComment, 20);
+
+    assert_eq!(app.drafts.len(), 1);
+    assert_eq!(app.drafts[0].body, "second pass");
+    assert_eq!(app.drafts[0].rows, rows, "editing keeps the original span");
+
+    // Emptying a reopened draft is how it gets thrown away.
+    press(&mut app, "e");
+    app.composer.as_mut().unwrap().editor.set_text("");
+    app.apply(&Action::CommitComment, 20);
+    assert!(app.drafts.is_empty());
+
+    press(&mut app, "e");
+    assert_eq!(app.status, "no draft on this line");
+    assert!(app.composer.is_none());
+}
+
+/// `c` composes, `e` revises. Commenting a drafted line again is a second
+/// comment, which GitHub allows and the old contextual `c` quietly prevented.
+#[test]
+fn c_always_starts_a_new_comment() {
+    let mut app = load();
+    park_on_code(&mut app);
+
+    for body in ["one", "two"] {
+        press(&mut app, "c");
+        app.composer.as_mut().unwrap().editor.set_text(body);
+        app.apply(&Action::CommitComment, 20);
+    }
+
+    assert_eq!(app.drafts.len(), 2);
+    assert_eq!(app.drafts[1].body, "two");
+}
+
+#[test]
+fn d_discards_only_the_draft_under_the_cursor() {
+    let mut app = load();
+    park_on_code(&mut app);
+    let first = app.cursor;
+
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("one");
+    app.apply(&Action::CommitComment, 20);
+
+    app.cursor = first + 1;
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("two");
+    app.apply(&Action::CommitComment, 20);
+    assert_eq!(app.drafts.len(), 2);
+
+    press(&mut app, "d");
+    assert_eq!(app.status, "draft discarded");
+    assert_eq!(app.drafts.len(), 1);
+    assert_eq!(app.drafts[0].body, "one");
+
+    app.cursor = first + 1;
+    press(&mut app, "d");
+    assert_eq!(app.status, "no draft on this line");
+    assert_eq!(app.drafts.len(), 1);
+}
+
+#[test]
+fn the_submit_overlay_types_its_summary_and_tabs_the_verdict() {
+    let mut app = load();
+    press(&mut app, "s");
+
+    let mut input = InputRouter::default();
+    input.dispatch_key(&mut app, KeyCode::Tab.into(), 20);
+    assert_eq!(app.submission.as_ref().unwrap().event, ReviewEvent::Approve);
+    input.dispatch_key(&mut app, KeyCode::BackTab.into(), 20);
+    assert_eq!(app.submission.as_ref().unwrap().event, ReviewEvent::Comment);
+
+    // Plain keys belong to the summary, including ones bound in normal mode.
+    press(&mut app, "ship it");
+    assert_eq!(app.submission.as_ref().unwrap().editor.text(), "ship it");
+    assert_eq!(app.mode, Mode::Submit);
+
+    // Shifted Enter breaks the line; the bare one sends.
+    input.dispatch_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, Modifiers::SHIFT),
+        20,
+    );
+    assert_eq!(app.submission.as_ref().unwrap().editor.text(), "ship it\n");
+
+    input.dispatch_key(&mut app, KeyEvent::from(KeyCode::Escape), 20);
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.submission.is_none());
+
+    press(&mut app, "s");
+    app.submission.as_mut().unwrap().editor.set_text("ship it");
+    input.dispatch_key(&mut app, KeyEvent::from(KeyCode::Enter), 20);
+    assert_eq!(app.mode, Mode::Normal, "enter sends the review");
+    assert_eq!(app.in_flight, 1);
 }

@@ -12,6 +12,8 @@ pub enum Mode {
     Filter,
     /// Typing a query against the open file's code and comments.
     Search,
+    /// Choosing a verdict and writing the summary that ships the review.
+    Submit,
 }
 
 impl Mode {
@@ -22,6 +24,7 @@ impl Mode {
             Self::Insert => " INSERT ",
             Self::Filter => " FILTER ",
             Self::Search => " SEARCH ",
+            Self::Submit => " SUBMIT ",
         }
     }
 }

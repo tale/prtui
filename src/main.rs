@@ -3,6 +3,7 @@ use clap::{Parser, ValueEnum};
 use futures_core::Stream;
 use prtui::app::App;
 use prtui::app::input::InputRouter;
+use prtui::app::review::{Request, Sent};
 use prtui::images::{self, Image, Images, Support};
 use prtui::model::{self, ChangedFile, PullRequest};
 use prtui::renderer::{Renderer, Segment, ThemeMode};
@@ -90,6 +91,64 @@ enum Message {
     Image(String, Result<Image, String>),
     MetaFailed(String),
     FilesFailed(String),
+    /// One outbound request finished, successfully or not.
+    Sent(Result<Sent, String>),
+}
+
+/// Pull metadata again so a posted reply or a resolved thread shows up in the
+/// diff without a restart.
+fn spawn_meta_fetch(
+    repo: gh::Repo,
+    number: u32,
+    tx: mpsc::UnboundedSender<Message>,
+) {
+    tokio::spawn(async move {
+        let msg = match gh::fetch_meta(&repo, number).await {
+            Ok(val) => match model::parse_meta(&val) {
+                Ok(pr) => Message::Meta(Box::new(pr)),
+                Err(err) => Message::MetaFailed(err.to_string()),
+            },
+            Err(err) => Message::MetaFailed(err.to_string()),
+        };
+        let _ = tx.send(msg);
+    });
+}
+
+/// Writes go out on their own task so a slow round trip never freezes the
+/// review surface behind it.
+fn spawn_request(
+    request: Request,
+    repo: gh::Repo,
+    number: u32,
+    tx: mpsc::UnboundedSender<Message>,
+) {
+    tokio::spawn(async move {
+        let outcome = match request {
+            Request::Review {
+                event,
+                body,
+                comments,
+            } => {
+                let count = comments.len();
+                gh::submit_review(&repo, number, event.as_api(), body, comments)
+                    .await
+                    .map(|()| Sent::Review(count))
+            }
+            Request::Reply { in_reply_to, body } => {
+                gh::reply(&repo, number, in_reply_to, body)
+                    .await
+                    .map(|()| Sent::Reply)
+            }
+            Request::Resolve {
+                thread_id,
+                is_resolved,
+            } => gh::set_resolved(&repo, thread_id, is_resolved)
+                .await
+                .map(|()| Sent::Resolution(is_resolved)),
+        };
+
+        let _ = tx.send(Message::Sent(outcome.map_err(|err| err.to_string())));
+    });
 }
 
 /// Download and decode off the UI thread; a slow or broken attachment must not
@@ -149,22 +208,12 @@ async fn main() -> Result<()> {
 
     // Both round trips leave immediately; whichever lands first paints.
     let tx_ui = tx.clone();
-    let meta_tx = tx.clone();
-    let meta_repo = repo.clone();
     let number = args.number;
-    tokio::spawn(async move {
-        let msg = match gh::fetch_meta(&meta_repo, number).await {
-            Ok(val) => match model::parse_meta(&val) {
-                Ok(pr) => Message::Meta(Box::new(pr)),
-                Err(err) => Message::MetaFailed(err.to_string()),
-            },
-            Err(err) => Message::MetaFailed(err.to_string()),
-        };
-        let _ = meta_tx.send(msg);
-    });
+    spawn_meta_fetch(repo.clone(), number, tx.clone());
 
+    let files_repo = repo.clone();
     tokio::spawn(async move {
-        let msg = match gh::fetch_files(&repo, number).await {
+        let msg = match gh::fetch_files(&files_repo, number).await {
             Ok(val) => match model::parse_files(&val) {
                 Ok(files) => Message::Files(files),
                 Err(err) => Message::FilesFailed(err.to_string()),
@@ -182,16 +231,32 @@ async fn main() -> Result<()> {
     // Syntax assets deserialize on a worker so the cost overlaps the fetch too.
     std::thread::spawn(move || renderer.preload());
 
-    run(rx, tx_ui, renderer, follow_terminal, args.images).await
+    let session = Session {
+        repo,
+        number,
+        follow_terminal,
+    };
+
+    run(rx, tx_ui, renderer, session, args.images).await
+}
+
+/// What the event loop needs to talk back to GitHub after the first paint.
+#[derive(Clone)]
+struct Session {
+    repo: gh::Repo,
+    number: u32,
+    follow_terminal: bool,
 }
 
 async fn run(
     mut rx: mpsc::UnboundedReceiver<Message>,
     tx: mpsc::UnboundedSender<Message>,
     renderer: Renderer,
-    follow_terminal: bool,
+    session: Session,
     images: ImageChoice,
 ) -> Result<()> {
+    let follow_terminal = session.follow_terminal;
+
     terminal::scope(
         follow_terminal,
         images.queries_terminal(),
@@ -202,7 +267,7 @@ async fn run(
                 &mut rx,
                 tx,
                 renderer,
-                follow_terminal,
+                &session,
                 images.resolve(has_graphics),
             )
             .await
@@ -217,9 +282,10 @@ async fn event_loop(
     rx: &mut mpsc::UnboundedReceiver<Message>,
     tx: mpsc::UnboundedSender<Message>,
     renderer: Renderer,
-    follow_terminal: bool,
+    session: &Session,
     support: Support,
 ) -> Result<()> {
+    let follow_terminal = session.follow_terminal;
     let mut app = App::with_renderer(renderer);
     app.images = Images::new(support);
     app.images.set_cell_size(terminal::cell_size(terminal));
@@ -235,6 +301,15 @@ async fn event_loop(
             spawn_image_fetch(url, tx.clone());
         }
 
+        for request in app.take_requests() {
+            spawn_request(
+                request,
+                session.repo.clone(),
+                session.number,
+                tx.clone(),
+            );
+        }
+
         if is_dirty {
             let pending_hint = input.pending_hint();
             terminal::draw(terminal, |frame| {
@@ -244,7 +319,7 @@ async fn event_loop(
         }
 
         tokio::select! {
-            _ = animation.tick(), if app.is_loading() => {
+            _ = animation.tick(), if app.is_loading() || app.in_flight > 0 => {
                 app.advance_loading();
                 is_dirty = true;
             }
@@ -280,9 +355,15 @@ async fn event_loop(
                         pending = pending.saturating_sub(1);
                         true
                     }
-                    Message::MetaFailed(err) => {
+                    // Only the first fetch is fatal; a refresh that fails
+                    // leaves the review usable with stale threads.
+                    Message::MetaFailed(err) if pending > 0 => {
                         failure = Some(err);
-                        pending = pending.saturating_sub(1);
+                        pending -= 1;
+                        true
+                    }
+                    Message::MetaFailed(err) => {
+                        app.status = format!("error: refreshing comments: {err}");
                         true
                     }
                     Message::FilesFailed(err) => {
@@ -290,6 +371,20 @@ async fn event_loop(
                         app.status = format!("error: {err}");
                         failure = Some(err);
                         pending = pending.saturating_sub(1);
+                        true
+                    }
+                    // A write only shows up in the diff once the threads are
+                    // read back, so a success pulls metadata again.
+                    Message::Sent(outcome) => {
+                        let is_sent = outcome.is_ok();
+                        app.finish(outcome);
+                        if is_sent {
+                            spawn_meta_fetch(
+                                session.repo.clone(),
+                                session.number,
+                                tx.clone(),
+                            );
+                        }
                         true
                     }
                 };

@@ -1,6 +1,7 @@
 use crate::app::draft::{Draft, Side};
 use crate::app::mode::Mode;
-use crate::app::{App, Pane};
+use crate::app::review::ReviewEvent;
+use crate::app::{App, Pane, Target};
 use crate::images::{Images, Placement, Status, Support};
 use crate::model::{DiffLine, LineKind, ReviewThread};
 use crate::renderer::markdown::Block as MarkdownBlock;
@@ -102,9 +103,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, pending_hint: &str) -> String {
 
     draw_bottom_bar(frame, app, pending_hint, rows[2]);
     draw_composer(frame, app, diff_area);
+    draw_submit(frame, app, rows[1]);
 
-    // Images sit above the cells, so they would hide the floating composer.
-    let placements = if app.composer.is_some() {
+    // Images sit above the cells, so they would hide the floating overlays.
+    let placements = if app.composer.is_some() || app.submission.is_some() {
         Vec::new()
     } else {
         placements
@@ -508,14 +510,7 @@ fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<Placement> {
                 && !thread.is_resolved
         });
 
-        let has_draft = drafts.iter().any(|d| match d.side {
-            Side::Right => line
-                .new_line
-                .is_some_and(|n| d.covers(&file.path, n, Side::Right)),
-            Side::Left => line
-                .old_line
-                .is_some_and(|n| d.covers(&file.path, n, Side::Left)),
-        });
+        let has_draft = drafts.iter().any(|draft| draft.rows.contains(&index));
 
         let (marker, marker_color) = match (has_draft, has_thread) {
             (true, _) => (" ✎", theme.orange),
@@ -1396,18 +1391,40 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
         height,
     };
 
-    let anchor = composer.anchor;
-    let span = if anchor.start_line == anchor.end_line {
-        format!("{}", anchor.start_line)
-    } else {
-        format!("{}-{}", anchor.start_line, anchor.end_line)
-    };
-
     let name = composer.path.rsplit('/').next().unwrap_or(&composer.path);
-    let title = format!(
-        " comment · {name}:{span} · {} ",
-        anchor.side.as_api().to_lowercase()
-    );
+    let title = match &composer.target {
+        Target::Reply { .. } => format!(" reply · {name} "),
+        Target::Line {
+            anchor, replacing, ..
+        } => {
+            let verb = if replacing.is_some() {
+                "edit draft"
+            } else {
+                "comment"
+            };
+            let side = |side: Side| side.as_api().to_lowercase();
+
+            // A span that crosses sides counts in two files at once, so both
+            // ends have to name the one they belong to.
+            if anchor.start_side == anchor.side {
+                let span = if anchor.start_line == anchor.end_line {
+                    format!("{}", anchor.end_line)
+                } else {
+                    format!("{}-{}", anchor.start_line, anchor.end_line)
+                };
+
+                format!(" {verb} · {name}:{span} · {} ", side(anchor.side))
+            } else {
+                format!(
+                    " {verb} · {name}:{} {} → {} {} ",
+                    anchor.start_line,
+                    side(anchor.start_side),
+                    anchor.end_line,
+                    side(anchor.side)
+                )
+            }
+        }
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1455,6 +1472,136 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
     ));
 }
 
+/// The verdict reads as three chips because the review has to be sendable
+/// without leaving the summary field to pick one.
+fn event_chips(active: ReviewEvent, theme: Theme) -> Vec<Span<'static>> {
+    ReviewEvent::ALL
+        .iter()
+        .map(|event| {
+            let is_active = *event == active;
+            let color = match event {
+                ReviewEvent::Approve => theme.success,
+                ReviewEvent::RequestChanges => theme.danger,
+                ReviewEvent::Comment => theme.accent,
+            };
+
+            if is_active {
+                Span::styled(
+                    format!(" {} ", event.label()),
+                    Style::default()
+                        .bg(color)
+                        .fg(theme.ink)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    format!(" {} ", event.label()),
+                    Style::default().fg(theme.dim),
+                )
+            }
+        })
+        .collect()
+}
+
+fn draw_submit(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
+    let Some(submission) = app.submission.as_ref() else {
+        return;
+    };
+
+    let width = 64.min(area.width.saturating_sub(4)).max(1);
+    let height = 12.min(area.height.saturating_sub(2)).max(1);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let title = match app.drafts.len() {
+        0 => " submit review ".to_string(),
+        1 => " submit review · 1 draft ".to_string(),
+        count => format!(" submit review · {count} drafts "),
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(rect);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+
+    if inner.height < 3 {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(event_chips(submission.event, theme))),
+        Rect { height: 1, ..inner },
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "─".repeat(inner.width as usize),
+            Style::default().fg(theme.dim),
+        )),
+        Rect {
+            y: inner.y + 1,
+            height: 1,
+            ..inner
+        },
+    );
+
+    let body = Rect {
+        y: inner.y + 2,
+        height: inner.height - 2,
+        ..inner
+    };
+
+    let (cursor_row, cursor_byte) = submission.editor.cursor();
+    let lines = submission.editor.lines();
+    let first_row =
+        cursor_row.saturating_sub(body.height.saturating_sub(1) as usize);
+    let cursor_column = terminal_width(&lines[cursor_row][..cursor_byte]);
+    let first_column =
+        cursor_column.saturating_sub(body.width.saturating_sub(1) as usize);
+
+    let is_empty = lines.iter().all(String::is_empty);
+    let visible: Vec<Line> = if is_empty {
+        vec![Line::styled(
+            "summary (optional for approve)",
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
+        )]
+    } else {
+        lines
+            .iter()
+            .skip(first_row)
+            .take(body.height as usize)
+            .map(|line| {
+                Line::styled(
+                    clip_window(line, first_column, body.width as usize),
+                    Style::default().fg(theme.code),
+                )
+            })
+            .collect()
+    };
+
+    frame.render_widget(Paragraph::new(visible), body);
+    frame.set_cursor_position((
+        body.x + cursor_column.saturating_sub(first_column) as u16,
+        body.y + cursor_row.saturating_sub(first_row) as u16,
+    ));
+}
+
 fn draw_bottom_bar(
     frame: &mut Frame,
     app: &App,
@@ -1469,6 +1616,7 @@ fn draw_bottom_bar(
         Mode::Insert => theme.success,
         Mode::Filter => theme.purple,
         Mode::Search => theme.warning,
+        Mode::Submit => theme.heading,
     };
 
     let pane = match app.pane {
@@ -1569,6 +1717,13 @@ fn draw_bottom_bar(
         ));
     }
 
+    if app.in_flight > 0 {
+        spans.push(Span::styled(
+            format!("   {}", SPINNER[app.loading_frame % SPINNER.len()]),
+            bar.fg(theme.accent),
+        ));
+    }
+
     if !app.status.is_empty() {
         spans.push(Span::styled(
             format!("   {}", app.status),
@@ -1603,7 +1758,12 @@ fn draw_bottom_bar(
         (Mode::Search, _) => {
             &[("↑↓", "step"), ("↵", "accept"), ("esc", "cancel")]
         }
-        (Mode::Insert, _) => &[("^s", "save"), ("esc", "cancel")],
+        (Mode::Submit, _) => {
+            &[("⇥", "verdict"), ("↵", "send"), ("esc", "cancel")]
+        }
+        (Mode::Insert, _) => {
+            &[("↵", "save"), ("⇧↵", "newline"), ("esc", "cancel")]
+        }
         (Mode::Visual, _) => {
             &[("j/k", "extend"), ("c", "comment"), ("esc", "cancel")]
         }
@@ -1638,14 +1798,20 @@ fn draw_bottom_bar(
                     "expand"
                 },
             ),
-            ("}", "next comment"),
+            ("c", "reply"),
+            ("R", "resolve"),
             ("esc", "code"),
-            ("⇥", "files"),
         ],
         (Mode::Normal, Pane::Diff) if app.search.is_some() => &[
             ("n/N", "next match"),
             ("}", "next comment"),
             ("esc", "clear"),
+        ],
+        (Mode::Normal, Pane::Diff) if !app.drafts.is_empty() => &[
+            ("c", "comment"),
+            ("e", "edit"),
+            ("d", "discard"),
+            ("s", "submit"),
         ],
         (Mode::Normal, Pane::Diff) => &[
             ("j/k", "move"),

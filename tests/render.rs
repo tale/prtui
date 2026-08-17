@@ -1179,3 +1179,71 @@ fn parallel_highlighting_matches_the_serial_pass_for_every_file() {
         assert_eq!(*styled, renderer.highlight_file(path, lines));
     }
 }
+
+#[test]
+fn the_submit_overlay_shows_the_verdict_and_the_draft_count() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    app.cursor = app.files[app.selected_file]
+        .lines
+        .iter()
+        .position(|l| l.kind != LineKind::Hunk)
+        .unwrap();
+
+    app.apply(&Action::StartComment, 20);
+    app.composer
+        .as_mut()
+        .unwrap()
+        .editor
+        .set_text("needs a test");
+    app.apply(&Action::CommitComment, 20);
+
+    press(&mut app, "s");
+    let rendered = draw(&mut app);
+    assert!(
+        rendered.contains("submit review · 1 draft"),
+        "the overlay should count what it will send:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("SUBMIT"),
+        "status bar should show the mode"
+    );
+    for label in ["comment", "approve", "request changes"] {
+        assert!(
+            rendered.contains(label),
+            "every verdict should be visible, missing {label}:\n{rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("summary (optional for approve)"),
+        "an empty summary should say what it is for:\n{rendered}"
+    );
+
+    app.apply(&Action::CycleEvent(1), 20);
+    app.submission.as_mut().unwrap().editor.set_text("ship it");
+    let rendered = draw(&mut app);
+    assert!(rendered.contains("ship it"), "{rendered}");
+    assert!(!rendered.contains("summary (optional"), "{rendered}");
+}
+
+#[test]
+fn a_reply_composer_names_the_thread_it_answers() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    let thread = app.pr.as_ref().unwrap().threads[0].clone();
+    app.selected_file = app
+        .files
+        .iter()
+        .position(|file| file.path == thread.path)
+        .unwrap();
+    app.cursor = app.files[app.selected_file]
+        .lines
+        .iter()
+        .position(|line| thread.anchors_to(line))
+        .unwrap();
+    press(&mut app, "j");
+
+    app.apply(&Action::StartComment, 20);
+    let rendered = draw(&mut app);
+    assert!(rendered.contains("reply ·"), "{rendered}");
+}

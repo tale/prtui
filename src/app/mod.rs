@@ -4,6 +4,7 @@ pub mod editor;
 pub mod input;
 pub mod keymap;
 pub mod mode;
+pub mod review;
 pub mod search;
 
 use crate::images::Images;
@@ -13,7 +14,9 @@ use action::{Action, Motion};
 use draft::{Anchor, Draft};
 use editor::CommentEditor;
 use mode::{Mode, Selection};
+use review::{Request, Sent, Submission};
 use std::collections::HashMap;
+use std::ops::RangeInclusive;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Pane {
@@ -21,10 +24,23 @@ pub enum Pane {
     Diff,
 }
 
+/// Where a composed body will land once it leaves the editor.
+pub enum Target {
+    /// A span of diff rows. `replacing` names the draft being reopened, so
+    /// editing revises it instead of stacking a second comment.
+    Line {
+        anchor: Anchor,
+        rows: RangeInclusive<usize>,
+        replacing: Option<usize>,
+    },
+    /// A reply under an existing thread, addressed to its first comment.
+    Reply { in_reply_to: u64 },
+}
+
 /// An in-progress comment: the editor buffer plus where it will land.
 pub struct Composer {
     pub editor: CommentEditor,
-    pub anchor: Anchor,
+    pub target: Target,
     pub path: String,
 }
 
@@ -52,6 +68,7 @@ pub struct App {
     pub mode: Mode,
     pub selection: Option<Selection>,
     pub composer: Option<Composer>,
+    pub submission: Option<Submission>,
     pub file_filter: Option<CommentEditor>,
     pub search: Option<CommentEditor>,
     pub selected_file: usize,
@@ -67,7 +84,10 @@ pub struct App {
     pub status: String,
     pub loading_frame: usize,
     pub should_quit: bool,
+    /// Requests handed to the event loop but not yet answered.
+    pub in_flight: usize,
 
+    outbox: Vec<Request>,
     renderer: Renderer,
     highlights: HashMap<usize, Vec<Vec<Segment>>>,
     filter_snapshot: Option<FileFilterSnapshot>,
@@ -96,6 +116,7 @@ impl App {
             mode: Mode::Normal,
             selection: None,
             composer: None,
+            submission: None,
             file_filter: None,
             search: None,
             selected_file: 0,
@@ -110,6 +131,8 @@ impl App {
             status: String::new(),
             loading_frame: 0,
             should_quit: false,
+            in_flight: 0,
+            outbox: Vec::new(),
             renderer,
             highlights: HashMap::new(),
             filter_snapshot: None,
@@ -244,16 +267,33 @@ impl App {
                 self.mode = Mode::Normal;
                 self.selection = None;
             }
+            Action::EditDraft => self.edit_draft(),
+            Action::DeleteDraft => self.delete_draft(),
+            Action::ToggleResolved => self.toggle_resolved(),
+
+            Action::StartSubmit => self.start_submit(),
+            Action::CommitSubmit => self.commit_submit(),
+            Action::CancelSubmit => {
+                self.submission = None;
+                self.mode = Mode::Normal;
+            }
+            Action::CycleEvent(direction) => {
+                if let Some(submission) = self.submission.as_mut() {
+                    submission.event = submission.event.step(direction);
+                }
+            }
         }
     }
 
+    /// A focused thread takes a reply; anything else starts a fresh draft over
+    /// the cursor line or the visual selection.
     fn start_comment(&mut self) {
         if self.pane != Pane::Diff {
             return;
         }
 
-        if self.focused_thread.is_some() {
-            self.status = "thread replies are not available yet".into();
+        if let Some(id) = self.focused_thread.clone() {
+            self.start_reply(&id);
             return;
         }
 
@@ -265,17 +305,190 @@ impl App {
         let Some(file) = self.current_file() else {
             return;
         };
-        let Some(anchor) = draft::anchor_for(file, rows) else {
+        let Some(anchor) = draft::anchor_for(file, rows.clone()) else {
             self.status = "cannot comment on that line".into();
             return;
         };
 
         self.composer = Some(Composer {
             editor: CommentEditor::default(),
-            anchor,
+            target: Target::Line {
+                anchor,
+                rows,
+                replacing: None,
+            },
             path: file.path.clone(),
         });
         self.mode = Mode::Insert;
+    }
+
+    /// Reopens the draft under the cursor with its body and span intact, so
+    /// committing revises it instead of stacking a second comment.
+    fn edit_draft(&mut self) {
+        if self.pane != Pane::Diff {
+            return;
+        }
+
+        let Some(index) = self.draft_at_cursor() else {
+            self.status = "no draft on this line".into();
+            return;
+        };
+
+        let draft = &self.drafts[index];
+        let mut editor = CommentEditor::default();
+        editor.set_text(&draft.body);
+
+        self.composer = Some(Composer {
+            editor,
+            target: Target::Line {
+                anchor: draft.anchor,
+                rows: draft.rows.clone(),
+                replacing: Some(index),
+            },
+            path: draft.path.clone(),
+        });
+        self.mode = Mode::Insert;
+        self.selection = None;
+    }
+
+    fn start_reply(&mut self, id: &str) {
+        let Some(thread) = self.thread(id) else {
+            return;
+        };
+        let Some(in_reply_to) = thread.reply_target() else {
+            self.status = "this thread cannot be replied to".into();
+            return;
+        };
+
+        self.composer = Some(Composer {
+            editor: CommentEditor::default(),
+            target: Target::Reply { in_reply_to },
+            path: thread.path.clone(),
+        });
+        self.mode = Mode::Insert;
+    }
+
+    fn thread(&self, id: &str) -> Option<&ReviewThread> {
+        self.threads_by_path
+            .values()
+            .flatten()
+            .find(|thread| thread.id == id)
+    }
+
+    fn draft_at_cursor(&self) -> Option<usize> {
+        let path = &self.current_file()?.path;
+
+        self.drafts
+            .iter()
+            .position(|draft| draft.covers(path, self.cursor))
+    }
+
+    fn delete_draft(&mut self) {
+        if self.pane != Pane::Diff {
+            return;
+        }
+
+        let Some(index) = self.draft_at_cursor() else {
+            self.status = "no draft on this line".into();
+            return;
+        };
+
+        self.drafts.remove(index);
+        self.status = "draft discarded".into();
+    }
+
+    fn toggle_resolved(&mut self) {
+        let Some(id) = self.focused_thread.clone() else {
+            self.status = "no thread selected".into();
+            return;
+        };
+        let Some(thread) = self.thread(&id) else {
+            return;
+        };
+
+        if !thread.can_resolve {
+            self.status = "you cannot resolve this thread".into();
+            return;
+        }
+
+        let is_resolved = !thread.is_resolved;
+        self.send(Request::Resolve {
+            thread_id: id,
+            is_resolved,
+        });
+        self.status = if is_resolved {
+            "resolving…".into()
+        } else {
+            "unresolving…".into()
+        };
+    }
+
+    fn start_submit(&mut self) {
+        self.composer = None;
+        self.selection = None;
+        self.submission = Some(Submission::default());
+        self.mode = Mode::Submit;
+    }
+
+    /// A rejected submission leaves the overlay open, so a missing summary is
+    /// typed rather than retyped.
+    fn commit_submit(&mut self) {
+        let Some(submission) = self.submission.as_ref() else {
+            return;
+        };
+
+        let event = submission.event;
+        let body = submission.editor.text().trim().to_string();
+
+        if body.is_empty() && event.requires_body() {
+            self.status = format!("{} needs a summary", event.label());
+            return;
+        }
+
+        if body.is_empty() && self.drafts.is_empty() {
+            self.status = "nothing to submit".into();
+            return;
+        }
+
+        self.submission = None;
+        self.mode = Mode::Normal;
+
+        let comments: Vec<serde_json::Value> =
+            self.drafts.iter().map(Draft::to_api).collect();
+
+        self.send(Request::Review {
+            event,
+            body,
+            comments,
+        });
+        self.status = format!("submitting {}…", event.label());
+    }
+
+    fn send(&mut self, request: Request) {
+        self.outbox.push(request);
+        self.in_flight += 1;
+    }
+
+    /// Drained by the event loop, which owns the network.
+    pub fn take_requests(&mut self) -> Vec<Request> {
+        std::mem::take(&mut self.outbox)
+    }
+
+    /// Reports one request's outcome. Drafts survive a failed submission so the
+    /// review can be sent again rather than retyped.
+    pub fn finish(&mut self, outcome: Result<Sent, String>) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+
+        self.status = match outcome {
+            Ok(Sent::Review(count)) => {
+                self.drafts.drain(..count.min(self.drafts.len()));
+                "review submitted".into()
+            }
+            Ok(Sent::Reply) => "reply posted".into(),
+            Ok(Sent::Resolution(true)) => "thread resolved".into(),
+            Ok(Sent::Resolution(false)) => "thread unresolved".into(),
+            Err(error) => format!("error: {error}"),
+        };
     }
 
     /// `/` means "narrow what I am looking at", which is the file list from the
@@ -578,20 +791,48 @@ impl App {
         self.mode = Mode::Normal;
         self.selection = None;
 
-        if body.is_empty() {
-            self.status = "empty comment discarded".into();
-            return;
+        match composer.target {
+            Target::Reply { in_reply_to } => {
+                if body.is_empty() {
+                    self.status = "empty reply discarded".into();
+                    return;
+                }
+
+                self.send(Request::Reply { in_reply_to, body });
+                self.status = "sending reply…".into();
+            }
+            Target::Line {
+                anchor,
+                rows,
+                replacing,
+            } => {
+                // Emptying a reopened draft is how it gets thrown away.
+                let Some(index) = replacing else {
+                    if body.is_empty() {
+                        self.status = "empty comment discarded".into();
+                        return;
+                    }
+
+                    self.drafts.push(Draft {
+                        path: composer.path,
+                        rows,
+                        anchor,
+                        body,
+                    });
+                    self.status = "draft saved".into();
+                    return;
+                };
+
+                if body.is_empty() {
+                    self.drafts.remove(index);
+                    self.status = "draft discarded".into();
+                    return;
+                }
+
+                self.drafts[index].body = body;
+                self.status = "draft updated".into();
+            }
         }
-
-        self.drafts.push(Draft {
-            path: composer.path,
-            start_line: composer.anchor.start_line,
-            end_line: composer.anchor.end_line,
-            side: composer.anchor.side,
-            body,
-        });
-
-        self.status = "draft saved".into();
     }
 
     fn toggle_pane(&mut self) {

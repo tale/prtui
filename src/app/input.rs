@@ -64,6 +64,14 @@ impl InputRouter {
                 composer.editor.handle_key(key);
                 DispatchResult::ForwardedToEditor
             }
+            Resolution::Unbound if mode == Mode::Submit => {
+                let Some(submission) = app.submission.as_mut() else {
+                    return DispatchResult::Ignored;
+                };
+
+                submission.editor.handle_key(key);
+                DispatchResult::ForwardedToEditor
+            }
             Resolution::Unbound if mode == Mode::Filter => {
                 let Some(filter) = app.file_filter.as_mut() else {
                     return DispatchResult::Ignored;
@@ -100,6 +108,13 @@ impl InputRouter {
                     return DispatchResult::Ignored;
                 };
                 composer.editor.insert_text(text);
+                DispatchResult::ForwardedToEditor
+            }
+            Mode::Submit => {
+                let Some(submission) = app.submission.as_mut() else {
+                    return DispatchResult::Ignored;
+                };
+                submission.editor.insert_text(text);
                 DispatchResult::ForwardedToEditor
             }
             Mode::Filter => {

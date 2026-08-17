@@ -44,10 +44,24 @@ pub enum Action {
     EnterVisual,
     LeaveVisual,
 
-    /// Open the composer for the cursor line, or the visual selection.
+    /// Open the composer for the cursor line, the visual selection, or the
+    /// focused thread, whichever the cursor is on.
     StartComment,
     CommitComment,
     CancelComment,
+    /// Reopen the draft covering the cursor line.
+    EditDraft,
+    /// Throw away the draft covering the cursor line.
+    DeleteDraft,
+    /// Resolve the focused thread, or reopen it if it is already resolved.
+    ToggleResolved,
+
+    /// Open the overlay that ships every draft as one review.
+    StartSubmit,
+    CommitSubmit,
+    CancelSubmit,
+    /// Step the verdict the review will carry.
+    CycleEvent(isize),
 
     Quit,
 }

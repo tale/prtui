@@ -15,13 +15,27 @@ query($owner:String!, $repo:String!, $number:Int!) {
       baseRefName headRefName body
       reviewThreads(first:100) {
         nodes {
-          id isResolved isOutdated path line originalLine diffSide
-          comments(first:50) { nodes { id author { login } body createdAt } }
+          id isResolved isOutdated viewerCanResolve path line originalLine diffSide
+          comments(first:50) {
+            nodes { id fullDatabaseId author { login } body createdAt }
+          }
         }
       }
       reviews(first:50) { nodes { author { login } state submittedAt } }
     }
   }
+}
+";
+
+const RESOLVE_MUTATION: &str = r"
+mutation($id:ID!) {
+  resolveReviewThread(input:{threadId:$id}) { thread { id isResolved } }
+}
+";
+
+const UNRESOLVE_MUTATION: &str = r"
+mutation($id:ID!) {
+  unresolveReviewThread(input:{threadId:$id}) { thread { id isResolved } }
 }
 ";
 
@@ -124,8 +138,53 @@ async fn token() -> Option<String> {
         .clone()
 }
 
-/// GitHub reports failures as JSON with a `message`; surface that rather than
-/// the bare status line.
+/// A validation failure carries a generic `message` and puts what actually went
+/// wrong in `errors`, whose entries are either strings or objects naming the
+/// offending field. Reporting only the message turns every one of them into
+/// "Unprocessable Entity".
+fn problems(val: &serde_json::Value) -> Vec<String> {
+    val.get("errors")
+        .and_then(|errors| errors.as_array())
+        .map(|errors| {
+            errors
+                .iter()
+                .map(|error| match error {
+                    serde_json::Value::String(text) => text.clone(),
+                    object => {
+                        let detail = object
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .map_or_else(|| object.to_string(), str::to_string);
+
+                        match object.get("field").and_then(|f| f.as_str()) {
+                            Some(field) => format!("{field}: {detail}"),
+                            None => detail,
+                        }
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn failure_detail(body: &[u8]) -> String {
+    let Ok(val) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return String::from_utf8_lossy(body).trim().to_string();
+    };
+
+    let message = val
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default();
+    let problems = problems(&val);
+
+    if problems.is_empty() {
+        return message.to_string();
+    }
+
+    format!("{message}: {}", problems.join("; "))
+}
+
 fn check(response: &mut Response<Body>, what: &str) -> Result<()> {
     let status = response.status();
     if status.is_success() {
@@ -139,16 +198,7 @@ fn check(response: &mut Response<Body>, what: &str) -> Result<()> {
         .read_to_vec()
         .unwrap_or_default();
 
-    let detail = serde_json::from_slice::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|val| {
-            val.get("message")
-                .and_then(|m| m.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_string());
-
-    bail!("{what} failed: HTTP {status}: {detail}")
+    bail!("{what} failed: HTTP {status}: {}", failure_detail(&body))
 }
 
 /// `Link: <url>; rel="next", <url>; rel="last"` — the cursor for the next page.
@@ -175,6 +225,58 @@ fn get(url: &str, token: Option<&str>) -> Result<Response<Body>> {
     }
 
     request.call().context("request to GitHub failed")
+}
+
+fn post(
+    url: &str,
+    token: Option<&str>,
+    body: &serde_json::Value,
+) -> Result<Response<Body>> {
+    let mut request = agent()
+        .post(url)
+        .header("accept", "application/vnd.github+json")
+        .header("x-github-api-version", "2022-11-28");
+
+    if let Some(token) = token {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+
+    request.send_json(body).context("request to GitHub failed")
+}
+
+/// GraphQL answers 200 with an `errors` array, so a successful status alone
+/// says nothing about whether the operation ran.
+fn graphql(
+    url: &str,
+    token: Option<&str>,
+    query: &str,
+    variables: &serde_json::Value,
+    what: &str,
+) -> Result<serde_json::Value> {
+    let body = serde_json::json!({ "query": query, "variables": variables });
+    let mut response = post(url, token, &body)?;
+    check(&mut response, what)?;
+
+    let val: serde_json::Value = response
+        .body_mut()
+        .with_config()
+        .limit(API_LIMIT)
+        .read_json()
+        .context("failed to parse graphql response")?;
+
+    if let Some(errors) = val.get("errors") {
+        bail!("{what} failed: {errors}");
+    }
+
+    Ok(val)
+}
+
+/// Anything that writes needs a credential; failing here beats a 401 that reads
+/// like the review itself was rejected.
+async fn write_token() -> Result<String> {
+    token()
+        .await
+        .context("no GitHub token; run `gh auth login` first")
 }
 
 /// Changed files with their unified-diff patches. Measured faster than the
@@ -218,44 +320,103 @@ pub async fn fetch_files(
 pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<serde_json::Value> {
     let token = token().await;
     let url = repo.graphql_url();
-    let body = serde_json::json!({
-        "query": THREADS_QUERY,
-        "variables": {
-            "owner": repo.owner,
-            "repo": repo.name,
-            "number": number,
-        },
+    let variables = serde_json::json!({
+        "owner": repo.owner,
+        "repo": repo.name,
+        "number": number,
     });
 
     tokio::task::spawn_blocking(move || {
-        let mut request = agent()
-            .post(&url)
-            .header("accept", "application/vnd.github+json");
-
-        if let Some(token) = &token {
-            request =
-                request.header("authorization", format!("Bearer {token}"));
-        }
-
-        let mut response =
-            request.send_json(&body).context("graphql request failed")?;
-        check(&mut response, "fetching pull request metadata")?;
-
-        let val: serde_json::Value = response
-            .body_mut()
-            .with_config()
-            .limit(API_LIMIT)
-            .read_json()
-            .context("failed to parse graphql response")?;
-
-        if let Some(errors) = val.get("errors") {
-            bail!("graphql error: {errors}");
-        }
-
-        Ok(val)
+        graphql(
+            &url,
+            token.as_deref(),
+            THREADS_QUERY,
+            &variables,
+            "fetching pull request metadata",
+        )
     })
     .await
     .context("metadata fetch panicked")?
+}
+
+/// Post the whole review — summary body and every inline comment — in one
+/// request, which is what makes GitHub thread them under a single review rather
+/// than scattering them as standalone comments.
+pub async fn submit_review(
+    repo: &Repo,
+    number: u32,
+    event: &str,
+    body: String,
+    comments: Vec<serde_json::Value>,
+) -> Result<()> {
+    let token = write_token().await?;
+    let url = repo.rest_url(&format!(
+        "/repos/{}/{}/pulls/{number}/reviews",
+        repo.owner, repo.name
+    ));
+    let payload = serde_json::json!({
+        "event": event,
+        "body": body,
+        "comments": comments,
+    });
+
+    tokio::task::spawn_blocking(move || {
+        let mut response = post(&url, Some(&token), &payload)?;
+        check(&mut response, "submitting review")
+    })
+    .await
+    .context("review submission panicked")?
+}
+
+/// A reply is a standalone comment addressed to the thread's first comment; it
+/// posts immediately rather than waiting for a review to be submitted.
+pub async fn reply(
+    repo: &Repo,
+    number: u32,
+    in_reply_to: u64,
+    body: String,
+) -> Result<()> {
+    let token = write_token().await?;
+    let url = repo.rest_url(&format!(
+        "/repos/{}/{}/pulls/{number}/comments",
+        repo.owner, repo.name
+    ));
+    let payload =
+        serde_json::json!({ "body": body, "in_reply_to": in_reply_to });
+
+    tokio::task::spawn_blocking(move || {
+        let mut response = post(&url, Some(&token), &payload)?;
+        check(&mut response, "posting reply")
+    })
+    .await
+    .context("reply panicked")?
+}
+
+pub async fn set_resolved(
+    repo: &Repo,
+    thread_id: String,
+    is_resolved: bool,
+) -> Result<()> {
+    let token = write_token().await?;
+    let url = repo.graphql_url();
+    let (query, what) = if is_resolved {
+        (RESOLVE_MUTATION, "resolving thread")
+    } else {
+        (UNRESOLVE_MUTATION, "unresolving thread")
+    };
+
+    tokio::task::spawn_blocking(move || {
+        graphql(
+            &url,
+            Some(&token),
+            query,
+            &serde_json::json!({ "id": thread_id }),
+            what,
+        )
+        .map(|_| ())
+    })
+    .await
+    .context("thread resolution panicked")?
 }
 
 /// Download a comment attachment. Attachments on github.com itself are private
@@ -345,6 +506,31 @@ mod tests {
         );
         assert_eq!(next_page(&last), None);
         assert_eq!(next_page(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn a_validation_failure_reports_what_was_actually_wrong() {
+        let structured = br#"{
+            "message": "Unprocessable Entity",
+            "errors": [
+                {
+                    "resource": "PullRequestReview",
+                    "code": "custom",
+                    "field": "body",
+                    "message": "body can't be blank"
+                },
+                "line must be part of the diff"
+            ]
+        }"#;
+        assert_eq!(
+            failure_detail(structured),
+            "Unprocessable Entity: body: body can't be blank; \
+             line must be part of the diff"
+        );
+
+        // A plain message still reads as it always did.
+        assert_eq!(failure_detail(br#"{"message":"Not Found"}"#), "Not Found");
+        assert_eq!(failure_detail(b"  gateway timeout  "), "gateway timeout");
     }
 
     #[test]

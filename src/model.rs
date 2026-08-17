@@ -63,6 +63,9 @@ struct RawFile {
 #[derive(Debug, Clone)]
 pub struct Comment {
     pub id: String,
+    /// The REST id, which is what a reply has to be addressed to. GraphQL node
+    /// ids are not interchangeable with it.
+    pub rest_id: Option<u64>,
     pub author: String,
     pub body: String,
     pub created_at: String,
@@ -77,6 +80,7 @@ pub struct ReviewThread {
     pub side: Side,
     pub is_resolved: bool,
     pub is_outdated: bool,
+    pub can_resolve: bool,
     pub comments: Vec<Comment>,
 }
 
@@ -85,6 +89,12 @@ impl ReviewThread {
     /// outdated, leaving `originalLine` as the only usable display anchor.
     pub fn anchor_line(&self) -> Option<u32> {
         self.line.or(self.original_line)
+    }
+
+    /// Replies address the thread's first comment, which is the one GitHub
+    /// treats as the conversation root.
+    pub fn reply_target(&self) -> Option<u64> {
+        self.comments.first().and_then(|comment| comment.rest_id)
     }
 
     pub fn anchors_to(&self, line: &DiffLine) -> bool {
@@ -211,6 +221,17 @@ fn text_at(val: &serde_json::Value, ptr: &str) -> String {
         .to_string()
 }
 
+/// `fullDatabaseId` is a `BigInt`, which GitHub serializes as a string; older
+/// deployments hand back a plain number for the same field.
+fn rest_id(val: &serde_json::Value) -> Option<u64> {
+    let raw = val.get("fullDatabaseId")?;
+
+    match raw {
+        serde_json::Value::String(text) => text.parse().ok(),
+        other => other.as_u64(),
+    }
+}
+
 pub fn parse_meta(val: &serde_json::Value) -> Result<PullRequest> {
     let pr = val
         .pointer("/data/repository/pullRequest")
@@ -246,6 +267,10 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<PullRequest> {
                         .get("isOutdated")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false),
+                    can_resolve: t
+                        .get("viewerCanResolve")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
                     comments: t
                         .pointer("/comments/nodes")
                         .and_then(|v| v.as_array())
@@ -253,6 +278,7 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<PullRequest> {
                             cs.iter()
                                 .map(|c| Comment {
                                     id: text_at(c, "/id"),
+                                    rest_id: rest_id(c),
                                     author: text_at(c, "/author/login"),
                                     body: text_at(c, "/body"),
                                     created_at: text_at(c, "/createdAt"),
