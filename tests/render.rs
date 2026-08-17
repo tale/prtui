@@ -1309,3 +1309,23 @@ fn a_reply_composer_names_the_thread_it_answers() {
     let rendered = draw(&app);
     assert!(rendered.contains("reply ·"), "{rendered}");
 }
+
+/// The bar tells trouble from a note by reading the text, so the two shapes
+/// that mean trouble have to keep saying so.
+#[test]
+fn the_status_bar_paints_failures_and_outages_as_trouble() {
+    let mut app = App::new();
+    assert!(!app.is_status_alarming());
+
+    app.status = "error: fetching changed files failed: HTTP 404".into();
+    assert!(app.is_status_alarming());
+
+    app.status = "github major outage".into();
+    assert!(app.is_status_alarming());
+
+    // Ordinary notes stay quiet; "no more comments" is not a failure.
+    for note in ["draft saved", "review submitted", "no more comments"] {
+        app.status = note.into();
+        assert!(!app.is_status_alarming(), "{note} should not alarm");
+    }
+}

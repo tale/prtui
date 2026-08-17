@@ -1179,7 +1179,7 @@ fn draw_bottom_bar(
     if !app.status.is_empty() {
         spans.push(Span::styled(
             format!("   {}", app.status),
-            bar.fg(if app.status.starts_with("error:") {
+            bar.fg(if app.is_status_alarming() {
                 theme.danger
             } else {
                 theme.dim

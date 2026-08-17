@@ -92,6 +92,8 @@ enum Message {
     Image(String, Result<Image, String>),
     MetaFailed(String),
     FilesFailed(String),
+    /// GitHub is having an incident that explains a failure already shown.
+    Outage(String),
     /// One outbound request finished, successfully or not.
     Sent(Result<Sent, String>),
 }
@@ -113,6 +115,30 @@ fn spawn_meta_fetch(
         };
         let _ = tx.send(msg);
     });
+}
+
+/// Asked only after something has already failed, so a healthy session never
+/// pays the round trip. Silence means GitHub says it is fine and the failure
+/// belongs to this request alone.
+fn spawn_outage_probe(tx: mpsc::UnboundedSender<Message>) {
+    tokio::spawn(async move {
+        if let Some(summary) = gh::fetch_outage().await {
+            let _ = tx.send(Message::Outage(summary));
+        }
+    });
+}
+
+/// A known incident replaces the failure rather than prefixing it: during an
+/// outage the HTTP status is noise, and a bare 404 reads like the PR is gone.
+fn failure_status(outage: Option<&String>, failure: Option<&String>) -> String {
+    if let Some(outage) = outage {
+        return outage.clone();
+    }
+
+    match failure {
+        Some(failure) => format!("error: {failure}"),
+        None => String::new(),
+    }
 }
 
 /// Writes go out on their own task so a slow round trip never freezes the
@@ -293,6 +319,8 @@ async fn event_loop(
     let mut input = InputRouter::default();
     let mut pending: u8 = 2;
     let mut failure: Option<String> = None;
+    let mut outage: Option<String> = None;
+    let mut is_outage_probed = false;
     let mut is_dirty = true;
     let mut animation = tokio::time::interval(Duration::from_millis(90));
     animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -366,9 +394,18 @@ async fn event_loop(
                     }
                     Message::FilesFailed(err) => {
                         app.fail_files();
-                        app.status = format!("error: {err}");
                         failure = Some(err);
+                        app.status =
+                            failure_status(outage.as_ref(), failure.as_ref());
                         pending = pending.saturating_sub(1);
+                        true
+                    }
+                    // Lands after the failure it explains, so it rewrites the
+                    // line rather than setting one of its own.
+                    Message::Outage(summary) => {
+                        outage = Some(summary);
+                        app.status =
+                            failure_status(outage.as_ref(), failure.as_ref());
                         true
                     }
                     // A write only shows up in the diff once the threads are
@@ -388,10 +425,13 @@ async fn event_loop(
                 };
 
                 if pending_before != 0 && pending == 0 {
-                    app.status = match &failure {
-                        Some(err) => format!("error: {err}"),
-                        None => String::new(),
-                    };
+                    app.status =
+                        failure_status(outage.as_ref(), failure.as_ref());
+                }
+
+                if failure.is_some() && !is_outage_probed {
+                    is_outage_probed = true;
+                    spawn_outage_probe(tx.clone());
                 }
 
                 is_dirty |= affects_display;

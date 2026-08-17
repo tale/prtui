@@ -56,6 +56,12 @@ const RETRY_CEILING: Duration = Duration::from_secs(8);
 
 const JSON_ACCEPT: &str = "application/vnd.github+json";
 
+const STATUS_URL: &str = "https://www.githubstatus.com/api/v2/components.json";
+
+/// The two components a review rides on. A degraded Actions or Pages says
+/// nothing about why a diff would not load, and naming it would only mislead.
+const STATUS_COMPONENTS: [&str; 2] = ["API Requests", "Pull Requests"];
+
 #[derive(Clone)]
 pub struct Repo {
     pub host: Option<String>,
@@ -519,6 +525,58 @@ pub async fn fetch_asset(url: &str) -> Result<Vec<u8>> {
     .context("attachment fetch panicked")?
 }
 
+/// Statuspage ranks a component from `operational` up to `major_outage`.
+fn severity(status: &str) -> u8 {
+    match status {
+        "major_outage" => 3,
+        "partial_outage" => 2,
+        "degraded_performance" => 1,
+        _ => 0,
+    }
+}
+
+/// The worst state among the components a review needs. Which ones they are
+/// does not change what the reader can do about it, so the line just names the
+/// incident and gets out of the way.
+fn summarize_outage(val: &serde_json::Value) -> Option<String> {
+    let worst = val
+        .get("components")?
+        .as_array()?
+        .iter()
+        .filter_map(|component| {
+            let name = component.get("name")?.as_str()?;
+            let status = component.get("status")?.as_str()?;
+            STATUS_COMPONENTS.contains(&name).then_some(status)
+        })
+        .filter(|status| severity(status) > 0)
+        .max_by_key(|status| severity(status))?;
+
+    Some(format!("github {}", worst.replace('_', " ")))
+}
+
+/// GitHub's incident feed.
+///
+/// Statuspage runs on its own infrastructure, so it stays up through the
+/// outages it reports. Only consulted once a request has already failed, which
+/// keeps the healthy path free of it.
+pub async fn fetch_outage() -> Option<String> {
+    tokio::task::spawn_blocking(|| {
+        let mut response = get(STATUS_URL, JSON_ACCEPT, None).ok()?;
+        check(&mut response, "reading GitHub status").ok()?;
+
+        let val: serde_json::Value = response
+            .body_mut()
+            .with_config()
+            .limit(API_LIMIT)
+            .read_json()
+            .ok()?;
+
+        summarize_outage(&val)
+    })
+    .await
+    .ok()?
+}
+
 /// Resolved from the local git remotes, which is the CLI's job rather than an
 /// API call.
 pub async fn current_repo() -> Result<Repo> {
@@ -597,6 +655,44 @@ mod tests {
         // A plain message still reads as it always did.
         assert_eq!(failure_detail(br#"{"message":"Not Found"}"#), "Not Found");
         assert_eq!(failure_detail(b"  gateway timeout  "), "gateway timeout");
+    }
+
+    #[test]
+    fn reports_only_the_components_a_review_depends_on() {
+        let feed = |components: serde_json::Value| serde_json::json!({ "components": components });
+
+        // The real 2026-08-17 shape: plenty broken, two of it ours.
+        let outage = feed(serde_json::json!([
+            { "name": "Git Operations", "status": "degraded_performance" },
+            { "name": "API Requests", "status": "major_outage" },
+            { "name": "Pull Requests", "status": "major_outage" },
+            { "name": "Actions", "status": "major_outage" },
+            { "name": "Packages", "status": "operational" },
+        ]));
+        assert_eq!(
+            summarize_outage(&outage).as_deref(),
+            Some("github major outage")
+        );
+
+        // The worst of the two leads, so a partial outage is not hidden
+        // behind a component that is merely slow.
+        let mixed = feed(serde_json::json!([
+            { "name": "API Requests", "status": "degraded_performance" },
+            { "name": "Pull Requests", "status": "partial_outage" },
+        ]));
+        assert_eq!(
+            summarize_outage(&mixed).as_deref(),
+            Some("github partial outage")
+        );
+
+        // Everything we ride on is up, so the failure was this request's own
+        // and claiming an incident would send the reader the wrong way.
+        let elsewhere = feed(serde_json::json!([
+            { "name": "API Requests", "status": "operational" },
+            { "name": "Actions", "status": "major_outage" },
+        ]));
+        assert_eq!(summarize_outage(&elsewhere), None);
+        assert_eq!(summarize_outage(&serde_json::json!({})), None);
     }
 
     #[test]

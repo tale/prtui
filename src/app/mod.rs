@@ -179,6 +179,13 @@ impl App {
         self.files_state = FilesState::Failed;
     }
 
+    /// The bar paints trouble red. A failure carries the `error:` label; a
+    /// GitHub incident names itself and needs none. Derived from the text
+    /// rather than tracked alongside it, so the two cannot drift apart.
+    pub fn is_status_alarming(&self) -> bool {
+        self.status.starts_with("error:") || self.status.starts_with("github ")
+    }
+
     pub const fn files_placeholder(&self) -> &'static str {
         match self.files_state {
             FilesState::Failed => "diff unavailable",
