@@ -125,6 +125,7 @@ impl Keymap {
                 }
             }
             'c' => Action::StartComment,
+            'C' if mode == Mode::Normal => Action::StartFileComment,
             'e' if mode == Mode::Normal => Action::EditDraft,
             'd' if mode == Mode::Normal => Action::DeleteDraft,
             'R' if mode == Mode::Normal => Action::ToggleResolved,

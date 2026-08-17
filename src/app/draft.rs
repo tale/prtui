@@ -30,43 +30,83 @@ impl Anchor {
     }
 }
 
+/// What a draft comment is attached to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attachment {
+    /// A span of diff rows. `anchor` is what GitHub is told; `rows` is what the
+    /// gutter marks and the cursor tests.
+    Lines {
+        rows: RangeInclusive<usize>,
+        anchor: Anchor,
+    },
+    /// The file as a whole, for a remark that belongs to no particular line.
+    File,
+}
+
 /// A review comment written but not yet submitted. Held locally so a whole
 /// review can be composed offline and sent in one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
     pub path: String,
-    /// The diff rows the comment was written against. The anchor is what
-    /// GitHub is told; this is what the gutter marks and the cursor tests.
-    pub rows: RangeInclusive<usize>,
-    pub anchor: Anchor,
+    pub attachment: Attachment,
     pub body: String,
 }
 
 impl Draft {
+    pub const fn is_file_level(&self) -> bool {
+        matches!(self.attachment, Attachment::File)
+    }
+
+    pub const fn rows(&self) -> Option<&RangeInclusive<usize>> {
+        match &self.attachment {
+            Attachment::Lines { rows, .. } => Some(rows),
+            Attachment::File => None,
+        }
+    }
+
+    pub const fn anchor(&self) -> Option<&Anchor> {
+        match &self.attachment {
+            Attachment::Lines { anchor, .. } => Some(anchor),
+            Attachment::File => None,
+        }
+    }
+
     pub fn covers(&self, path: &str, row: usize) -> bool {
-        self.path == path && self.rows.contains(&row)
+        self.path == path && self.rows().is_some_and(|rows| rows.contains(&row))
     }
 
     pub fn overlaps(&self, path: &str, rows: &RangeInclusive<usize>) -> bool {
         self.path == path
-            && self.rows.start() <= rows.end()
-            && rows.start() <= self.rows.end()
+            && self.rows().is_some_and(|own| {
+                own.start() <= rows.end() && rows.start() <= own.end()
+            })
     }
 
-    /// One entry of a review's `comments` array. GitHub anchors a span at its
-    /// last line and takes the first as `start_line`, which is only sent when
-    /// the comment actually covers more than one.
+    /// One entry of a review's `comments` array.
+    ///
+    /// GitHub anchors a span at its last line and takes the first as
+    /// `start_line`, which is only sent when the comment really covers more than
+    /// one. A file-level comment carries no position at all and says so with
+    /// `subject_type`, which is what stops the API rejecting the missing line.
     pub fn to_api(&self) -> serde_json::Value {
+        let Attachment::Lines { anchor, .. } = &self.attachment else {
+            return serde_json::json!({
+                "path": self.path,
+                "body": self.body,
+                "subject_type": "file",
+            });
+        };
+
         let mut comment = serde_json::json!({
             "path": self.path,
             "body": self.body,
-            "line": self.anchor.end_line,
-            "side": self.anchor.side.as_api(),
+            "line": anchor.end_line,
+            "side": anchor.side.as_api(),
         });
 
-        if self.anchor.is_multiline() {
-            comment["start_line"] = self.anchor.start_line.into();
-            comment["start_side"] = self.anchor.start_side.as_api().into();
+        if anchor.is_multiline() {
+            comment["start_line"] = anchor.start_line.into();
+            comment["start_side"] = anchor.start_side.as_api().into();
         }
 
         comment

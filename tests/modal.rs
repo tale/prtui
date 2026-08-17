@@ -350,11 +350,17 @@ fn commenting_a_selection_produces_one_multiline_draft() {
     assert_eq!(app.drafts.len(), 1);
 
     let draft = &app.drafts[0];
-    assert_eq!(draft.anchor.side, Side::Right);
+    assert_eq!(draft.anchor().unwrap().side, Side::Right);
     assert_eq!(draft.body, "this allocates on every call");
-    assert!(draft.anchor.is_multiline());
-    assert!(draft.anchor.start_line < draft.anchor.end_line);
-    assert_eq!(draft.rows, added..=added + 2, "the whole block is covered");
+    assert!(draft.anchor().unwrap().is_multiline());
+    assert!(
+        draft.anchor().unwrap().start_line < draft.anchor().unwrap().end_line
+    );
+    assert_eq!(
+        *draft.rows().unwrap(),
+        added..=added + 2,
+        "the whole block is covered"
+    );
 }
 
 /// A selection running from deletions into additions used to collapse onto the
@@ -378,7 +384,7 @@ fn a_selection_across_both_sides_keeps_the_whole_block() {
         .set_text("rewrite this");
     act(&mut app, &Action::CommitComment);
 
-    let anchor = app.drafts[0].anchor;
+    let anchor = *app.drafts[0].anchor().unwrap();
     assert_eq!(anchor.start_side, Side::Left, "starts on the deletions");
     assert_eq!(anchor.start_line, 2, "the first deleted line");
     assert_eq!(anchor.side, Side::Right, "ends on the addition");
@@ -407,7 +413,7 @@ fn a_selection_ending_in_deletions_stays_on_the_old_side() {
     app.composer.as_mut().unwrap().editor.set_text("drop these");
     act(&mut app, &Action::CommitComment);
 
-    let anchor = app.drafts[0].anchor;
+    let anchor = *app.drafts[0].anchor().unwrap();
     assert_eq!(anchor.start_side, Side::Left);
     assert_eq!(anchor.side, Side::Left);
     assert_eq!((anchor.start_line, anchor.end_line), (2, 3));
@@ -1431,7 +1437,7 @@ fn e_reopens_the_draft_instead_of_stacking_another() {
     press(&mut app, "c");
     app.composer.as_mut().unwrap().editor.set_text("first pass");
     act(&mut app, &Action::CommitComment);
-    let rows = app.drafts[0].rows.clone();
+    let rows = app.drafts[0].rows().unwrap().clone();
 
     press(&mut app, "e");
     assert_eq!(
@@ -1448,7 +1454,11 @@ fn e_reopens_the_draft_instead_of_stacking_another() {
 
     assert_eq!(app.drafts.len(), 1);
     assert_eq!(app.drafts[0].body, "second pass");
-    assert_eq!(app.drafts[0].rows, rows, "editing keeps the original span");
+    assert_eq!(
+        *app.drafts[0].rows().unwrap(),
+        rows,
+        "editing keeps the original span"
+    );
 
     // Emptying a reopened draft is how it gets thrown away.
     press(&mut app, "e");

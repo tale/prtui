@@ -14,6 +14,7 @@ use crate::layout::measure::{self, clip_text_to_budget, text_width, truncate};
 use crate::layout::rows::{
     self, BodyRow, Connector, GUTTER, ImageSlice, Row, ThreadState,
 };
+use crate::layout::wrap;
 use crate::model::{LineKind, ReviewThread};
 use crate::renderer::{Theme, markdown};
 use ratatui::Frame;
@@ -59,13 +60,8 @@ pub fn draw(
     let placements = draw_diff(frame, app, layout);
 
     draw_bottom_bar(frame, app, layout, pending_hint);
-    draw_composer(frame, app, layout.diff);
-    draw_submit(frame, app, layout.body);
-
-    // Images sit above the cells, so they would hide the floating overlays.
-    if app.composer.is_some() || app.submission.is_some() {
-        return Vec::new();
-    }
+    draw_composer(frame, app, layout);
+    draw_submit(frame, app, layout);
 
     placements
 }
@@ -343,6 +339,7 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) -> Vec<Placement> {
             Row::Code(index) => PaneRow::text(code_line(
                 app, *index, &drafts, threads, width, theme,
             )),
+            Row::FileDraft => PaneRow::text(file_draft_line(app, width, theme)),
             Row::Heading { state, count } => {
                 PaneRow::text(heading_line(*state, *count, width, theme))
             }
@@ -430,7 +427,9 @@ fn code_line<'a>(
     let has_thread = threads.iter().any(|thread| {
         !thread.is_outdated && thread.anchors_to(line) && !thread.is_resolved
     });
-    let has_draft = drafts.iter().any(|draft| draft.rows.contains(&index));
+    let has_draft = drafts
+        .iter()
+        .any(|draft| draft.rows().is_some_and(|rows| rows.contains(&index)));
 
     let (marker, marker_color) = match (has_draft, has_thread) {
         (true, _) => (" ✎", theme.orange),
@@ -624,6 +623,36 @@ const fn state_color(state: ThreadState, theme: Theme) -> Color {
 
 fn card_indent(width: usize) -> usize {
     GUTTER.min(width.saturating_sub(1))
+}
+
+/// The pending remark about the file as a whole. It has no line to sit under, so
+/// it leads the pane and carries the draft marker the gutter uses elsewhere.
+fn file_draft_line(app: &App, width: usize, theme: Theme) -> Line<'static> {
+    let indent = card_indent(width);
+    let label = "file note";
+    let body = app.file_draft().unwrap_or_default();
+    let summary = comment_summary(body, theme);
+    let budget = width
+        .saturating_sub(indent)
+        .saturating_sub(text_width(label) + 4);
+
+    thread_card_line(
+        indent,
+        width,
+        vec![
+            rows::card_span("✎ ", theme.orange, Modifier::BOLD, theme),
+            rows::card_span(label, theme.heading, Modifier::BOLD, theme),
+            rows::card_span("  ", theme.muted, Modifier::empty(), theme),
+            rows::card_span(
+                truncate(&summary, budget),
+                theme.code,
+                Modifier::empty(),
+                theme,
+            ),
+        ],
+        theme,
+        false,
+    )
 }
 
 fn heading_line(
@@ -845,24 +874,26 @@ fn thread_card_line(
     Line::from(spans)
 }
 
-/// Floats over the diff so the anchored lines stay visible while typing.
-fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
+/// Sits below the diff rather than over it, so the lines being commented on stay
+/// on screen while typing.
+fn draw_composer(frame: &mut Frame, app: &App, layout: &Layout) {
     let theme = app.theme();
-    let Some(composer) = app.composer.as_ref() else {
+    let (Some(composer), Some(rect)) = (app.composer.as_ref(), layout.composer)
+    else {
         return;
-    };
-
-    let height = 10.min(area.height);
-    let rect = Rect {
-        x: area.x,
-        y: area.y + area.height.saturating_sub(height),
-        width: area.width,
-        height,
     };
 
     let name = composer.path.rsplit('/').next().unwrap_or(&composer.path);
     let title = match &composer.target {
         Target::Reply { .. } => format!(" reply · {name} "),
+        Target::File { replacing } => {
+            let verb = if replacing.is_some() {
+                "edit file note"
+            } else {
+                "file note"
+            };
+            format!(" {verb} · {name} ")
+        }
         Target::Line {
             anchor, replacing, ..
         } => {
@@ -895,7 +926,7 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let block = overlay_block(title, theme.orange);
+    let block = docked_block(title, theme.orange);
     let inner = block.inner(rect);
 
     frame.render_widget(Clear, rect);
@@ -908,7 +939,7 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
     draw_editor_body(frame, &composer.editor, inner, theme, None);
 }
 
-fn overlay_block<'a>(title: String, color: Color) -> Block<'a> {
+fn docked_block<'a>(title: String, color: Color) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -919,8 +950,8 @@ fn overlay_block<'a>(title: String, color: Color) -> Block<'a> {
         ))
 }
 
-/// Draws a multiline editor scrolled to keep its cursor visible, and parks the
-/// terminal cursor where the next character will land.
+/// Draws a multiline editor with its long lines folded rather than scrolled
+/// sideways, and parks the terminal cursor where the next character will land.
 fn draw_editor_body(
     frame: &mut Frame,
     editor: &crate::app::editor::CommentEditor,
@@ -928,39 +959,45 @@ fn draw_editor_body(
     theme: Theme,
     placeholder: Option<&str>,
 ) {
-    let (cursor_row, cursor_byte) = editor.cursor();
     let lines = editor.lines();
-    let first_row =
-        cursor_row.saturating_sub(area.height.saturating_sub(1) as usize);
-    let cursor_column = text_width(&lines[cursor_row][..cursor_byte]);
-    let first_column =
-        cursor_column.saturating_sub(area.width.saturating_sub(1) as usize);
 
-    let is_empty = lines.iter().all(String::is_empty);
-    let visible: Vec<Line> = match placeholder.filter(|_| is_empty) {
-        Some(hint) => vec![Line::styled(
-            hint.to_string(),
-            Style::default()
-                .fg(theme.dim)
-                .add_modifier(Modifier::ITALIC),
-        )],
-        None => lines
-            .iter()
-            .skip(first_row)
-            .take(area.height as usize)
-            .map(|line| {
-                Line::styled(
-                    measure::window(line, first_column, area.width as usize),
-                    Style::default().fg(theme.code),
-                )
-            })
-            .collect(),
-    };
+    if let Some(hint) =
+        placeholder.filter(|_| lines.iter().all(String::is_empty))
+    {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                hint.to_string(),
+                Style::default()
+                    .fg(theme.dim)
+                    .add_modifier(Modifier::ITALIC),
+            )),
+            area,
+        );
+        frame.set_cursor_position((area.x, area.y));
+        return;
+    }
+
+    let wrapped = wrap::Wrapped::new(lines, area.width as usize);
+    let (line, byte) = editor.cursor();
+    let (cursor_row, cursor_column) = wrapped.locate(line, byte);
+
+    // Folding means the cursor can only ever leave the viewport vertically.
+    let height = area.height as usize;
+    let first_row = cursor_row.saturating_sub(height.saturating_sub(1));
+    let visible: Vec<Line> = wrapped
+        .rows()
+        .iter()
+        .skip(first_row)
+        .take(height)
+        .map(|row| {
+            Line::styled(wrapped.text(*row), Style::default().fg(theme.code))
+        })
+        .collect();
 
     frame.render_widget(Paragraph::new(visible), area);
     frame.set_cursor_position((
-        area.x + cursor_column.saturating_sub(first_column) as u16,
-        area.y + cursor_row.saturating_sub(first_row) as u16,
+        area.x + cursor_column as u16,
+        area.y + (cursor_row - first_row) as u16,
     ));
 }
 
@@ -994,19 +1031,14 @@ fn event_chips(active: ReviewEvent, theme: Theme) -> Vec<Span<'static>> {
         .collect()
 }
 
-fn draw_submit(frame: &mut Frame, app: &App, area: Rect) {
+/// Docked where the composer goes, for the same reason: the drafts being shipped
+/// stay readable behind the summary being written about them.
+fn draw_submit(frame: &mut Frame, app: &App, layout: &Layout) {
     let theme = app.theme();
-    let Some(submission) = app.submission.as_ref() else {
+    let (Some(submission), Some(rect)) =
+        (app.submission.as_ref(), layout.submit)
+    else {
         return;
-    };
-
-    let width = 64.min(area.width.saturating_sub(4)).max(1);
-    let height = 12.min(area.height.saturating_sub(2)).max(1);
-    let rect = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
     };
 
     let title = match app.drafts.len() {
@@ -1015,7 +1047,7 @@ fn draw_submit(frame: &mut Frame, app: &App, area: Rect) {
         count => format!(" submit review · {count} drafts "),
     };
 
-    let block = overlay_block(title, theme.accent);
+    let block = docked_block(title, theme.accent);
     let inner = block.inner(rect);
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
@@ -1281,6 +1313,7 @@ fn draw_key_hints(
             ("/", "search"),
             ("}", "next comment"),
             ("c", "comment"),
+            ("C", "file note"),
         ],
     };
 

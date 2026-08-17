@@ -13,7 +13,7 @@ use crate::layout::rows;
 use crate::model::{ChangedFile, PullRequest, ReviewThread};
 use crate::renderer::{Renderer, Segment, Theme, ThemeMode, markdown};
 use action::{Action, Motion};
-use draft::{Anchor, Draft};
+use draft::{Anchor, Attachment, Draft};
 use editor::CommentEditor;
 use mode::{Mode, Selection};
 use review::{Request, Sent, Submission};
@@ -37,6 +37,9 @@ pub enum Target {
     },
     /// A reply under an existing thread, addressed to its first comment.
     Reply { in_reply_to: u64 },
+    /// The whole file. `replacing` names the draft being revised, since a file
+    /// takes one remark rather than a stack of them.
+    File { replacing: Option<usize> },
 }
 
 /// An in-progress comment: the editor buffer plus where it will land.
@@ -226,6 +229,16 @@ impl App {
         self.current_file().map(|file| file.path.as_str())
     }
 
+    /// The pending file-level remark on the open file, if there is one.
+    pub fn file_draft(&self) -> Option<&str> {
+        let path = self.current_path()?;
+
+        self.drafts
+            .iter()
+            .find(|draft| draft.path == path && draft.is_file_level())
+            .map(|draft| draft.body.as_str())
+    }
+
     pub fn diff_len(&self) -> usize {
         self.current_file().map_or(0, |f| f.lines.len())
     }
@@ -298,6 +311,7 @@ impl App {
             }
 
             Action::StartComment => self.start_comment(),
+            Action::StartFileComment => self.start_file_comment(),
             Action::CommitComment => self.commit_comment(),
             Action::CancelComment => {
                 self.composer = None;
@@ -359,6 +373,33 @@ impl App {
         self.mode = Mode::Insert;
     }
 
+    /// A file takes a single remark, so `C` revises the existing one rather than
+    /// stacking another. Available from the tree too: no line is involved, so
+    /// there is nothing the diff pane is needed for.
+    fn start_file_comment(&mut self) {
+        let Some(path) = self.current_path().map(str::to_string) else {
+            self.status = "no file selected".into();
+            return;
+        };
+
+        let replacing = self
+            .drafts
+            .iter()
+            .position(|draft| draft.path == path && draft.is_file_level());
+        let mut editor = CommentEditor::default();
+        if let Some(index) = replacing {
+            editor.set_text(&self.drafts[index].body);
+        }
+
+        self.composer = Some(Composer {
+            editor,
+            target: Target::File { replacing },
+            path,
+        });
+        self.mode = Mode::Insert;
+        self.selection = None;
+    }
+
     /// Reopens the draft under the cursor with its body and span intact, so
     /// committing revises it instead of stacking a second comment.
     fn edit_draft(&mut self) {
@@ -372,14 +413,18 @@ impl App {
         };
 
         let draft = &self.drafts[index];
+        let Attachment::Lines { rows, anchor } = draft.attachment.clone()
+        else {
+            return;
+        };
         let mut editor = CommentEditor::default();
         editor.set_text(&draft.body);
 
         self.composer = Some(Composer {
             editor,
             target: Target::Line {
-                anchor: draft.anchor,
-                rows: draft.rows.clone(),
+                anchor,
+                rows,
                 replacing: Some(index),
             },
             path: draft.path.clone(),
@@ -844,34 +889,53 @@ impl App {
                 anchor,
                 rows,
                 replacing,
-            } => {
-                // Emptying a reopened draft is how it gets thrown away.
-                let Some(index) = replacing else {
-                    if body.is_empty() {
-                        self.status = "empty comment discarded".into();
-                        return;
-                    }
-
-                    self.drafts.push(Draft {
-                        path: composer.path,
-                        rows,
-                        anchor,
-                        body,
-                    });
-                    self.status = "draft saved".into();
-                    return;
-                };
-
-                if body.is_empty() {
-                    self.drafts.remove(index);
-                    self.status = "draft discarded".into();
-                    return;
-                }
-
-                self.drafts[index].body = body;
-                self.status = "draft updated".into();
-            }
+            } => self.save_draft(
+                composer.path,
+                Attachment::Lines { rows, anchor },
+                body,
+                replacing,
+            ),
+            Target::File { replacing } => self.save_draft(
+                composer.path,
+                Attachment::File,
+                body,
+                replacing,
+            ),
         }
+    }
+
+    /// Files a composed body as a draft, revising `replacing` when the composer
+    /// was reopened on one. Emptying a reopened draft is how it gets thrown away.
+    fn save_draft(
+        &mut self,
+        path: String,
+        attachment: Attachment,
+        body: String,
+        replacing: Option<usize>,
+    ) {
+        let Some(index) = replacing else {
+            if body.is_empty() {
+                self.status = "empty comment discarded".into();
+                return;
+            }
+
+            self.drafts.push(Draft {
+                path,
+                attachment,
+                body,
+            });
+            self.status = "draft saved".into();
+            return;
+        };
+
+        if body.is_empty() {
+            self.drafts.remove(index);
+            self.status = "draft discarded".into();
+            return;
+        }
+
+        self.drafts[index].body = body;
+        self.status = "draft updated".into();
     }
 
     fn toggle_pane(&mut self) {

@@ -47,6 +47,9 @@ pub enum Action {
     /// Open the composer for the cursor line, the visual selection, or the
     /// focused thread, whichever the cursor is on.
     StartComment,
+    /// Open the composer for the whole file, for a remark that belongs to no
+    /// particular line. Reopens the file's existing draft if it has one.
+    StartFileComment,
     CommitComment,
     CancelComment,
     /// Reopen the draft covering the cursor line.

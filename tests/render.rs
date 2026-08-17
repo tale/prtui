@@ -1329,3 +1329,152 @@ fn the_status_bar_paints_failures_and_outages_as_trouble() {
         assert!(!app.is_status_alarming(), "{note} should not alarm");
     }
 }
+
+/// Parks the cursor on a line a comment can actually anchor to; row zero of a
+/// patch is a hunk header, which GitHub will not take.
+fn park_on_code(app: &mut App) {
+    app.pane = Pane::Diff;
+    app.cursor = app
+        .current_file()
+        .expect("a file is open")
+        .lines
+        .iter()
+        .position(|line| line.kind != LineKind::Hunk)
+        .expect("the patch has a real line");
+}
+
+#[test]
+fn the_composer_takes_rows_from_the_diff_instead_of_covering_it() {
+    let mut app = load();
+    park_on_code(&mut app);
+
+    let full = layout_of(&app).diff_viewport();
+    act(&mut app, &Action::StartComment);
+    let docked = layout_of(&app);
+
+    assert!(
+        docked.diff_viewport() < full,
+        "the diff gives up rows to the composer, {} vs {full}",
+        docked.diff_viewport()
+    );
+    let composer = docked.composer.expect("composer is laid out");
+    assert_eq!(
+        composer.y,
+        docked.diff.y + docked.diff.height,
+        "the composer starts where the diff stops, so nothing overlaps"
+    );
+    assert!(docked.submit.is_none());
+}
+
+#[test]
+fn the_submit_form_docks_where_the_composer_does() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    act(&mut app, &Action::StartSubmit);
+
+    let layout = layout_of(&app);
+    let submit = layout.submit.expect("submit form is laid out");
+
+    assert_eq!(submit.x, layout.diff.x, "docked full width, not centred");
+    assert_eq!(submit.width, layout.diff.width);
+    assert_eq!(submit.y, layout.diff.y + layout.diff.height);
+    assert!(layout.composer.is_none());
+
+    let rendered = draw(&app);
+    assert!(rendered.contains("submit review"));
+    assert!(rendered.contains("summary (optional for approve)"));
+}
+
+#[test]
+fn a_long_comment_wraps_instead_of_scrolling_sideways() {
+    let mut app = load();
+    park_on_code(&mut app);
+    act(&mut app, &Action::StartComment);
+
+    let sentence = "the quick brown fox jumps over the lazy dog and keeps on \
+                    running well past the edge of any terminal column";
+    paste(&mut InputRouter::default(), &mut app, sentence);
+
+    let rendered = draw(&app);
+
+    // Every word survives on screen, which sideways scrolling could not manage.
+    for word in ["quick", "lazy", "terminal", "column"] {
+        assert!(rendered.contains(word), "{word} should be visible");
+    }
+    // Folding, not sideways scrolling: the start and the end of one typed line
+    // land on different rows.
+    let row_of = |needle: &str| {
+        rendered
+            .lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} should be visible"))
+    };
+    assert!(
+        row_of("quick") < row_of("column"),
+        "the sentence should fold onto later rows"
+    );
+}
+
+#[test]
+fn shift_c_writes_a_note_about_the_whole_file() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+
+    press(&mut app, "C");
+    assert_eq!(app.mode, prtui::app::mode::Mode::Insert);
+    assert!(draw(&app).contains("file note"));
+
+    paste(
+        &mut InputRouter::default(),
+        &mut app,
+        "this file needs splitting",
+    );
+    act(&mut app, &Action::CommitComment);
+
+    let draft = app.drafts.first().expect("a draft was saved");
+    assert!(draft.is_file_level());
+    assert!(draft.rows().is_none(), "a file note owns no rows");
+    assert_eq!(draft.body, "this file needs splitting");
+
+    // It has no line to hang under, so it leads the diff pane.
+    let rendered = draw(&app);
+    assert!(rendered.contains("this file needs splitting"));
+}
+
+#[test]
+fn a_file_note_is_revised_rather_than_stacked() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+
+    press(&mut app, "C");
+    paste(&mut InputRouter::default(), &mut app, "first thought");
+    act(&mut app, &Action::CommitComment);
+
+    press(&mut app, "C");
+    assert_eq!(
+        app.composer.as_ref().map(|composer| composer.editor.text()),
+        Some("first thought".to_string()),
+        "reopening loads the existing note"
+    );
+    paste(&mut InputRouter::default(), &mut app, " and a second");
+    act(&mut app, &Action::CommitComment);
+
+    assert_eq!(app.drafts.len(), 1, "one note per file");
+    assert_eq!(app.drafts[0].body, "first thought and a second");
+}
+
+#[test]
+fn a_file_note_ships_without_a_line() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    press(&mut app, "C");
+    paste(&mut InputRouter::default(), &mut app, "whole-file remark");
+    act(&mut app, &Action::CommitComment);
+
+    let payload = app.drafts[0].to_api();
+
+    assert_eq!(payload["subject_type"], "file");
+    assert!(payload.get("line").is_none(), "no line to point at");
+    assert!(payload.get("side").is_none());
+    assert_eq!(payload["body"], "whole-file remark");
+}

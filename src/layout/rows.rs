@@ -88,6 +88,8 @@ pub enum Connector {
 pub enum Row {
     /// A line of the patch, by index into [`ChangedFile::lines`].
     Code(usize),
+    /// The file-level draft, which answers to no line and leads the pane.
+    FileDraft,
     /// A pile's heading, drawn only when the pile holds more than one thread.
     Heading { state: ThreadState, count: usize },
     /// Stands in for the summaries the window left out: `… n earlier` above
@@ -147,12 +149,23 @@ pub struct View<'a> {
     pub window: usize,
     pub theme: Theme,
     pub images: &'a Images,
+    /// Body of the file-level draft on this file, if one is pending.
+    pub file_draft: Option<&'a str>,
+}
+
+/// A conversation about the file rather than any line in it.
+///
+/// GitHub leaves both line numbers null for those. An outdated thread also loses
+/// `line`, but keeps `originalLine`, which is what tells the two apart.
+pub fn is_file_level(thread: &ReviewThread) -> bool {
+    !thread.is_outdated && thread.anchor_line().is_none()
 }
 
 /// Every thread in `file` paired with the line it hangs under, in visit order.
 ///
-/// Outdated threads have no live anchor and pin after the last line, matching
-/// where they are drawn. A thread whose anchor is not in the patch at all is
+/// File-level threads belong to no line and lead the pane, so they pin to the
+/// first. Outdated ones have no live anchor and pin after the last, matching
+/// where each is drawn. A thread whose anchor is not in the patch at all is
 /// dropped: there is no row to reach it from.
 pub fn stops_for(file: &ChangedFile, threads: &[ReviewThread]) -> Vec<Stop> {
     let last = file.lines.len().saturating_sub(1);
@@ -160,7 +173,9 @@ pub fn stops_for(file: &ChangedFile, threads: &[ReviewThread]) -> Vec<Stop> {
         .iter()
         .enumerate()
         .filter_map(|(thread, review)| {
-            let source = if review.is_outdated {
+            let source = if is_file_level(review) {
+                0
+            } else if review.is_outdated {
                 last
             } else {
                 file.lines.iter().position(|line| review.anchors_to(line))?
@@ -170,9 +185,27 @@ pub fn stops_for(file: &ChangedFile, threads: &[ReviewThread]) -> Vec<Stop> {
         .collect();
 
     stops.sort_by_key(|stop| {
-        (stop.source, ThreadState::of(&threads[stop.thread]).rank())
+        let review = &threads[stop.thread];
+        (
+            stop.source,
+            u8::from(!is_file_level(review)),
+            ThreadState::of(review).rank(),
+        )
     });
     stops
+}
+
+/// Indices of the threads a predicate picks out, in their original order.
+fn select(
+    threads: &[ReviewThread],
+    is_wanted: impl Fn(&ReviewThread) -> bool,
+) -> Vec<usize> {
+    threads
+        .iter()
+        .enumerate()
+        .filter(|(_, review)| is_wanted(review))
+        .map(|(index, _)| index)
+        .collect()
 }
 
 pub struct Rows {
@@ -210,17 +243,27 @@ impl Rows {
             body_limit: 0,
         };
 
+        // Remarks about the file as a whole answer to no line, so they lead the
+        // pane the way GitHub puts them above a file's diff.
+        if builder.view.file_draft.is_some() {
+            builder.rows.push(Row::FileDraft);
+        }
+        builder.emit_piles(&select(threads, is_file_level));
+
         // A patch with no lines is still worth opening for its conversations,
-        // which have nowhere to anchor and so are listed on their own.
+        // since there is nothing for any of them to anchor to.
         if file.lines.is_empty() {
-            let all: Vec<usize> = (0..threads.len()).collect();
-            builder.emit_piles(&all);
+            builder
+                .emit_piles(&select(threads, |review| !is_file_level(review)));
             return builder.finish(stops_for(file, threads));
         }
 
         let mut by_source: Vec<Vec<usize>> = vec![Vec::new(); file.lines.len()];
         let mut outdated: Vec<usize> = Vec::new();
         for (thread, review) in threads.iter().enumerate() {
+            if is_file_level(review) {
+                continue;
+            }
             if review.is_outdated {
                 outdated.push(thread);
                 continue;

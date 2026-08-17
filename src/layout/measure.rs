@@ -3,7 +3,7 @@ use unicode_width::UnicodeWidthChar;
 
 const TAB: usize = 4;
 
-fn column_width(character: char, column: usize) -> usize {
+pub fn column_width(character: char, column: usize) -> usize {
     if character == '\t' {
         TAB - (column % TAB)
     } else {

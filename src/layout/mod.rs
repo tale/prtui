@@ -8,6 +8,7 @@
 
 pub mod measure;
 pub mod rows;
+pub mod wrap;
 
 use crate::app::App;
 use ratatui::layout::{Constraint, Direction, Rect};
@@ -29,6 +30,10 @@ pub struct Layout {
     /// The diff's outer area, including the rule its title sits on.
     pub diff_pane: Rect,
     pub diff: Rect,
+    /// The comment composer, docked below the diff while one is open.
+    pub composer: Option<Rect>,
+    /// The submit form, docked in the same place.
+    pub submit: Option<Rect>,
     pub rows: Rows,
 }
 
@@ -70,7 +75,7 @@ impl Layout {
             Some(_) => inside(inner),
             None => inner,
         });
-        let diff = inside(diff_pane);
+        let (diff, composer, submit) = dock(inside(diff_pane), app);
 
         Self {
             header,
@@ -81,6 +86,8 @@ impl Layout {
             files_prompt,
             diff_pane,
             diff,
+            composer,
+            submit,
             rows: build_rows(app, diff),
         }
     }
@@ -91,6 +98,43 @@ impl Layout {
 
     pub fn files_viewport(&self) -> usize {
         self.files_list.map_or(0, |list| list.height as usize)
+    }
+}
+
+/// Rows the composer takes, which is also the submit form's editor budget.
+const COMPOSER_HEIGHT: u16 = 10;
+
+/// The submit form adds a verdict row and the rule under it.
+const SUBMIT_HEIGHT: u16 = COMPOSER_HEIGHT + 2;
+
+/// Splits the diff so an open editor sits below it rather than over it.
+///
+/// Taking the rows instead of floating on them is what keeps the line being
+/// commented on visible: the diff viewport shrinks, so the cursor scrolls into
+/// what is left of it. Only one editor is ever open, and the submit form wins if
+/// both somehow are.
+fn dock(diff: Rect, app: &App) -> (Rect, Option<Rect>, Option<Rect>) {
+    let wanted = if app.submission.is_some() {
+        SUBMIT_HEIGHT
+    } else if app.composer.is_some() {
+        COMPOSER_HEIGHT
+    } else {
+        return (diff, None, None);
+    };
+
+    let rows = split(
+        diff,
+        Direction::Vertical,
+        [
+            Constraint::Min(0),
+            Constraint::Length(wanted.min(diff.height)),
+        ],
+    );
+
+    if app.submission.is_some() {
+        (rows[0], None, Some(rows[1]))
+    } else {
+        (rows[0], Some(rows[1]), None)
     }
 }
 
@@ -116,6 +160,7 @@ fn build_rows(app: &App, diff: Rect) -> Rows {
             window: rows::thread_window(diff.height as usize),
             theme: app.theme(),
             images: &app.images,
+            file_draft: app.file_draft(),
         },
     )
 }
