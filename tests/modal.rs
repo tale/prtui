@@ -3,7 +3,7 @@ use prtui::app::draft::Side;
 use prtui::app::input::{DispatchResult, InputRouter};
 use prtui::app::keymap::{Keymap, Resolution};
 use prtui::app::mode::Mode;
-use prtui::app::review::{Request, ReviewEvent, Sent};
+use prtui::app::review::{Failure, Request, ReviewEvent, Sent};
 use prtui::app::search::Match;
 use prtui::app::{App, Pane};
 use prtui::layout::Layout;
@@ -564,6 +564,38 @@ fn a_hunk_header_is_not_commentable() {
     assert_eq!(app.mode, Mode::Normal);
     assert!(app.composer.is_none());
     assert!(app.status.contains("cannot comment"));
+}
+
+/// GitHub anchors a span inside one hunk and rejects the whole review over one
+/// that is not, so the selection has to be refused before anything is typed.
+#[test]
+fn a_selection_across_a_hunk_header_is_not_commentable() {
+    let mut app = load();
+    app.files[app.selected_file] = file_from(
+        "@@ -1,2 +1,2 @@\n context\n+first hunk\n@@ -20,2 +20,2 @@\n more context\n+second hunk",
+    );
+    app.cursor = 1;
+
+    // context, +first hunk, @@ header, more context
+    press(&mut app, "V3j");
+    press(&mut app, "c");
+
+    assert!(app.composer.is_none());
+    assert!(app.status.contains("cannot comment"), "{}", app.status);
+    // The selection survives the refusal, so it can be shrunk and retried.
+    assert_eq!(app.mode, Mode::Visual);
+
+    let mut input = InputRouter::default();
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
+    );
+    app.cursor = 1;
+    press(&mut app, "V1j");
+    press(&mut app, "c");
+
+    assert_eq!(app.mode, Mode::Insert, "one hunk still takes a comment");
 }
 
 #[test]
@@ -1292,9 +1324,72 @@ fn a_failed_submission_keeps_the_drafts() {
     act(&mut app, &Action::CommitSubmit);
     assert_eq!(app.take_requests().len(), 1);
 
-    app.finish(Err("HTTP 422: line must be part of the diff".into()));
+    app.finish(Err(Failure::Review(
+        "HTTP 422: line must be part of the diff".into(),
+    )));
     assert_eq!(app.drafts.len(), 1);
     assert!(app.status.starts_with("error:"), "{}", app.status);
+
+    // The summary comes back with GitHub's reason attached, since the status
+    // bar shows one line of it and the reason is what has to be acted on.
+    let submission = app.submission.as_ref().expect("the overlay is back");
+    assert_eq!(app.mode, Mode::Submit);
+    assert_eq!(submission.editor.text(), "a summary");
+    assert_eq!(
+        submission.error.as_deref(),
+        Some("HTTP 422: line must be part of the diff")
+    );
+}
+
+/// Reopening over an editor would take the keyboard away mid-word, so the
+/// rejected review waits for the next `s` instead.
+#[test]
+fn a_rejection_mid_edit_holds_the_summary_until_asked_for() {
+    let mut app = load();
+    park_on_code(&mut app);
+
+    press(&mut app, "s");
+    choose(&mut app, ReviewEvent::RequestChanges);
+    app.submission.as_mut().unwrap().editor.set_text("fix this");
+    act(&mut app, &Action::CommitSubmit);
+    app.take_requests();
+
+    press(&mut app, "c");
+    app.finish(Err(Failure::Review("HTTP 422: nope".into())));
+    assert!(app.submission.is_none(), "the composer keeps the keyboard");
+    assert_eq!(app.mode, Mode::Insert);
+
+    act(&mut app, &Action::CancelComment);
+    press(&mut app, "s");
+    let submission = app.submission.as_ref().expect("the overlay is back");
+    assert_eq!(submission.editor.text(), "fix this");
+    assert_eq!(submission.event, ReviewEvent::RequestChanges);
+    assert_eq!(submission.error.as_deref(), Some("HTTP 422: nope"));
+}
+
+/// The drafts only retire when GitHub answers, so a second review sent before
+/// the first is answered would ship every one of them twice.
+#[test]
+fn a_second_review_waits_for_the_one_in_flight() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("once");
+    act(&mut app, &Action::CommitComment);
+
+    press(&mut app, "s");
+    app.submission.as_mut().unwrap().editor.set_text("summary");
+    act(&mut app, &Action::CommitSubmit);
+    assert_eq!(app.take_requests().len(), 1);
+
+    press(&mut app, "s");
+    app.submission.as_mut().unwrap().editor.set_text("again");
+    act(&mut app, &Action::CommitSubmit);
+
+    assert_eq!(app.status, "a review is already going out");
+    assert!(app.take_requests().is_empty());
+    assert_eq!(app.mode, Mode::Submit, "the overlay keeps what was typed");
+    assert_eq!(app.in_flight, 1);
 }
 
 #[test]

@@ -48,10 +48,15 @@ impl ReviewEvent {
 }
 
 /// The submit overlay: the verdict plus the summary that accompanies it.
+///
+/// `error` is what GitHub said the last time this review went out. It lives
+/// here rather than in the status bar because the bar has one line and a
+/// validation failure names a field, a rule and an offending value.
 #[derive(Default)]
 pub struct Submission {
     pub editor: CommentEditor,
     pub event: ReviewEvent,
+    pub error: Option<String>,
 }
 
 /// Work that has to leave the process. The app queues these rather than
@@ -83,6 +88,23 @@ pub enum Sent {
     Review(usize),
     Reply,
     Resolution(bool),
+}
+
+/// Why a request came back empty-handed. A review is the one kind the app tells
+/// apart: it leaves a summary and a pile of drafts behind, and both have to be
+/// handed back rather than dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    Review(String),
+    Other(String),
+}
+
+impl Failure {
+    pub fn message(&self) -> &str {
+        let (Self::Review(message) | Self::Other(message)) = self;
+
+        message
+    }
 }
 
 #[cfg(test)]

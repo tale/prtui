@@ -3,7 +3,7 @@ use clap::{Parser, ValueEnum};
 use futures_core::Stream;
 use prtui::app::App;
 use prtui::app::input::InputRouter;
-use prtui::app::review::{Request, Sent};
+use prtui::app::review::{Failure, Request, Sent};
 use prtui::images::{self, Image, Images, Support};
 use prtui::layout::Layout;
 use prtui::model::{self, ChangedFile, PullRequest};
@@ -95,7 +95,7 @@ enum Message {
     /// GitHub is having an incident that explains a failure already shown.
     Outage(String),
     /// One outbound request finished, successfully or not.
-    Sent(Result<Sent, String>),
+    Sent(Result<Sent, Failure>),
 }
 
 /// Pull metadata again so a posted reply or a resolved thread shows up in the
@@ -160,21 +160,24 @@ fn spawn_request(
                 gh::submit_review(&repo, number, event.as_api(), body, comments)
                     .await
                     .map(|()| Sent::Review(count))
+                    .map_err(|err| Failure::Review(err.to_string()))
             }
             Request::Reply { in_reply_to, body } => {
                 gh::reply(&repo, number, in_reply_to, body)
                     .await
                     .map(|()| Sent::Reply)
+                    .map_err(|err| Failure::Other(err.to_string()))
             }
             Request::Resolve {
                 thread_id,
                 is_resolved,
             } => gh::set_resolved(&repo, thread_id, is_resolved)
                 .await
-                .map(|()| Sent::Resolution(is_resolved)),
+                .map(|()| Sent::Resolution(is_resolved))
+                .map_err(|err| Failure::Other(err.to_string())),
         };
 
-        let _ = tx.send(Message::Sent(outcome.map_err(|err| err.to_string())));
+        let _ = tx.send(Message::Sent(outcome));
     });
 }
 

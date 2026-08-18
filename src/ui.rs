@@ -1051,6 +1051,10 @@ fn event_chips(active: ReviewEvent, theme: Theme) -> Vec<Span<'static>> {
         .collect()
 }
 
+/// Rows the last rejection gets before it is cut off. A validation failure runs
+/// to a couple of lines; anything longer is a wall of JSON.
+const REJECTION_ROWS: usize = 3;
+
 /// Docked where the composer goes, for the same reason: the drafts being shipped
 /// stay readable behind the summary being written about them.
 fn draw_submit(frame: &mut Frame, app: &App, layout: &Layout) {
@@ -1092,12 +1096,39 @@ fn draw_submit(frame: &mut Frame, app: &App, layout: &Layout) {
         },
     );
 
+    let reason = submission.error.as_deref().unwrap_or_default();
+    let rows: Vec<&str> = wrap::fragments(reason, inner.width as usize)
+        .into_iter()
+        .take(REJECTION_ROWS)
+        .filter(|fragment| !fragment.is_empty())
+        .map(|fragment| &reason[fragment.start..fragment.end])
+        .collect();
+
+    for (offset, text) in rows.iter().enumerate() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                (*text).to_string(),
+                Style::default().fg(theme.danger),
+            )),
+            Rect {
+                y: inner.y + 2 + offset as u16,
+                height: 1,
+                ..inner
+            },
+        );
+    }
+
+    let used = 2 + rows.len() as u16;
+    if inner.height <= used {
+        return;
+    }
+
     draw_editor_body(
         frame,
         &submission.editor,
         Rect {
-            y: inner.y + 2,
-            height: inner.height - 2,
+            y: inner.y + used,
+            height: inner.height - used,
             ..inner
         },
         theme,

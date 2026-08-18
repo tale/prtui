@@ -16,7 +16,7 @@ use action::{Action, Motion};
 use draft::{Anchor, Attachment, Draft};
 use editor::CommentEditor;
 use mode::{Mode, Selection};
-use review::{Request, Sent, Submission};
+use review::{Failure, Request, Sent, Submission};
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
@@ -82,6 +82,9 @@ pub struct App {
     pub selection: Option<Selection>,
     pub composer: Option<Composer>,
     pub submission: Option<Submission>,
+    /// The review handed to the network, held so a rejection can give the
+    /// summary back instead of making the user retype it.
+    sending: Option<Submission>,
     pub file_filter: Option<CommentEditor>,
     pub search: Option<CommentEditor>,
     pub selected_file: usize,
@@ -132,6 +135,7 @@ impl App {
             selection: None,
             composer: None,
             submission: None,
+            sending: None,
             file_filter: None,
             search: None,
             selected_file: 0,
@@ -518,15 +522,26 @@ impl App {
     fn start_submit(&mut self, layout: &Layout) {
         self.composer = None;
         self.selection = None;
-        self.submission = Some(Submission::default());
+        // A review GitHub rejected comes back with the summary that was typed
+        // for it, so a second attempt revises rather than retypes.
+        let rejected = self.sending.take_if(|held| held.error.is_some());
+        self.submission = Some(rejected.unwrap_or_default());
         self.mode = Mode::Submit;
         self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
-    /// A rejected submission leaves the overlay open, so a missing summary is
+    /// One review goes out at a time. A second would post twice, since the
+    /// drafts only retire once the first is answered.
+    fn is_review_sending(&self) -> bool {
+        self.sending
+            .as_ref()
+            .is_some_and(|held| held.error.is_none())
+    }
+
+    /// A refused submission leaves the overlay open, so a missing summary is
     /// typed rather than retyped.
     fn commit_submit(&mut self) {
-        let Some(submission) = self.submission.as_ref() else {
+        let Some(mut submission) = self.submission.take() else {
             return;
         };
 
@@ -535,12 +550,22 @@ impl App {
 
         // An approval is a verdict in itself, so a bare one with no summary and
         // no inline comments is the whole point rather than an empty review.
-        if body.is_empty() && event.requires_body() {
-            self.status = format!("{} needs a summary", event.label());
+        let refusal = if self.is_review_sending() {
+            Some("a review is already going out".to_string())
+        } else if body.is_empty() && event.requires_body() {
+            Some(format!("{} needs a summary", event.label()))
+        } else {
+            None
+        };
+
+        if let Some(refusal) = refusal {
+            self.status = refusal;
+            self.submission = Some(submission);
             return;
         }
 
-        self.submission = None;
+        submission.error = None;
+        self.sending = Some(submission);
         self.mode = Mode::Normal;
 
         let comments: Vec<serde_json::Value> =
@@ -566,19 +591,45 @@ impl App {
 
     /// Reports one request's outcome. Drafts survive a failed submission so the
     /// review can be sent again rather than retyped.
-    pub fn finish(&mut self, outcome: Result<Sent, String>) {
+    pub fn finish(&mut self, outcome: Result<Sent, Failure>) {
         self.in_flight = self.in_flight.saturating_sub(1);
 
         self.status = match outcome {
             Ok(Sent::Review(count)) => {
                 self.drafts.drain(..count.min(self.drafts.len()));
+                self.sending = None;
                 "review submitted".into()
             }
             Ok(Sent::Reply) => "reply posted".into(),
             Ok(Sent::Resolution(true)) => "thread resolved".into(),
             Ok(Sent::Resolution(false)) => "thread unresolved".into(),
-            Err(error) => format!("error: {error}"),
+            Err(failure) => {
+                let status = format!("error: {}", failure.message());
+                if let Failure::Review(error) = failure {
+                    self.reject_review(error);
+                }
+
+                status
+            }
         };
+    }
+
+    /// A rejected review keeps everything it was made of. The summary goes back
+    /// into the overlay with GitHub's reason above it, since the reason names a
+    /// field and a rule and the status bar shows one line of it.
+    fn reject_review(&mut self, error: String) {
+        let Some(submission) = self.sending.as_mut() else {
+            return;
+        };
+
+        submission.error = Some(error);
+
+        // Reopening mid-edit would steal the keyboard from whatever the user
+        // moved on to; the overlay waits for the next `s` instead.
+        if self.mode == Mode::Normal && self.composer.is_none() {
+            self.submission = self.sending.take();
+            self.mode = Mode::Submit;
+        }
     }
 
     /// `/` means "narrow what I am looking at", which is the file list from the

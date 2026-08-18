@@ -1,6 +1,7 @@
 use prtui::app::action::Action;
 use prtui::app::input::DispatchResult;
 use prtui::app::input::InputRouter;
+use prtui::app::review::Failure;
 use prtui::app::{App, Pane};
 use prtui::images::Placement;
 use prtui::images::{self, CellSize, Images, Support};
@@ -1292,6 +1293,37 @@ fn the_submit_overlay_shows_the_verdict_and_the_draft_count() {
     let rendered = draw(&app);
     assert!(rendered.contains("ship it"), "{rendered}");
     assert!(!rendered.contains("summary (optional"), "{rendered}");
+}
+
+/// The status bar holds one line and a rejection names a field, a rule and the
+/// value that broke it, so the overlay is where it has to be readable.
+#[test]
+fn a_rejected_review_shows_what_github_said_above_the_summary() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+
+    act(&mut app, &Action::StartSubmit);
+    app.submission
+        .as_mut()
+        .unwrap()
+        .editor
+        .set_text("please fix");
+    act(&mut app, &Action::CommitSubmit);
+    app.take_requests();
+
+    let reason = "submitting review failed: HTTP 422: Unprocessable Entity: \
+                  pull_request_review_thread.line: must be part of the diff";
+    app.finish(Err(Failure::Review(reason.into())));
+
+    let rendered = draw(&app);
+    assert!(
+        rendered.contains("must be part of the diff"),
+        "the end of the reason is the part worth reading:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("please fix"),
+        "the summary comes back with it:\n{rendered}"
+    );
 }
 
 #[test]

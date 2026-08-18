@@ -229,17 +229,37 @@ fn next_page(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-fn is_transient_status(status: StatusCode) -> bool {
-    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+/// Which failures a request may be sent through again.
+///
+/// A read is safe to repeat however it failed. A write is not: a timeout or a
+/// 502 says the answer went missing, never that the review was not filed, and
+/// repeating one posts it twice. Only a refusal proves the request never ran.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Retry {
+    Transient,
+    Refusals,
 }
 
-const fn is_transient_transport(error: &ureq::Error) -> bool {
-    matches!(
-        error,
-        ureq::Error::Io(_)
-            | ureq::Error::Timeout(_)
-            | ureq::Error::ConnectionFailed
-    )
+fn is_retryable_status(retry: Retry, status: StatusCode) -> bool {
+    match retry {
+        Retry::Transient => {
+            status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+        }
+        Retry::Refusals => status == StatusCode::TOO_MANY_REQUESTS,
+    }
+}
+
+const fn is_retryable_transport(retry: Retry, error: &ureq::Error) -> bool {
+    match retry {
+        Retry::Transient => matches!(
+            error,
+            ureq::Error::Io(_)
+                | ureq::Error::Timeout(_)
+                | ureq::Error::ConnectionFailed
+        ),
+        // The connection never opened, so nothing was ever sent down it.
+        Retry::Refusals => matches!(error, ureq::Error::ConnectionFailed),
+    }
 }
 
 /// `Retry-After` is what GitHub sends when it is throttling rather than
@@ -253,19 +273,20 @@ fn backoff(response: Option<&Response<Body>>, attempt: u32) -> Duration {
         .min(RETRY_CEILING)
 }
 
-/// Retries the transient failures and hands back everything else — including a
+/// Retries what `retry` allows and hands back everything else — including a
 /// 4xx — for the caller to report. Runs inside `spawn_blocking`, so sleeping
 /// here parks a worker rather than the runtime.
 fn send(
+    retry: Retry,
     call: impl Fn() -> Result<Response<Body>, ureq::Error>,
 ) -> Result<Response<Body>> {
     for attempt in 0..RETRY_LIMIT {
         let delay = match call() {
-            Ok(response) if !is_transient_status(response.status()) => {
+            Ok(response) if !is_retryable_status(retry, response.status()) => {
                 return Ok(response);
             }
             Ok(response) => backoff(Some(&response), attempt),
-            Err(error) if !is_transient_transport(&error) => {
+            Err(error) if !is_retryable_transport(retry, &error) => {
                 return Err(error).context("request to GitHub failed");
             }
             Err(_) => backoff(None, attempt),
@@ -278,7 +299,7 @@ fn send(
 }
 
 fn get(url: &str, accept: &str, token: Option<&str>) -> Result<Response<Body>> {
-    send(|| {
+    send(Retry::Transient, || {
         let mut request = agent()
             .get(url)
             .header("accept", accept)
@@ -297,8 +318,9 @@ fn post(
     url: &str,
     token: Option<&str>,
     body: &serde_json::Value,
+    retry: Retry,
 ) -> Result<Response<Body>> {
-    send(|| {
+    send(retry, || {
         let mut request = agent()
             .post(url)
             .header("accept", JSON_ACCEPT)
@@ -323,7 +345,7 @@ fn graphql(
     what: &str,
 ) -> Result<serde_json::Value> {
     let body = serde_json::json!({ "query": query, "variables": variables });
-    let mut response = post(url, token, &body)?;
+    let mut response = post(url, token, &body, Retry::Transient)?;
     check(&mut response, what)?;
 
     let val: serde_json::Value = response
@@ -434,7 +456,7 @@ pub async fn submit_review(
     }
 
     tokio::task::spawn_blocking(move || {
-        let mut response = post(&url, Some(&token), &payload)?;
+        let mut response = post(&url, Some(&token), &payload, Retry::Refusals)?;
         check(&mut response, "submitting review")
     })
     .await
@@ -458,7 +480,7 @@ pub async fn reply(
         serde_json::json!({ "body": body, "in_reply_to": in_reply_to });
 
     tokio::task::spawn_blocking(move || {
-        let mut response = post(&url, Some(&token), &payload)?;
+        let mut response = post(&url, Some(&token), &payload, Retry::Refusals)?;
         check(&mut response, "posting reply")
     })
     .await
@@ -501,7 +523,7 @@ pub async fn fetch_asset(url: &str) -> Result<Vec<u8>> {
     let url = url.to_string();
 
     tokio::task::spawn_blocking(move || {
-        let mut response = send(|| {
+        let mut response = send(Retry::Transient, || {
             let mut request = agent()
                 .get(&url)
                 .config()
@@ -634,6 +656,37 @@ mod tests {
         );
         assert_eq!(next_page(&last), None);
         assert_eq!(next_page(&HeaderMap::new()), None);
+    }
+
+    /// A write that timed out may already have been filed. Sending it again
+    /// posts the review twice, which is worse than reporting the timeout.
+    #[test]
+    fn only_a_refusal_lets_a_write_go_out_again() {
+        let timeout = ureq::Error::Timeout(ureq::Timeout::Global);
+        assert!(is_retryable_transport(Retry::Transient, &timeout));
+        assert!(!is_retryable_transport(Retry::Refusals, &timeout));
+
+        // Nothing ever went down a connection that never opened.
+        let refused = ureq::Error::ConnectionFailed;
+        assert!(is_retryable_transport(Retry::Refusals, &refused));
+
+        for retry in [Retry::Transient, Retry::Refusals] {
+            assert!(is_retryable_status(retry, StatusCode::TOO_MANY_REQUESTS));
+            assert!(!is_retryable_status(
+                retry,
+                StatusCode::UNPROCESSABLE_ENTITY
+            ));
+        }
+
+        // A 502 says the answer went missing, never that the write did not run.
+        assert!(is_retryable_status(
+            Retry::Transient,
+            StatusCode::BAD_GATEWAY
+        ));
+        assert!(!is_retryable_status(
+            Retry::Refusals,
+            StatusCode::BAD_GATEWAY
+        ));
     }
 
     #[test]

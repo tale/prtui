@@ -124,13 +124,19 @@ pub fn anchor_for(
     file: &ChangedFile,
     rows: RangeInclusive<usize>,
 ) -> Option<Anchor> {
-    let selected: Vec<&DiffLine> = file
-        .lines
-        .get(rows)
-        .unwrap_or_default()
-        .iter()
-        .filter(|line| line.kind != LineKind::Hunk)
-        .collect();
+    let rows = file.lines.get(rows).unwrap_or_default();
+    let first = rows.iter().position(|line| line.kind != LineKind::Hunk)?;
+    let last = rows.iter().rposition(|line| line.kind != LineKind::Hunk)?;
+
+    // A span lives inside one hunk. Running over a header puts unrelated parts
+    // of the file at either end of it, and GitHub refuses the whole review for
+    // it, so the selection is refused here instead.
+    let selected = &rows[first..=last];
+    if selected.iter().any(|line| line.kind == LineKind::Hunk) {
+        return None;
+    }
+
+    let selected: Vec<&DiffLine> = selected.iter().collect();
 
     let is_removal = |line: &&&DiffLine| line.kind == LineKind::Removed;
     let deleted: Vec<u32> = selected
