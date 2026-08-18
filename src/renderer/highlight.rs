@@ -195,6 +195,41 @@ fn push_range(ranges: &mut Vec<Range<usize>>, range: Range<usize>) {
     ranges.push(range);
 }
 
+/// Rejoins runs that a common space split apart.
+///
+/// Whitespace tokens match across almost any pair of lines, so two changed
+/// words with a space between them come back as two marks with a hole punched
+/// between them. On a line where every word changed, that hole appears between
+/// each pair and the line renders as a checkerboard.
+fn join_across_whitespace(
+    text: &str,
+    ranges: Vec<Range<usize>>,
+) -> Vec<Range<usize>> {
+    let mut joined: Vec<Range<usize>> = Vec::new();
+
+    for range in ranges {
+        let is_gap_blank = joined.last().is_some_and(|last| {
+            text.get(last.end..range.start)
+                .is_some_and(|gap| gap.chars().all(char::is_whitespace))
+        });
+
+        match joined.last_mut() {
+            Some(last) if is_gap_blank => last.end = range.end,
+            _ => joined.push(range),
+        }
+    }
+
+    joined
+}
+
+/// Whether the marks cover the line rather than picking things out of it.
+fn is_rewritten(text: &str, ranges: &[Range<usize>]) -> bool {
+    let marked: usize = ranges.iter().map(ExactSizeIterator::len).sum();
+    let content = text.trim().len();
+
+    content > 0 && marked * 10 >= content * 9
+}
+
 /// Byte ranges of the tokens that changed between a removed and added line.
 fn emphasis_ranges(
     old: &str,
@@ -227,7 +262,10 @@ fn emphasis_ranges(
         }
     }
 
-    (old_ranges, new_ranges)
+    (
+        join_across_whitespace(old, old_ranges),
+        join_across_whitespace(new, new_ranges),
+    )
 }
 
 /// Pairs balanced removed/added runs. Unbalanced runs remain fully tinted;
@@ -259,8 +297,19 @@ fn build_emphasis(lines: &[DiffLine]) -> Vec<Option<Vec<Range<usize>>>> {
         }
 
         for (old_index, new_index) in removed.zip(added) {
-            let (old_ranges, new_ranges) =
-                emphasis_ranges(&lines[old_index].text, &lines[new_index].text);
+            let old_text = &lines[old_index].text;
+            let new_text = &lines[new_index].text;
+            let (old_ranges, new_ranges) = emphasis_ranges(old_text, new_text);
+
+            // Two lines with nothing in common are a rewrite, not an edit.
+            // Marking every token of both says what the line's own tint
+            // already says, in a louder color.
+            if is_rewritten(old_text, &old_ranges)
+                || is_rewritten(new_text, &new_ranges)
+            {
+                continue;
+            }
+
             emphasis[old_index] = Some(old_ranges);
             emphasis[new_index] = Some(new_ranges);
         }
@@ -440,6 +489,73 @@ mod tests {
         for range in new {
             assert!("let tea = 1".get(range).is_some());
         }
+    }
+
+    /// A space matches across almost any pair of lines. Dropping it from the
+    /// run leaves a hole at every word boundary, which reads as a checkerboard
+    /// rather than as a marked phrase.
+    #[test]
+    fn a_common_space_does_not_break_a_marked_phrase() {
+        let (old, new) =
+            emphasis_ranges("alpha beta gamma", "delta epsilon gamma");
+
+        assert_eq!(old, vec![0..10], "alpha beta");
+        assert_eq!(new, vec![0..13], "delta epsilon");
+    }
+
+    #[test]
+    fn a_rewritten_line_is_tinted_whole_rather_than_token_marked() {
+        let lines = vec![
+            DiffLine {
+                kind: LineKind::Removed,
+                text: "# Registration stub: GitHub only registers workflows"
+                    .into(),
+                old_line: Some(1),
+                new_line: None,
+            },
+            DiffLine {
+                kind: LineKind::Added,
+                text: "# Creates a presenter copy of a demo baseline".into(),
+                old_line: None,
+                new_line: Some(1),
+            },
+        ];
+
+        let emphasis = build_emphasis(&lines);
+        assert!(emphasis[0].is_none(), "{:?}", emphasis[0]);
+        assert!(emphasis[1].is_none(), "{:?}", emphasis[1]);
+    }
+
+    /// The point of the word diff: an edit inside a line still gets marked.
+    #[test]
+    fn an_edited_argument_is_still_picked_out_of_its_line() {
+        let lines = vec![
+            DiffLine {
+                kind: LineKind::Removed,
+                text: "    let total = compute(alpha, options);".into(),
+                old_line: Some(1),
+                new_line: None,
+            },
+            DiffLine {
+                kind: LineKind::Added,
+                text: "    let total = compute(beta, options);".into(),
+                old_line: None,
+                new_line: Some(1),
+            },
+        ];
+
+        let emphasis = build_emphasis(&lines);
+        let marked = |index: usize, text: &str| {
+            emphasis[index]
+                .as_ref()
+                .expect("an edit keeps its marks")
+                .iter()
+                .map(|range| text[range.clone()].to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(marked(0, &lines[0].text), vec!["alpha"]);
+        assert_eq!(marked(1, &lines[1].text), vec!["beta"]);
     }
 
     #[test]
