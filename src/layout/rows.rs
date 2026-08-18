@@ -12,10 +12,10 @@
 //! length depends on how its markdown wraps — that content is rendered here
 //! because its row count is a layout fact.
 
-use super::wrap::{self, Fragment};
 use crate::model::{ChangedFile, DiffLine, LineKind, ReviewThread};
 use crate::renderer::Theme;
 use crate::renderer::markdown::{self, Block as MarkdownBlock};
+use crate::text::wrap::{self, Fragment};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use std::borrow::Cow;

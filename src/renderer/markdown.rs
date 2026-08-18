@@ -1,8 +1,9 @@
 use super::Theme;
+use crate::text::wrap;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use std::ops::Range;
 
 #[derive(Default)]
 struct StyledLine {
@@ -634,100 +635,101 @@ fn attribute(tag: &str, name: &str) -> Option<String> {
     Some(value[..value.find(quote)?].to_string())
 }
 
+/// One styled line as a single string, plus the style covering each byte range.
+///
+/// Wrapping needs to know where the text breaks, and the styles only have to
+/// follow. Flattening first is what lets the break points come from
+/// [`crate::text::wrap`] rather than a second folding algorithm living here.
+struct Flattened {
+    text: String,
+    runs: Vec<(Range<usize>, Style)>,
+    is_collapsing: bool,
+}
+
+impl Flattened {
+    fn new(spans: Vec<Span<'static>>, is_collapsing: bool) -> Self {
+        let mut flat = Self {
+            text: String::new(),
+            runs: Vec::new(),
+            is_collapsing,
+        };
+
+        for span in spans {
+            for character in span.content.chars() {
+                // Prose keeps one space where it was written with several,
+                // since that is the break the fold is allowed to take. A code
+                // block keeps every column it came with.
+                if is_collapsing && character.is_whitespace() {
+                    if !flat.text.is_empty() && !flat.text.ends_with(' ') {
+                        flat.push(' ', span.style);
+                    }
+                    continue;
+                }
+
+                flat.push(character, span.style);
+            }
+        }
+
+        flat
+    }
+
+    fn push(&mut self, character: char, style: Style) {
+        let start = self.text.len();
+        self.text.push(character);
+
+        match self.runs.last_mut() {
+            Some((range, last)) if *last == style => {
+                range.end = self.text.len();
+            }
+            _ => self.runs.push((start..self.text.len(), style)),
+        }
+    }
+
+    /// The spans of one folded row. Prose drops the space the break consumed;
+    /// a code block keeps its trailing columns.
+    fn row(&self, range: &Range<usize>) -> Vec<Span<'static>> {
+        let end = if self.is_collapsing {
+            range.start + self.text[range.clone()].trim_end().len()
+        } else {
+            range.end
+        };
+
+        let mut spans = Vec::new();
+        for (run, style) in &self.runs {
+            let start = run.start.max(range.start);
+            let stop = run.end.min(end);
+            if start < stop {
+                push_span(&mut spans, &self.text[start..stop], *style);
+            }
+        }
+
+        spans
+    }
+}
+
 fn wrap_line(line: StyledLine, width: usize) -> Vec<Line<'static>> {
     if line.spans.is_empty() {
         return vec![Line::default()];
     }
-    if line.preserve_whitespace {
-        return wrap_preserving_whitespace(line.spans, width);
+
+    let flat = Flattened::new(line.spans, !line.preserve_whitespace);
+    if flat.text.is_empty() {
+        return Vec::new();
     }
 
-    let mut rows = Vec::new();
-    let mut current = Vec::new();
-    let mut used = 0;
-    let mut pending_space: Option<Style> = None;
+    let ranges: Vec<Range<usize>> = if line.preserve_whitespace {
+        wrap::fragments(&flat.text, width)
+            .into_iter()
+            .map(|fragment| fragment.start..fragment.end)
+            .collect()
+    } else {
+        wrap::folds(&flat.text, width)
+    };
 
-    for span in line.spans {
-        for (token, whitespace) in text_tokens(&span.content) {
-            if whitespace {
-                if used > 0 {
-                    pending_space = Some(span.style);
-                }
-                continue;
-            }
-
-            let token_width = UnicodeWidthStr::width(token.as_str());
-            let space_width = usize::from(pending_space.is_some() && used > 0);
-            if used > 0 && used + space_width + token_width > width {
-                rows.push(Line::from(std::mem::take(&mut current)));
-                used = 0;
-                pending_space = None;
-            }
-
-            if let Some(space_style) = pending_space.take().filter(|_| used > 0)
-            {
-                push_span(&mut current, " ", space_style);
-                used += 1;
-            }
-            push_hard_wrapped(
-                &mut rows,
-                &mut current,
-                &mut used,
-                &token,
-                span.style,
-                width,
-            );
-        }
-    }
-
-    if !current.is_empty() {
-        rows.push(Line::from(current));
-    }
-    rows
-}
-
-fn wrap_preserving_whitespace(
-    spans: Vec<Span<'static>>,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let mut rows = Vec::new();
-    let mut current = Vec::new();
-    let mut used = 0;
-    for span in spans {
-        for character in span.content.chars() {
-            let character_width =
-                UnicodeWidthChar::width(character).unwrap_or(0);
-            if used > 0 && used + character_width > width {
-                rows.push(Line::from(std::mem::take(&mut current)));
-                used = 0;
-            }
-            push_span(&mut current, character.to_string(), span.style);
-            used += character_width;
-        }
-    }
-    if !current.is_empty() {
-        rows.push(Line::from(current));
-    }
-    rows
-}
-
-fn push_hard_wrapped(
-    rows: &mut Vec<Line<'static>>,
-    current: &mut Vec<Span<'static>>,
-    used: &mut usize,
-    text: &str,
-    style: Style,
-    width: usize,
-) {
-    for character in text.chars() {
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if *used > 0 && *used + character_width > width {
-            rows.push(Line::from(std::mem::take(current)));
-            *used = 0;
-        }
-        push_span(current, character.to_string(), style);
-        *used += character_width;
-    }
+    ranges
+        .iter()
+        .map(|range| Line::from(flat.row(range)))
+        .collect()
 }
 
 fn push_span(
@@ -744,24 +746,6 @@ fn push_span(
     } else {
         spans.push(Span::styled(text, style));
     }
-}
-
-fn text_tokens(text: &str) -> Vec<(String, bool)> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut whitespace = None;
-    for character in text.chars() {
-        let is_whitespace = character.is_whitespace();
-        if whitespace.is_some_and(|value| value != is_whitespace) {
-            tokens.push((std::mem::take(&mut current), whitespace.unwrap()));
-        }
-        whitespace = Some(is_whitespace);
-        current.push(character);
-    }
-    if let Some(whitespace) = whitespace {
-        tokens.push((current, whitespace));
-    }
-    tokens
 }
 
 fn strip_html(raw: &str) -> String {
@@ -798,6 +782,61 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn rows(body: &str, width: usize) -> Vec<String> {
+        render(body, width, Theme::dark())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn prose_folds_on_spaces_and_carries_its_styles_over() {
+        assert_eq!(
+            rows("the **quick brown** fox jumps", 12),
+            ["the quick", "brown fox", "jumps"],
+            "the space the break consumed does not trail the row"
+        );
+
+        // The emphasis has to survive the break it straddles.
+        let line = &render("the **quick brown** fox", 12, Theme::dark())[0];
+        let bold: String = line
+            .spans
+            .iter()
+            .filter(|span| span.style.add_modifier.contains(Modifier::BOLD))
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(bold, "quick");
+    }
+
+    #[test]
+    fn a_word_wider_than_the_row_is_cut_rather_than_lost() {
+        assert_eq!(
+            rows("supercalifragilistic", 8),
+            ["supercal", "ifragili", "stic"]
+        );
+    }
+
+    /// A fenced block is laid out by column, so its indentation is structure
+    /// rather than whitespace to collapse.
+    #[test]
+    fn a_code_block_keeps_the_columns_it_was_written_with() {
+        let body = "```rust
+fn main() {
+    let x = 1;
+}
+```";
+
+        assert_eq!(
+            rows(body, 40),
+            ["┌─ rust", "│ fn main() {", "│     let x = 1;", "│ }", "└─"]
+        );
     }
 
     #[test]

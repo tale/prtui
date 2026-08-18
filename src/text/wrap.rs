@@ -6,6 +6,7 @@
 //! buffer and becomes one of the wrap — so both come from here together.
 
 use super::measure;
+use std::ops::Range;
 
 /// One visual row: the buffer line it came from and the slice of it shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,22 +145,33 @@ impl<'a> Wrapped<'a> {
     }
 }
 
-fn fold(text: &str, width: usize, line: usize, rows: &mut Vec<Row>) {
-    if text.is_empty() || width == 0 {
-        rows.push(Row {
-            line,
-            start: 0,
-            end: 0,
-        });
-        return;
-    }
-
+/// Byte ranges of `text` that each fit `width` columns, breaking on spaces.
+///
+/// This is the one place prose folding is decided. An empty line still yields a
+/// range, since a blank line occupies a row like any other.
+pub fn folds(text: &str, width: usize) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
     let mut start = 0;
-    while start < text.len() {
+
+    while width > 0 && start < text.len() {
         let end = start + break_at(&text[start..], width);
-        rows.push(Row { line, start, end });
+        ranges.push(start..end);
         start = end;
     }
+
+    if ranges.is_empty() {
+        ranges.push(0..0);
+    }
+
+    ranges
+}
+
+fn fold(text: &str, width: usize, line: usize, rows: &mut Vec<Row>) {
+    rows.extend(folds(text, width).into_iter().map(|range| Row {
+        line,
+        start: range.start,
+        end: range.end,
+    }));
 }
 
 /// How many bytes of `text` fit in `width` columns.
