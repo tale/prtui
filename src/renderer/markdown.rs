@@ -519,16 +519,6 @@ pub fn render(body: &str, width: usize, theme: Theme) -> Vec<Line<'static>> {
         .collect()
 }
 
-pub fn image_urls(body: &str) -> Vec<String> {
-    build(body, Theme::dark())
-        .into_iter()
-        .filter_map(|piece| match piece {
-            Piece::Image { url, .. } => Some(url),
-            Piece::Line(_) => None,
-        })
-        .collect()
-}
-
 fn build(body: &str, theme: Theme) -> Vec<Piece> {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
@@ -880,14 +870,6 @@ mod tests {
                 ("https://example.com/b.png", "raw tag"),
             ]
         );
-        assert_eq!(
-            image_urls(markdown),
-            vec![
-                "https://example.com/a.png".to_string(),
-                "https://example.com/b.png".to_string(),
-            ]
-        );
-
         // Callers that cannot draw images still see the surrounding prose.
         let text = rendered_text(&render(markdown, 40, Theme::dark()));
         assert!(text.contains("Before"));
@@ -897,10 +879,20 @@ mod tests {
 
     #[test]
     fn treats_a_bare_attachment_url_as_the_image_it_renders_to() {
+        let urls = |body: &str| -> Vec<String> {
+            render_blocks(body, 40, Theme::dark())
+                .into_iter()
+                .filter_map(|block| match block {
+                    Block::Image { url, .. } => Some(url),
+                    Block::Text(_) => None,
+                })
+                .collect()
+        };
+
         let body = "this pattern is really weird to me.\n\n\
              https://github.com/user-attachments/assets/a9f8c825-a13f-4760-ae7b-6402471435aa";
         assert_eq!(
-            image_urls(body),
+            urls(body),
             vec![
                 "https://github.com/user-attachments/assets/a9f8c825-a13f-4760-ae7b-6402471435aa"
                     .to_string()
@@ -908,17 +900,17 @@ mod tests {
         );
 
         assert_eq!(
-            image_urls("look at https://example.com/shot.png inline"),
+            urls("look at https://example.com/shot.png inline"),
             Vec::<String>::new(),
             "a URL mixed into a sentence stays prose"
         );
         assert_eq!(
-            image_urls("https://example.com/pull/9000"),
+            urls("https://example.com/pull/9000"),
             Vec::<String>::new(),
             "an ordinary link is not an image"
         );
         assert_eq!(
-            image_urls("https://example.com/a.PNG?raw=1"),
+            urls("https://example.com/a.PNG?raw=1"),
             vec!["https://example.com/a.PNG?raw=1".to_string()]
         );
     }

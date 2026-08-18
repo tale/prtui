@@ -164,7 +164,6 @@ fn build_rows(app: &App, diff: Rect) -> Rows {
             width: diff.width as usize,
             window: rows::thread_window(diff.height as usize),
             theme: app.theme(),
-            images: &app.images,
             file_draft: app.file_draft(),
         },
     )

@@ -4,7 +4,6 @@ use futures_core::Stream;
 use prtui::app::App;
 use prtui::app::input::InputRouter;
 use prtui::app::review::{Failure, Request, Sent};
-use prtui::images::{self, Image, Images, Support};
 use prtui::layout::Layout;
 use prtui::model::{self, ChangedFile, PullRequest};
 use prtui::renderer::{Renderer, Segment, ThemeMode};
@@ -35,33 +34,6 @@ struct Args {
     /// Color theme; auto queries the terminal's actual background
     #[arg(long, value_enum, default_value_t = ThemeChoice::Auto)]
     theme: ThemeChoice,
-
-    /// Draw comment images with the kitty graphics protocol; auto asks the
-    /// terminal whether it supports them
-    #[arg(long, value_enum, default_value_t = ImageChoice::Auto)]
-    images: ImageChoice,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum ImageChoice {
-    Auto,
-    Always,
-    Never,
-}
-
-impl ImageChoice {
-    const fn queries_terminal(self) -> bool {
-        matches!(self, Self::Auto)
-    }
-
-    const fn resolve(self, has_graphics: bool) -> Support {
-        match self {
-            Self::Always => Support::Enabled,
-            Self::Never => Support::Disabled,
-            Self::Auto if has_graphics => Support::Enabled,
-            Self::Auto => Support::Unsupported,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -89,7 +61,6 @@ enum Message {
     Meta(Box<PullRequest>),
     Files(Vec<ChangedFile>),
     Highlight(ThemeMode, usize, Vec<Vec<Segment>>),
-    Image(String, Result<Image, String>),
     MetaFailed(String),
     FilesFailed(String),
     /// GitHub is having an incident that explains a failure already shown.
@@ -181,27 +152,6 @@ fn spawn_request(
     });
 }
 
-/// Download and decode off the UI thread; a slow or broken attachment must not
-/// stall review.
-fn spawn_image_fetch(url: String, tx: mpsc::UnboundedSender<Message>) {
-    tokio::spawn(async move {
-        let fetched = gh::fetch_asset(&url).await;
-        let decoded = match fetched {
-            Ok(bytes) => {
-                tokio::task::spawn_blocking(move || images::decode(&bytes))
-                    .await
-                    .unwrap_or_else(|error| Err(error.into()))
-            }
-            Err(error) => Err(error),
-        };
-
-        let _ = tx.send(Message::Image(
-            url,
-            decoded.map_err(|error| error.to_string()),
-        ));
-    });
-}
-
 /// Highlighting all files costs ~600ms single-threaded but only ~150ms across
 /// cores, which hides entirely inside the network wait.
 fn spawn_highlight_pass(
@@ -267,7 +217,7 @@ async fn main() -> Result<()> {
         follow_terminal,
     };
 
-    run(rx, tx_ui, renderer, session, args.images).await
+    run(rx, tx_ui, renderer, session).await
 }
 
 /// What the event loop needs to talk back to GitHub after the first paint.
@@ -283,26 +233,12 @@ async fn run(
     tx: mpsc::UnboundedSender<Message>,
     renderer: Renderer,
     session: Session,
-    images: ImageChoice,
 ) -> Result<()> {
     let follow_terminal = session.follow_terminal;
 
-    terminal::scope(
-        follow_terminal,
-        images.queries_terminal(),
-        async |terminal, events, has_graphics| {
-            event_loop(
-                terminal,
-                events,
-                &mut rx,
-                tx,
-                renderer,
-                &session,
-                images.resolve(has_graphics),
-            )
-            .await
-        },
-    )
+    terminal::scope(follow_terminal, async |terminal, events| {
+        event_loop(terminal, events, &mut rx, tx, renderer, &session).await
+    })
     .await
 }
 
@@ -313,12 +249,9 @@ async fn event_loop(
     tx: mpsc::UnboundedSender<Message>,
     renderer: Renderer,
     session: &Session,
-    support: Support,
 ) -> Result<()> {
     let follow_terminal = session.follow_terminal;
     let mut app = App::with_renderer(renderer);
-    app.images = Images::new(support);
-    app.images.set_cell_size(terminal::cell_size(terminal));
     let mut input = InputRouter::default();
     let mut pending: u8 = 2;
     let mut failure: Option<String> = None;
@@ -329,10 +262,6 @@ async fn event_loop(
     animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     while !app.should_quit {
-        for url in app.images.take_pending() {
-            spawn_image_fetch(url, tx.clone());
-        }
-
         for request in app.take_requests() {
             spawn_request(
                 request,
@@ -343,7 +272,7 @@ async fn event_loop(
         }
 
         if is_dirty {
-            present_frame(terminal, &mut app, &input.pending_hint())?;
+            present_frame(terminal, &app, &input.pending_hint())?;
             is_dirty = false;
         }
 
@@ -365,10 +294,6 @@ async fn event_loop(
                         is_current
                     }
                     Message::Highlight(_, _, _) => false,
-                    Message::Image(url, image) => {
-                        app.images.insert(url, image);
-                        true
-                    }
                     Message::Meta(pr) => {
                         app.set_meta(*pr);
                         pending = pending.saturating_sub(1);
@@ -449,10 +374,7 @@ async fn event_loop(
                 let layout = Layout::compute(terminal.get_frame().area(), &app);
 
                 match event {
-                    Event::WindowResized(_) => {
-                        app.images.set_cell_size(terminal::cell_size(terminal));
-                        is_dirty = true;
-                    }
+                    Event::WindowResized(_) => is_dirty = true,
                     Event::Key(key) => {
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                             input.dispatch_key(&mut app, key, &layout);
@@ -494,29 +416,19 @@ async fn event_loop(
     Ok(())
 }
 
-/// Draws one frame and paints its images inside the same synchronized update.
-/// Layout is computed first and shared by both, so what the renderer slices is
-/// exactly what the next keystroke will address.
+/// Layout is computed before the draw and shared with it, so what the renderer
+/// slices is exactly what the next keystroke will address.
 fn present_frame(
     terminal: &mut terminal::AppTerminal,
-    app: &mut App,
+    app: &App,
     pending_hint: &str,
 ) -> Result<()> {
     let layout = Layout::compute(terminal.get_frame().area(), app);
-    let placements = terminal::render(terminal, |frame| {
-        ui::draw(frame, app, &layout, pending_hint)
-    });
 
-    // The update has to be closed even if the draw failed, or the terminal sits
-    // waiting to be told the frame is done.
-    let overlay = placements
-        .as_ref()
-        .map(|placements| app.images.frame_commands(placements))
-        .unwrap_or_default();
-    let presented = terminal::present(terminal, &overlay);
-
-    placements.and(presented).context("drawing a frame")?;
-    Ok(())
+    terminal::render(terminal, |frame| {
+        ui::draw(frame, app, &layout, pending_hint);
+    })
+    .context("drawing a frame")
 }
 
 async fn next_event(

@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use prtui::images::CellSize;
 use prtui::renderer::ThemeMode;
 use ratatui::backend::TerminaBackend;
 use ratatui::{Frame, Terminal as RatatuiTerminal};
@@ -9,8 +8,8 @@ use std::ops::AsyncFnOnce;
 use std::rc::Rc;
 use std::time::Duration;
 use termina::escape::csi::{
-    Csi, Cursor, DecPrivateMode, DecPrivateModeCode, Edit, EraseInDisplay,
-    Keyboard, KittyKeyboardFlags, Mode, ThemeMode as TerminalThemeMode,
+    Csi, DecPrivateMode, DecPrivateModeCode, Keyboard, KittyKeyboardFlags,
+    Mode, ThemeMode as TerminalThemeMode,
 };
 use termina::escape::osc::{ColorOrQuery, DynamicColorNumber, Osc};
 use termina::{
@@ -140,131 +139,41 @@ fn theme_from_event(event: &Event) -> Option<ThemeMode> {
 }
 
 /// Runs asynchronous application code inside a fully restored Termina session.
-/// `probe_graphics` asks the terminal whether it speaks the kitty graphics
-/// protocol; the answer reaches `run` as its third argument.
-pub async fn scope<T, F>(
-    follow_theme: bool,
-    probe_graphics: bool,
-    run: F,
-) -> Result<T>
+pub async fn scope<T, F>(follow_theme: bool, run: F) -> Result<T>
 where
     F: for<'a> AsyncFnOnce(
         &'a mut AppTerminal,
         &'a mut EventStream,
-        bool,
     ) -> Result<T>,
 {
-    let mut session = TerminalSession::enter(follow_theme, probe_graphics)?;
-    let has_graphics = session.has_graphics;
-    run(&mut session.terminal, &mut session.events, has_graphics).await
+    let mut session = TerminalSession::enter(follow_theme)?;
+    run(&mut session.terminal, &mut session.events).await
 }
 
-/// One pixel transmitted and displayed with the cursor left free to move.
-const GRAPHICS_PROBE: &str =
-    "\x1b_Gi=31,a=T,f=24,s=1,v=1,t=d,C=0,q=2;AAAA\x1b\\";
-
-/// Drop the probe image and its data again.
-const GRAPHICS_CLEANUP: &str = "\x1b_Ga=d,d=I,i=31,q=2\x1b\\";
-
-/// Ask the terminal what it can do instead of guessing from its name: place a
-/// one-cell image at home and request a cursor position report. A terminal that
-/// understands the protocol answers from column two, one that discarded the APC
-/// sequence answers from column one, and one that prints the payload as text
-/// answers from much further right.
-fn query_graphics(terminal: &mut SharedTerminal) -> io::Result<bool> {
-    write!(
-        terminal,
-        "{}{GRAPHICS_PROBE}{}",
-        Csi::Cursor(Cursor::default_position()),
-        Csi::Cursor(Cursor::RequestActivePositionReport),
-    )?;
-    terminal.flush()?;
-
-    let filter = |event: &Event| {
-        matches!(
-            event,
-            Event::Csi(Csi::Cursor(Cursor::ActivePositionReport { .. }))
-        )
-    };
-    let reported = terminal
-        .poll(filter, Some(Duration::from_millis(200)))?
-        .then(|| terminal.read(filter))
-        .transpose()?;
-
-    write!(
-        terminal,
-        "{GRAPHICS_CLEANUP}{}{}",
-        Csi::Cursor(Cursor::default_position()),
-        Csi::Edit(Edit::EraseInDisplay(EraseInDisplay::EraseDisplay)),
-    )?;
-    terminal.flush()?;
-
-    Ok(reported.is_some_and(|event| moved_one_cell(&event)))
-}
-
-/// The probe image covers exactly one cell, so a terminal that placed it leaves
-/// the cursor a step away — beside it, or at the start of the next row. Staying
-/// home means the sequence was discarded, and landing far right means it was
-/// printed as text.
-fn moved_one_cell(event: &Event) -> bool {
-    let Event::Csi(Csi::Cursor(Cursor::ActivePositionReport { line, col })) =
-        event
-    else {
-        return false;
-    };
-    let (line, col) = (line.get(), col.get());
-
-    (line, col) != (1, 1) && line <= 2 && col <= 4
-}
-
-/// Draw one frame inside a synchronized update and hand back whatever the
-/// render callback produced. The update stays open until [`present`] closes it,
-/// so anything that has to land with these cells still can — which is what lets
-/// the caller borrow app state again to build its image commands.
-///
-/// Every call must be followed by `present`, even on error, or the terminal is
-/// left waiting to be told the frame is complete.
-pub fn render<T>(
+/// Draw one frame inside a synchronized update, so a terminal that supports
+/// mode 2026 never shows a half-painted screen. Unsupported terminals ignore it.
+pub fn render(
     terminal: &mut AppTerminal,
-    render: impl FnOnce(&mut Frame) -> T,
-) -> io::Result<T> {
+    render: impl FnOnce(&mut Frame),
+) -> io::Result<()> {
     write!(
         terminal.backend_mut(),
         "{}",
         set_mode(DecPrivateModeCode::SynchronizedOutput)
     )?;
 
-    let mut produced = None;
-    terminal.draw(|frame| produced = Some(render(frame)))?;
+    let drawn = terminal.draw(|frame| render(frame)).map(|_| ());
 
-    // `Terminal::draw` always runs the callback, so the slot is filled unless
-    // it returned an error, which the `?` above already took.
-    produced.ok_or_else(|| io::Error::other("frame was never rendered"))
-}
-
-/// Write anything that belongs with the frame just drawn, close the
-/// synchronized update, and flush. Unsupported terminals ignore mode 2026.
-pub fn present(terminal: &mut AppTerminal, overlay: &str) -> io::Result<()> {
+    // The update has to be closed even if the draw failed, or the terminal sits
+    // waiting to be told the frame is done.
     write!(
         terminal.backend_mut(),
-        "{overlay}{}",
+        "{}",
         reset_mode(DecPrivateModeCode::SynchronizedOutput)
     )?;
-    terminal.backend_mut().flush()
-}
+    terminal.backend_mut().flush()?;
 
-/// Pixel size of one cell, when the platform reports the window in pixels.
-pub fn cell_size(terminal: &mut AppTerminal) -> Option<CellSize> {
-    use ratatui::backend::Backend;
-
-    let size = terminal.backend_mut().window_size().ok()?;
-    if size.columns_rows.width == 0 || size.columns_rows.height == 0 {
-        return None;
-    }
-
-    let width = size.pixels.width / size.columns_rows.width;
-    let height = size.pixels.height / size.columns_rows.height;
-    (width > 0 && height > 0).then_some(CellSize { width, height })
+    drawn
 }
 
 struct TerminalSession {
@@ -272,11 +181,10 @@ struct TerminalSession {
     events: EventStream,
     control: SharedTerminal,
     follow_theme: bool,
-    has_graphics: bool,
 }
 
 impl TerminalSession {
-    fn enter(follow_theme: bool, probe_graphics: bool) -> Result<Self> {
+    fn enter(follow_theme: bool) -> Result<Self> {
         let mut control = SharedTerminal::open().context("opening terminal")?;
         control.enter_raw_mode().context("enabling raw mode")?;
 
@@ -287,7 +195,7 @@ impl TerminalSession {
             let _ = restore_output(handle, follow_theme);
         });
 
-        let entered = (|| -> Result<(AppTerminal, EventStream, bool)> {
+        let entered = (|| -> Result<(AppTerminal, EventStream)> {
             let mut output = control.clone();
 
             write!(
@@ -312,19 +220,15 @@ impl TerminalSession {
             }
             output.flush().context("flushing terminal setup")?;
 
-            // Probed before the event stream parks its reader thread on the
-            // same input, so the position report cannot be swallowed by it.
-            let has_graphics =
-                probe_graphics && query_graphics(&mut output).unwrap_or(false);
             let events = EventStream::new(control.event_reader(), |_| true);
 
             let backend = TerminaBackend::new(output);
             let terminal = RatatuiTerminal::new(backend)
                 .context("initializing terminal")?;
-            Ok((terminal, events, has_graphics))
+            Ok((terminal, events))
         })();
 
-        let (terminal, events, has_graphics) = match entered {
+        let (terminal, events) = match entered {
             Ok(session) => session,
             Err(error) => {
                 let _ = restore_output(&mut control, follow_theme);
@@ -338,7 +242,6 @@ impl TerminalSession {
             events,
             control,
             follow_theme,
-            has_graphics,
         })
     }
 }
@@ -407,25 +310,6 @@ mod tests {
             theme_from_event(&report(RgbColor::new(255, 255, 255))),
             Some(ThemeMode::Light)
         );
-    }
-
-    #[test]
-    fn only_a_one_cell_advance_counts_as_graphics_support() {
-        let report = |line, col| {
-            Event::Csi(Csi::Cursor(Cursor::ActivePositionReport {
-                line: termina::OneBased::new(line).unwrap(),
-                col: termina::OneBased::new(col).unwrap(),
-            }))
-        };
-
-        assert!(moved_one_cell(&report(1, 2)));
-        // Some terminals wrap to the next row instead.
-        assert!(moved_one_cell(&report(2, 1)));
-        // The APC sequence was discarded.
-        assert!(!moved_one_cell(&report(1, 1)));
-        // The payload was printed as text.
-        assert!(!moved_one_cell(&report(1, 44)));
-        assert!(!moved_one_cell(&report(2, 9)));
     }
 
     #[test]

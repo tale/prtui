@@ -3,8 +3,6 @@ use prtui::app::input::DispatchResult;
 use prtui::app::input::InputRouter;
 use prtui::app::review::Failure;
 use prtui::app::{App, Pane};
-use prtui::images::Placement;
-use prtui::images::{self, CellSize, Images, Support};
 use prtui::layout::Layout;
 use prtui::layout::rows::{GUTTER, Row};
 use prtui::model::{LineKind, Side, parse_files, parse_meta};
@@ -63,22 +61,11 @@ fn summary(app: &App) -> (usize, usize) {
     app.search_summary(&layout_of(app))
 }
 
-/// Draws a frame and returns the escape sequences its images would be painted
-/// with, which is the pairing the event loop performs.
-fn paint_images(terminal: &mut Terminal<TestBackend>, app: &mut App) -> String {
-    let mut placements = Vec::new();
-    terminal
-        .draw(|frame| placements = paint(frame, app))
-        .unwrap();
-
-    app.images.frame_commands(&placements)
-}
-
 /// Renders one frame through the path the event loop uses: layout first, then
 /// draw against it.
-fn paint(frame: &mut Frame, app: &App) -> Vec<Placement> {
+fn paint(frame: &mut Frame, app: &App) {
     let layout = Layout::compute(frame.area(), app);
-    ui::draw(frame, app, &layout, "")
+    ui::draw(frame, app, &layout, "");
 }
 
 /// Drives the app the way the event loop does: raw keys through the keymap.
@@ -988,83 +975,10 @@ fn thread_with_image(app: &mut App) -> prtui::model::ReviewThread {
     thread
 }
 
+/// An attachment reads as the link it was, so a comment built around a
+/// screenshot still says what the screenshot was of.
 #[test]
-fn expanding_a_thread_queues_its_images() {
-    let mut app = load();
-    let thread = thread_with_image(&mut app);
-    show_thread(&mut app, &thread);
-    app.images = Images::new(Support::Enabled);
-    app.focused_thread = Some(thread.id.clone());
-
-    act(&mut app, &Action::Activate);
-
-    assert_eq!(app.images.take_pending(), vec![IMAGE_URL.to_string()]);
-}
-
-#[test]
-fn a_loaded_image_is_drawn_over_the_rows_it_reserves() {
-    let mut app = load();
-    let thread = thread_with_image(&mut app);
-    show_thread(&mut app, &thread);
-    app.images = Images::new(Support::Enabled);
-    app.images.set_cell_size(Some(CellSize {
-        width: 8,
-        height: 16,
-    }));
-    app.images.insert(
-        IMAGE_URL.into(),
-        images::decode(include_bytes!("fixtures/screenshot.png"))
-            .map_err(|err| err.to_string()),
-    );
-    app.focused_thread = Some(thread.id.clone());
-    app.expanded_thread = Some(thread.id.clone());
-
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    let commands = paint_images(&mut terminal, &mut app);
-
-    // 80x80 pixels over 8x16 cells is 10 columns and 5 rows.
-    assert!(commands.contains("\x1b_Ga=t,i=1,f=100,t=d,q=2,"));
-    assert!(
-        commands.contains("a=p,i=1,p=1,c=10,r=5,x=0,y=0,w=80,h=80,C=1,q=2"),
-        "expected a full-height placement, got {commands:?}"
-    );
-    assert!(!terminal.backend().to_string().contains("▭ shot"));
-}
-
-#[test]
-fn scrolling_past_an_image_crops_it_to_what_is_visible() {
-    let mut app = load();
-    let mut thread = thread_with_image(&mut app);
-    thread.comments[0].body =
-        format!("![shot]({IMAGE_URL})\n\n") + &paragraphs(20, "Paragraph");
-    app.threads_by_path
-        .insert(thread.path.clone(), vec![thread.clone()]);
-    show_thread(&mut app, &thread);
-    app.images = Images::new(Support::Enabled);
-    app.images.set_cell_size(Some(CellSize {
-        width: 8,
-        height: 16,
-    }));
-    app.images.insert(
-        IMAGE_URL.into(),
-        images::decode(include_bytes!("fixtures/screenshot.png"))
-            .map_err(|err| err.to_string()),
-    );
-    app.focused_thread = Some(thread.id.clone());
-    app.expanded_thread = Some(thread.id.clone());
-    app.thread_scroll = 3;
-
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    let commands = paint_images(&mut terminal, &mut app);
-
-    assert!(
-        commands.contains(",r=3,x=0,y=32,w=80,h=48,"),
-        "the scrolled-off rows should be cropped from the source, got {commands:?}"
-    );
-}
-
-#[test]
-fn terminals_without_graphics_support_keep_the_alt_text() {
+fn an_attachment_renders_as_its_alt_text() {
     let mut app = load();
     let thread = thread_with_image(&mut app);
     show_thread(&mut app, &thread);
@@ -1072,9 +986,8 @@ fn terminals_without_graphics_support_keep_the_alt_text() {
     app.expanded_thread = Some(thread.id.clone());
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    let commands = paint_images(&mut terminal, &mut app);
+    terminal.draw(|frame| paint(frame, &app)).unwrap();
 
-    assert!(commands.is_empty());
     assert!(terminal.backend().to_string().contains("▭ shot"));
 }
 
@@ -1097,55 +1010,6 @@ fn the_file_tree_marks_files_whose_threads_are_all_resolved() {
     assert!(
         rendered.lines().any(|line| line.contains("◇ 2")),
         "a settled conversation still marks its file, got:\n{rendered}"
-    );
-}
-
-#[test]
-fn an_undrawable_attachment_says_why() {
-    let mut app = load();
-    let thread = thread_with_image(&mut app);
-    show_thread(&mut app, &thread);
-    app.images = Images::new(Support::Enabled);
-    app.images
-        .insert(IMAGE_URL.into(), Err("video attachment".into()));
-    app.focused_thread = Some(thread.id.clone());
-    app.expanded_thread = Some(thread.id.clone());
-
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    terminal
-        .draw(|frame| {
-            paint(frame, &app);
-        })
-        .unwrap();
-    let rendered = terminal.backend().to_string();
-
-    assert!(
-        rendered.contains("▭ video attachment · shot"),
-        "the reason leads and the link still reads as itself, got:\n{rendered}"
-    );
-}
-
-#[test]
-fn a_terminal_that_failed_the_probe_says_so() {
-    let mut app = load();
-    let thread = thread_with_image(&mut app);
-    show_thread(&mut app, &thread);
-    app.images = Images::new(Support::Unsupported);
-    app.focused_thread = Some(thread.id.clone());
-    app.expanded_thread = Some(thread.id.clone());
-
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    terminal
-        .draw(|frame| {
-            paint(frame, &app);
-        })
-        .unwrap();
-
-    assert!(
-        terminal
-            .backend()
-            .to_string()
-            .contains("▭ no image support · shot")
     );
 }
 

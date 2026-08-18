@@ -7,11 +7,10 @@ pub mod mode;
 pub mod review;
 pub mod search;
 
-use crate::images::Images;
 use crate::layout::Layout;
 use crate::layout::rows;
 use crate::model::{ChangedFile, PullRequest, ReviewThread};
-use crate::renderer::{Renderer, Segment, Theme, ThemeMode, markdown};
+use crate::renderer::{Renderer, Segment, Theme, ThemeMode};
 use action::{Action, Motion};
 use draft::{Anchor, Attachment, Draft};
 use editor::CommentEditor;
@@ -76,7 +75,6 @@ pub struct App {
     pub files: Vec<ChangedFile>,
     pub threads_by_path: HashMap<String, Vec<ReviewThread>>,
     pub drafts: Vec<Draft>,
-    pub images: Images,
 
     pub mode: Mode,
     pub selection: Option<Selection>,
@@ -130,7 +128,6 @@ impl App {
             files: Vec::new(),
             threads_by_path: HashMap::new(),
             drafts: Vec::new(),
-            images: Images::default(),
             mode: Mode::Normal,
             selection: None,
             composer: None,
@@ -1014,31 +1011,6 @@ impl App {
         self.expanded_thread =
             (self.expanded_thread.as_deref() != Some(&id)).then_some(id);
         self.thread_scroll = 0;
-
-        if let Some(expanded) = self.expanded_thread.clone() {
-            self.request_thread_images(&expanded);
-        }
-    }
-
-    /// Comment images are only worth fetching once their thread is opened.
-    fn request_thread_images(&mut self, id: &str) {
-        if !self.images.is_supported() {
-            return;
-        }
-
-        let urls: Vec<String> = self
-            .threads_by_path
-            .values()
-            .flatten()
-            .find(|thread| thread.id == id)
-            .into_iter()
-            .flat_map(|thread| &thread.comments)
-            .flat_map(|comment| markdown::image_urls(&comment.body))
-            .collect();
-
-        for url in urls {
-            self.images.request(&url);
-        }
     }
 
     pub fn is_thread_expanded(&self, id: &str) -> bool {

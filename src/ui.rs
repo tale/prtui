@@ -8,12 +8,9 @@ use crate::app::draft::{Draft, Side};
 use crate::app::mode::Mode;
 use crate::app::review::ReviewEvent;
 use crate::app::{App, Pane, Target};
-use crate::images::Placement;
 use crate::layout::Layout;
 use crate::layout::measure::{self, clip_text_to_budget, text_width, truncate};
-use crate::layout::rows::{
-    self, BodyRow, Connector, GUTTER, ImageSlice, Row, ThreadState,
-};
+use crate::layout::rows::{self, BodyRow, Connector, GUTTER, Row, ThreadState};
 use crate::layout::wrap::{self, Fragment};
 use crate::model::{LineKind, ReviewThread};
 use crate::renderer::{Theme, markdown};
@@ -25,45 +22,23 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// One rendered row, plus the horizontal slice of an image it stands in for.
-/// The row itself stays blank: the terminal paints over it after the frame.
-struct PaneRow<'a> {
-    line: Line<'a>,
-    image: Option<ImageSlice>,
-}
-
-impl<'a> PaneRow<'a> {
-    const fn text(line: Line<'a>) -> Self {
-        Self { line, image: None }
-    }
-}
-
-/// Returns where this frame's images land, which the caller turns into escape
-/// sequences and writes inside the same synchronized update as the cells.
-pub fn draw(
-    frame: &mut Frame,
-    app: &App,
-    layout: &Layout,
-    pending_hint: &str,
-) -> Vec<Placement> {
+pub fn draw(frame: &mut Frame, app: &App, layout: &Layout, pending_hint: &str) {
     draw_header(frame, app, layout.header);
 
     if app.is_loading() {
         draw_loading(frame, app, layout.body);
         draw_bottom_bar(frame, app, layout, pending_hint);
-        return Vec::new();
+        return;
     }
 
     if layout.files_pane.is_some() {
         draw_files(frame, app, layout);
     }
-    let placements = draw_diff(frame, app, layout);
+    draw_diff(frame, app, layout);
 
     draw_bottom_bar(frame, app, layout, pending_hint);
     draw_composer(frame, app, layout);
     draw_submit(frame, app, layout);
-
-    placements
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -282,7 +257,7 @@ fn file_line(app: &App, index: usize, width: usize, theme: Theme) -> Line<'_> {
     ])
 }
 
-fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) -> Vec<Placement> {
+fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
     let theme = app.theme();
     let is_focused = app.pane == Pane::Diff;
     let area = layout.diff;
@@ -320,7 +295,7 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) -> Vec<Placement> {
 
     if app.current_file().is_none() {
         draw_centered(frame, area, "no diff selected", theme.dim);
-        return Vec::new();
+        return;
     }
 
     let width = area.width as usize;
@@ -331,31 +306,29 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) -> Vec<Placement> {
         .filter(|draft| Some(draft.path.as_str()) == app.current_path())
         .collect();
 
-    let rendered: Vec<PaneRow<'_>> = layout
+    let lines: Vec<Line<'_>> = layout
         .rows
         .window(app.diff_scroll, area.height as usize)
         .iter()
         .map(|row| match row {
-            Row::Code { source, fragment } => PaneRow::text(code_line(
+            Row::Code { source, fragment } => code_line(
                 app, *source, *fragment, &drafts, threads, width, theme,
-            )),
-            Row::FileDraft => PaneRow::text(file_draft_line(app, width, theme)),
+            ),
+            Row::FileDraft => file_draft_line(app, width, theme),
             Row::Heading { state, count } => {
-                PaneRow::text(heading_line(*state, *count, width, theme))
+                heading_line(*state, *count, width, theme)
             }
             Row::Hidden {
                 state,
                 count,
                 is_tail,
-            } => PaneRow::text(hidden_line(
-                *state, *count, *is_tail, width, theme,
-            )),
+            } => hidden_line(*state, *count, *is_tail, width, theme),
             Row::Summary {
                 thread,
                 state,
                 connector,
                 has_state_label,
-            } => PaneRow::text(summary_line(
+            } => summary_line(
                 app,
                 &threads[*thread],
                 *state,
@@ -363,16 +336,14 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) -> Vec<Placement> {
                 *has_state_label,
                 width,
                 theme,
-            )),
+            ),
             Row::Body { index, is_last } => {
                 body_row(layout.rows.body(*index), *is_last, width, theme)
             }
         })
         .collect();
 
-    let (lines, placements) = split_image_rows(rendered, area);
     frame.render_widget(Paragraph::new(lines), area);
-    placements
 }
 
 fn code_line<'a>(
@@ -594,45 +565,6 @@ fn split_by_matches(
     pieces
 }
 
-/// Splits rendered rows into the text the buffer draws and the image placements
-/// the terminal paints over them, merging each image's rows into one placement.
-fn split_image_rows(
-    rendered: Vec<PaneRow<'_>>,
-    area: Rect,
-) -> (Vec<Line<'_>>, Vec<Placement>) {
-    let mut lines = Vec::with_capacity(rendered.len());
-    let mut placements: Vec<Placement> = Vec::new();
-
-    for (index, row) in rendered.into_iter().enumerate() {
-        lines.push(row.line);
-
-        let Some(slice) = row.image else {
-            continue;
-        };
-        let screen_row = area.y + index as u16;
-        let continues = placements.last().is_some_and(|last| {
-            last.url == slice.url
-                && last.row + last.rows == screen_row
-                && last.skip_rows + last.rows == slice.row_index
-        });
-
-        match placements.last_mut() {
-            Some(last) if continues => last.rows += 1,
-            _ => placements.push(Placement {
-                url: slice.url,
-                column: area.x + slice.column,
-                row: screen_row,
-                cols: slice.cols,
-                rows: 1,
-                skip_rows: slice.row_index,
-                total_rows: slice.total_rows,
-            }),
-        }
-    }
-
-    (lines, placements)
-}
-
 const fn state_color(state: ThreadState, theme: Theme) -> Color {
     match state {
         ThreadState::Open => theme.purple,
@@ -816,9 +748,9 @@ fn body_row(
     is_last: bool,
     width: usize,
     theme: Theme,
-) -> PaneRow<'static> {
+) -> Line<'static> {
     let Some(body) = body else {
-        return PaneRow::text(Line::default());
+        return Line::default();
     };
 
     let mut spans = body.spans.clone();
@@ -832,10 +764,7 @@ fn body_row(
         ),
     );
 
-    PaneRow {
-        line: thread_card_line(card_indent(width), width, spans, theme, false),
-        image: body.image.clone(),
-    }
+    thread_card_line(card_indent(width), width, spans, theme, false)
 }
 
 fn comment_count(count: usize) -> String {

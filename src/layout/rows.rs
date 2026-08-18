@@ -13,7 +13,6 @@
 //! because its row count is a layout fact.
 
 use super::wrap::{self, Fragment};
-use crate::images::{Images, Status, Support};
 use crate::model::{ChangedFile, DiffLine, LineKind, ReviewThread};
 use crate::renderer::Theme;
 use crate::renderer::markdown::{self, Block as MarkdownBlock};
@@ -113,22 +112,10 @@ pub enum Row {
     Body { index: usize, is_last: bool },
 }
 
-/// A rendered line of an expanded conversation. `image` marks a row the
-/// terminal paints over after the frame, in which case the spans stay empty.
+/// A rendered line of an expanded conversation.
 #[derive(Debug, Clone)]
 pub struct BodyRow {
     pub spans: Vec<Span<'static>>,
-    pub image: Option<ImageSlice>,
-}
-
-/// The horizontal band of an image that one terminal row stands in for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageSlice {
-    pub url: String,
-    pub column: u16,
-    pub cols: u16,
-    pub row_index: u16,
-    pub total_rows: u16,
 }
 
 /// A thread paired with the source line it hangs under, in the order the cursor
@@ -150,7 +137,6 @@ pub struct View<'a> {
     /// Rows the expanded conversation may occupy before it scrolls.
     pub window: usize,
     pub theme: Theme,
-    pub images: &'a Images,
     /// Body of the file-level draft on this file, if one is pending.
     pub file_draft: Option<&'a str>,
 }
@@ -525,14 +511,12 @@ impl Builder<'_> {
                         theme,
                         true,
                     ),
-                    image: None,
                 });
             }
         }
 
         visible.extend(content[start..end].iter().map(|row| BodyRow {
             spans: row.spans.clone(),
-            image: row.image.clone(),
         }));
 
         if end < content.len() {
@@ -540,7 +524,6 @@ impl Builder<'_> {
                 .push(note(format!("↓ {} more", content.len() - end), theme));
         }
 
-        let column = (self.indent() + 3) as u16;
         let base = self.body.len();
         let last = visible.len().saturating_sub(1);
 
@@ -550,10 +533,7 @@ impl Builder<'_> {
                 is_last: offset == last,
             });
         }
-        self.body.extend(visible.into_iter().map(|row| BodyRow {
-            image: row.image.map(|image| ImageSlice { column, ..image }),
-            ..row
-        }));
+        self.body.extend(visible);
     }
 
     /// The whole conversation as rows, before the scroll window is applied.
@@ -567,7 +547,6 @@ impl Builder<'_> {
                 spans: comment_header(review, comment_index, theme, false),
                 comment_index,
                 is_header: true,
-                image: None,
             });
 
             for block in
@@ -578,7 +557,6 @@ impl Builder<'_> {
                         spans: line.spans,
                         comment_index,
                         is_header: false,
-                        image: None,
                     }),
                     MarkdownBlock::Image { url, alt } => {
                         content.extend(self.image_rows(
@@ -602,15 +580,14 @@ impl Builder<'_> {
                 )],
                 comment_index: 0,
                 is_header: true,
-                image: None,
             });
         }
 
         content
     }
 
-    /// A loaded image becomes blank rows carrying its slice; anything else stays
-    /// textual so the thread still reads on terminals that cannot draw it.
+    /// An image reads as the link it was: its alt text, or the URL when it
+    /// carries none.
     fn image_rows(
         &self,
         url: &str,
@@ -618,54 +595,14 @@ impl Builder<'_> {
         comment_index: usize,
         body_width: usize,
     ) -> Vec<ContentRow> {
-        let theme = self.view.theme;
-        let text = |spans| ContentRow {
-            spans,
-            comment_index,
-            is_header: false,
-            image: None,
-        };
-        let labelled = |reason: Option<&str>| -> Vec<ContentRow> {
-            markdown::image_lines(url, alt, reason, body_width, theme)
-                .into_iter()
-                .map(|line| text(line.spans))
-                .collect()
-        };
-
-        let max_rows = image_row_cap(self.view.window);
-        match self
-            .view
-            .images
-            .status(url, body_width as u16, max_rows as u16)
-        {
-            Status::Ready { cols, rows } if rows > 0 => (0..rows)
-                .map(|row_index| ContentRow {
-                    spans: Vec::new(),
-                    comment_index,
-                    is_header: false,
-                    image: Some(ImageSlice {
-                        url: url.to_string(),
-                        column: 0,
-                        cols,
-                        row_index,
-                        total_rows: rows,
-                    }),
-                })
-                .collect(),
-            Status::Loading => vec![text(vec![card_span(
-                super::measure::truncate("▭ loading image…", body_width),
-                theme.muted,
-                Modifier::empty(),
-                theme,
-            )])],
-            // Anything that will not be drawn still reads as the link it was,
-            // with the reason attached so a missing picture is never a mystery.
-            Status::Failed(reason) => labelled(Some(reason)),
-            Status::Off(Support::Unsupported) => {
-                labelled(Some("no image support"))
-            }
-            Status::Off(_) | Status::Ready { .. } => labelled(None),
-        }
+        markdown::image_lines(url, alt, None, body_width, self.view.theme)
+            .into_iter()
+            .map(|line| ContentRow {
+                spans: line.spans,
+                comment_index,
+                is_header: false,
+            })
+            .collect()
     }
 }
 
@@ -675,13 +612,6 @@ struct ContentRow {
     spans: Vec<Span<'static>>,
     comment_index: usize,
     is_header: bool,
-    image: Option<ImageSlice>,
-}
-
-/// Images never take the whole scroll window, so surrounding replies stay in
-/// view and a tall screenshot remains scrollable rather than jumping.
-fn image_row_cap(window: usize) -> usize {
-    window.saturating_sub(1).clamp(3, 24)
 }
 
 /// Rows an expanded conversation may occupy before it starts scrolling: about
@@ -695,7 +625,6 @@ pub fn thread_window(height: usize) -> usize {
 fn note(text: String, theme: Theme) -> BodyRow {
     BodyRow {
         spans: vec![card_span(text, theme.muted, Modifier::empty(), theme)],
-        image: None,
     }
 }
 

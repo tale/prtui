@@ -41,9 +41,6 @@ mutation($id:ID!) {
 
 const USER_AGENT: &str = concat!("prtui/", env!("CARGO_PKG_VERSION"));
 
-/// A comment attachment past this size is not worth stalling review for.
-const ASSET_LIMIT: u64 = 26_214_400;
-const ASSET_TIMEOUT: Duration = Duration::from_secs(20);
 const API_LIMIT: u64 = 64 * 1024 * 1024;
 const API_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -512,43 +509,6 @@ pub async fn set_resolved(
     })
     .await
     .context("thread resolution panicked")?
-}
-
-/// Download a comment attachment. Attachments on github.com itself are private
-/// to the repository, so they carry the CLI's token; the agent drops that header
-/// if the download redirects to a storage host.
-pub async fn fetch_asset(url: &str) -> Result<Vec<u8>> {
-    let authorized = url.starts_with("https://github.com/");
-    let token = if authorized { token().await } else { None };
-    let url = url.to_string();
-
-    tokio::task::spawn_blocking(move || {
-        let mut response = send(Retry::Transient, || {
-            let mut request = agent()
-                .get(&url)
-                .config()
-                .timeout_global(Some(ASSET_TIMEOUT))
-                .build();
-
-            if let Some(token) = &token {
-                request =
-                    request.header("authorization", format!("Bearer {token}"));
-            }
-
-            request.call()
-        })
-        .context("downloading attachment")?;
-        check(&mut response, "downloading attachment")?;
-
-        response
-            .body_mut()
-            .with_config()
-            .limit(ASSET_LIMIT)
-            .read_to_vec()
-            .context("attachment was too large or the download was cut short")
-    })
-    .await
-    .context("attachment fetch panicked")?
 }
 
 /// Statuspage ranks a component from `operational` up to `major_outage`.
