@@ -12,7 +12,7 @@
 //! length depends on how its markdown wraps — that content is rendered here
 //! because its row count is a layout fact.
 
-use crate::model::{ChangedFile, DiffLine, LineKind, ReviewThread};
+use crate::model::{ChangedFile, DiffLine, LineKind, ReviewThread, Side};
 use crate::renderer::Theme;
 use crate::renderer::markdown::{self, Block as MarkdownBlock};
 use crate::text::wrap::{self, Fragment};
@@ -157,6 +157,8 @@ pub fn is_file_level(thread: &ReviewThread) -> bool {
 /// dropped: there is no row to reach it from.
 pub fn stops_for(file: &ChangedFile, threads: &[ReviewThread]) -> Vec<Stop> {
     let last = file.lines.len().saturating_sub(1);
+    let anchored = resolve_anchors(file, threads);
+
     let mut stops: Vec<Stop> = threads
         .iter()
         .enumerate()
@@ -166,7 +168,7 @@ pub fn stops_for(file: &ChangedFile, threads: &[ReviewThread]) -> Vec<Stop> {
             } else if review.is_outdated {
                 last
             } else {
-                file.lines.iter().position(|line| review.anchors_to(line))?
+                anchored[thread]?
             };
             Some(Stop { source, thread })
         })
@@ -181,6 +183,75 @@ pub fn stops_for(file: &ChangedFile, threads: &[ReviewThread]) -> Vec<Stop> {
         )
     });
     stops
+}
+
+/// Threads anchored to one side, sorted by the line number each waits for.
+fn waiting_on(threads: &[ReviewThread], side: Side) -> Vec<(u32, usize)> {
+    let mut waiting: Vec<(u32, usize)> = threads
+        .iter()
+        .enumerate()
+        .filter(|(_, review)| {
+            review.side == side && !review.is_outdated && !is_file_level(review)
+        })
+        .filter_map(|(thread, review)| Some((review.anchor_line()?, thread)))
+        .collect();
+
+    waiting.sort_unstable();
+    waiting
+}
+
+/// The source line each thread hangs under, by thread index.
+///
+/// A hunk numbers its lines upward, so one cursor walks the sorted anchors
+/// alongside the patch rather than searching it once per thread. The next hunk
+/// starts over at its own number, which is what resets the cursor.
+fn resolve_anchors(
+    file: &ChangedFile,
+    threads: &[ReviewThread],
+) -> Vec<Option<usize>> {
+    let mut anchored: Vec<Option<usize>> = vec![None; threads.len()];
+
+    for side in [Side::Left, Side::Right] {
+        let waiting = waiting_on(threads, side);
+        if waiting.is_empty() {
+            continue;
+        }
+
+        let mut cursor = 0;
+        for (source, line) in file.lines.iter().enumerate() {
+            if line.kind == LineKind::Hunk {
+                cursor = 0;
+                continue;
+            }
+
+            let number = match side {
+                Side::Left => line.old_line,
+                Side::Right => line.new_line,
+            };
+            let Some(number) = number else {
+                continue;
+            };
+
+            while waiting
+                .get(cursor)
+                .is_some_and(|&(anchor, _)| anchor < number)
+            {
+                cursor += 1;
+            }
+
+            // A number can repeat across hunks, and the row it first appeared
+            // on is the one the thread is drawn against.
+            while let Some(&(anchor, thread)) = waiting.get(cursor) {
+                if anchor != number {
+                    break;
+                }
+                anchored[thread].get_or_insert(source);
+                cursor += 1;
+            }
+        }
+    }
+
+    anchored
 }
 
 /// Indices of the threads a predicate picks out, in their original order.
@@ -231,6 +302,11 @@ impl Rows {
             body_limit: 0,
         };
 
+        // Which line each thread hangs under is resolved once, here. The row
+        // list groups those stops by line and the cursor walks the same list,
+        // so neither side re-derives where a conversation attaches.
+        let stops = stops_for(file, threads);
+
         // Remarks about the file as a whole answer to no line, so they lead the
         // pane the way GitHub puts them above a file's diff.
         if builder.view.file_draft.is_some() {
@@ -243,24 +319,21 @@ impl Rows {
         if file.lines.is_empty() {
             builder
                 .emit_piles(&select(threads, |review| !is_file_level(review)));
-            return builder.finish(stops_for(file, threads));
+            return builder.finish(stops);
         }
 
         let mut by_source: Vec<Vec<usize>> = vec![Vec::new(); file.lines.len()];
         let mut outdated: Vec<usize> = Vec::new();
-        for (thread, review) in threads.iter().enumerate() {
+        for stop in &stops {
+            let review = &threads[stop.thread];
             if is_file_level(review) {
                 continue;
             }
             if review.is_outdated {
-                outdated.push(thread);
+                outdated.push(stop.thread);
                 continue;
             }
-            if let Some(source) =
-                file.lines.iter().position(|line| review.anchors_to(line))
-            {
-                by_source[source].push(thread);
-            }
+            by_source[stop.source].push(stop.thread);
         }
 
         let last = file.lines.len() - 1;
@@ -274,7 +347,7 @@ impl Rows {
             }
         }
 
-        builder.finish(stops_for(file, threads))
+        builder.finish(stops)
     }
 
     pub const fn len(&self) -> usize {
@@ -675,4 +748,122 @@ pub fn card_span(
             .fg(color)
             .add_modifier(modifier),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn line(kind: LineKind, old: Option<u32>, new: Option<u32>) -> DiffLine {
+        DiffLine {
+            kind,
+            text: "code".into(),
+            old_line: old,
+            new_line: new,
+        }
+    }
+
+    fn patch(lines: Vec<DiffLine>) -> ChangedFile {
+        ChangedFile {
+            path: Arc::from("a.rs"),
+            status: "modified".into(),
+            additions: 0,
+            deletions: 0,
+            lines,
+        }
+    }
+
+    fn thread(side: Side, anchor: u32) -> ReviewThread {
+        ReviewThread {
+            id: Arc::from("t"),
+            path: Arc::from("a.rs"),
+            line: Some(anchor),
+            original_line: Some(anchor),
+            start_line: None,
+            side,
+            start_side: None,
+            is_file_level: false,
+            is_resolved: false,
+            is_outdated: false,
+            can_resolve: true,
+            comments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_anchor_resolves_against_its_own_side() {
+        // A removed line carries only an old number, an added one only a new.
+        let file = patch(vec![
+            line(LineKind::Hunk, None, None),
+            line(LineKind::Removed, Some(10), None),
+            line(LineKind::Added, None, Some(10)),
+        ]);
+        let threads = vec![thread(Side::Left, 10), thread(Side::Right, 10)];
+
+        assert_eq!(
+            stops_for(&file, &threads),
+            [
+                Stop {
+                    source: 1,
+                    thread: 0
+                },
+                Stop {
+                    source: 2,
+                    thread: 1
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_later_hunk_resolves_from_its_own_numbers() {
+        let file = patch(vec![
+            line(LineKind::Hunk, None, None),
+            line(LineKind::Context, Some(1), Some(1)),
+            line(LineKind::Hunk, None, None),
+            line(LineKind::Context, Some(80), Some(80)),
+            line(LineKind::Context, Some(81), Some(81)),
+        ]);
+        let threads = vec![
+            thread(Side::Right, 81),
+            thread(Side::Right, 1),
+            thread(Side::Right, 40),
+        ];
+
+        // The walk leaves 81 behind while it is inside the first hunk, so the
+        // second has to start over. An anchor no line carries is dropped:
+        // there is no row to reach it from.
+        assert_eq!(
+            stops_for(&file, &threads),
+            [
+                Stop {
+                    source: 1,
+                    thread: 1
+                },
+                Stop {
+                    source: 4,
+                    thread: 0
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_number_repeated_across_hunks_keeps_its_first_row() {
+        let file = patch(vec![
+            line(LineKind::Hunk, None, None),
+            line(LineKind::Context, Some(5), Some(5)),
+            line(LineKind::Hunk, None, None),
+            line(LineKind::Context, Some(5), Some(5)),
+        ]);
+
+        assert_eq!(
+            stops_for(&file, &[thread(Side::Right, 5)]),
+            [Stop {
+                source: 1,
+                thread: 0
+            }]
+        );
+    }
 }
