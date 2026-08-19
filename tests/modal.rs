@@ -1073,18 +1073,28 @@ fn escape_restores_the_diff_position_the_search_previewed_away_from() {
     assert!(app.search.is_none());
 }
 
+/// The two boxes used to disagree: the diff was smartcase and the tree was
+/// unconditionally case-insensitive. One matcher now serves both.
 #[test]
-fn smartcase_ignores_case_until_the_query_carries_some() {
-    use prtui::app::search;
+fn the_tree_filter_reads_case_the_way_the_diff_search_does() {
+    let mut app = load();
 
-    assert!(search::is_match("Total Timeout", "timeout"));
-    assert!(search::is_match("Total Timeout", "Timeout"));
-    assert!(!search::is_match("Total Timeout", "TIMEOUT"));
-    assert!(!search::is_match("total timeout", "Timeout"));
+    app.is_files_visible = true;
+    app.pane = Pane::Files;
 
-    assert_eq!(search::ranges("ab AB ab", "ab"), vec![0..2, 3..5, 6..8]);
-    assert_eq!(search::ranges("ab AB ab", "AB"), vec![3..5]);
-    assert!(search::ranges("anything", "").is_empty());
+    press(&mut app, "/verify");
+    assert_eq!(
+        app.filtered_file_indices().len(),
+        2,
+        "lowercase ignores case"
+    );
+
+    act(&mut app, &Action::CancelFileFilter);
+    press(&mut app, "/Verify");
+    assert!(
+        app.filtered_file_indices().is_empty(),
+        "a capital makes the query exact, and no path spells it that way"
+    );
 }
 
 #[test]

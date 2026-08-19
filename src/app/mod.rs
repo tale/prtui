@@ -16,6 +16,7 @@ use draft::{Anchor, Attachment, Draft};
 use editor::CommentEditor;
 use mode::{Mode, Selection};
 use review::{Failure, Request, Sent, Submission};
+use search::Query;
 use std::collections::HashMap;
 use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
@@ -80,7 +81,7 @@ pub struct Focus<'a> {
     pub pane: Pane,
     pub thread: Option<&'a str>,
     pub expanded: Option<&'a str>,
-    pub query: Option<&'a str>,
+    pub query: Option<Query<'a>>,
 }
 
 impl Focus<'_> {
@@ -104,9 +105,7 @@ impl Focus<'_> {
 
     /// Byte ranges of the active query within one line of the diff.
     pub fn matches(&self, text: &str) -> Vec<Range<usize>> {
-        self.query
-            .filter(|query| !query.is_empty())
-            .map_or_else(Vec::new, |query| search::ranges(text, query))
+        self.query.map_or_else(Vec::new, |query| query.ranges(text))
     }
 }
 
@@ -343,7 +342,7 @@ impl App {
             pane: self.pane,
             thread: self.focused_thread.as_deref(),
             expanded: self.expanded_thread.as_deref(),
-            query: self.search_query(),
+            query: self.diff_query(),
         }
     }
 
@@ -877,6 +876,11 @@ impl App {
         self.land_on(hit.row(), hit.thread_id(), layout);
     }
 
+    /// What the diff is being searched for, with its case rule resolved.
+    fn diff_query(&self) -> Option<Query<'_>> {
+        self.search_query().and_then(Query::new)
+    }
+
     /// The search box holds a single line, so the query is a slice of it.
     pub fn search_query(&self) -> Option<&str> {
         self.search
@@ -888,8 +892,7 @@ impl App {
     /// Every hit in the open file, ordered the way the diff renders them: a code
     /// line, then the threads that hang beneath it.
     pub fn search_matches(&self, layout: &Layout) -> Vec<search::Match> {
-        let Some(query) = self.search_query().filter(|query| !query.is_empty())
-        else {
+        let Some(query) = self.diff_query() else {
             return Vec::new();
         };
         let Some(file) = self.current_file() else {
@@ -904,8 +907,8 @@ impl App {
             .map(|stop| (stop.source, &threads[stop.thread]))
             .filter(|(_, thread)| {
                 thread.comments.iter().any(|comment| {
-                    search::is_match(&comment.body, query)
-                        || search::is_match(&comment.author, query)
+                    query.is_match(&comment.body)
+                        || query.is_match(&comment.author)
                 })
             })
             .map(|(row, thread)| (row, thread.id.clone()))
@@ -913,7 +916,7 @@ impl App {
 
         let mut matches = Vec::new();
         for (row, line) in file.lines.iter().enumerate() {
-            if search::is_match(&line.text, query) {
+            if query.is_match(&line.text) {
                 matches.push(search::Match::Line(row));
             }
 
@@ -981,18 +984,25 @@ impl App {
         self.file_filter.as_ref().map(CommentEditor::text)
     }
 
+    /// The tree searches paths the same way the diff searches code, so a
+    /// capital in either box means the same thing.
+    fn tree_query(&self) -> Option<Query<'_>> {
+        self.file_filter
+            .as_ref()
+            .and_then(|editor| editor.lines().first())
+            .and_then(|line| Query::new(line))
+    }
+
     pub fn filtered_file_indices(&self) -> Vec<usize> {
-        let Some(query) = self.filter_query() else {
+        let Some(query) = self.tree_query() else {
             return (0..self.files.len()).collect();
         };
-        let query = query.to_lowercase();
 
         self.files
             .iter()
             .enumerate()
-            .filter_map(|(index, file)| {
-                file.path.to_lowercase().contains(&query).then_some(index)
-            })
+            .filter(|(_, file)| query.is_match(&file.path))
+            .map(|(index, _)| index)
             .collect()
     }
 
