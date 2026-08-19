@@ -242,11 +242,11 @@ fn normal_movement_visits_threads_between_source_lines() {
 
     press(&mut app, "j");
     assert_eq!(app.cursor, anchor);
-    assert_eq!(app.focused_thread.as_deref(), Some(first.id.as_str()));
+    assert_eq!(app.focused_thread.as_deref(), Some(&*first.id));
 
     press(&mut app, "j");
     assert_eq!(app.cursor, anchor);
-    assert_eq!(app.focused_thread.as_deref(), Some(second.id.as_str()));
+    assert_eq!(app.focused_thread.as_deref(), Some(&*second.id));
 
     press(&mut app, "j");
     assert_eq!(app.cursor, anchor + 1);
@@ -254,7 +254,7 @@ fn normal_movement_visits_threads_between_source_lines() {
 
     press(&mut app, "k");
     assert_eq!(app.cursor, anchor);
-    assert_eq!(app.focused_thread.as_deref(), Some(second.id.as_str()));
+    assert_eq!(app.focused_thread.as_deref(), Some(&*second.id));
 }
 
 #[test]
@@ -262,11 +262,11 @@ fn enter_toggles_the_focused_thread() {
     let mut app = load();
     let thread = park_on_unresolved_thread(&mut app);
     press(&mut app, "j");
-    assert_eq!(app.focused_thread.as_deref(), Some(thread.id.as_str()));
+    assert_eq!(app.focused_thread.as_deref(), Some(&*thread.id));
 
     let mut input = InputRouter::default();
     send(&mut input, &mut app, KeyCode::Enter.into());
-    assert_eq!(app.expanded_thread.as_deref(), Some(thread.id.as_str()));
+    assert_eq!(app.expanded_thread.as_deref(), Some(&*thread.id));
 
     send(&mut input, &mut app, KeyCode::Enter.into());
     assert!(app.expanded_thread.is_none());
@@ -295,8 +295,8 @@ fn expanded_thread_movement_scrolls_without_losing_focus() {
 
     press(&mut app, "j");
     assert_eq!(app.thread_scroll, 1);
-    assert_eq!(app.focused_thread.as_deref(), Some(thread.id.as_str()));
-    assert_eq!(app.expanded_thread.as_deref(), Some(thread.id.as_str()));
+    assert_eq!(app.focused_thread.as_deref(), Some(&*thread.id));
+    assert_eq!(app.expanded_thread.as_deref(), Some(&*thread.id));
 
     press(&mut app, "k");
     assert_eq!(app.thread_scroll, 0);
@@ -870,7 +870,7 @@ fn comment_jump_crosses_files_and_skips_resolved_threads() {
 
     assert_eq!(app.pane, Pane::Diff);
     assert_eq!(app.files[app.selected_file].path, unresolved.path);
-    assert_eq!(app.focused_thread.as_deref(), Some(unresolved.id.as_str()));
+    assert_eq!(app.focused_thread.as_deref(), Some(&*unresolved.id));
     assert!(
         unresolved.anchors_to(&app.files[app.selected_file].lines[app.cursor])
     );
@@ -910,7 +910,7 @@ fn comment_jump_steps_through_every_thread_in_a_file() {
         .iter()
         .enumerate()
         .map(|(index, &row)| prtui::model::ReviewThread {
-            id: format!("thread-{index}"),
+            id: format!("thread-{index}").into(),
             path: file.path.clone(),
             line: file.lines[row].new_line,
             original_line: None,
@@ -1037,18 +1037,18 @@ fn search_matches_comment_bodies_and_focuses_the_thread() {
     assert!(
         matches
             .iter()
-            .any(|hit| hit.thread_id() == Some(thread.id.as_str())),
+            .any(|hit| hit.thread_id() == Some(thread.id.clone())),
         "the comment body should match"
     );
 
     for _ in 0..matches.len() {
-        if app.focused_thread.as_deref() == Some(thread.id.as_str()) {
+        if app.focused_thread.as_deref() == Some(&*thread.id) {
             break;
         }
         press(&mut app, "n");
     }
 
-    assert_eq!(app.focused_thread.as_deref(), Some(thread.id.as_str()));
+    assert_eq!(app.focused_thread.as_deref(), Some(&*thread.id));
     assert!(thread.anchors_to(&app.files[app.selected_file].lines[app.cursor]));
 }
 
@@ -1199,13 +1199,13 @@ fn brace_motions_find_the_nearest_comment_from_an_unanchored_row() {
     app.focused_thread = None;
     press(&mut app, "{");
     assert_eq!(app.cursor, row, "{{ reaches back to the comment above");
-    assert_eq!(app.focused_thread.as_deref(), Some(thread.id.as_str()));
+    assert_eq!(app.focused_thread.as_deref(), Some(&*thread.id));
 
     app.cursor = row - 1;
     app.focused_thread = None;
     press(&mut app, "}");
     assert_eq!(app.cursor, row, "}} reaches forward to the comment below");
-    assert_eq!(app.focused_thread.as_deref(), Some(thread.id.as_str()));
+    assert_eq!(app.focused_thread.as_deref(), Some(&*thread.id));
 }
 
 #[test]
@@ -1527,7 +1527,7 @@ fn commenting_on_a_focused_thread_replies_to_it() {
     let mut app = load();
     let thread = park_on_unresolved_thread(&mut app);
     press(&mut app, "j");
-    assert_eq!(app.focused_thread.as_deref(), Some(thread.id.as_str()));
+    assert_eq!(app.focused_thread.as_deref(), Some(&*thread.id));
 
     press(&mut app, "c");
     assert_eq!(app.mode, Mode::Insert);
@@ -1558,7 +1558,7 @@ fn resolving_toggles_the_focused_thread() {
     assert_eq!(
         app.take_requests(),
         vec![Request::Resolve {
-            thread_id: thread.id,
+            thread_id: thread.id.to_string(),
             is_resolved: true,
         }]
     );

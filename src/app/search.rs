@@ -1,11 +1,12 @@
 use std::ops::Range;
+use std::sync::Arc;
 
 /// One hit for the active query, identified the way the cursor addresses it:
 /// a diff row, plus the thread under that row when the hit is in a comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Match {
     Line(usize),
-    Thread { row: usize, id: String },
+    Thread { row: usize, id: Arc<str> },
 }
 
 impl Match {
@@ -15,10 +16,12 @@ impl Match {
         }
     }
 
-    pub fn thread_id(&self) -> Option<&str> {
+    /// Cloning an id is a refcount bump, so a caller that has to outlive the
+    /// borrow takes one rather than copying the string.
+    pub fn thread_id(&self) -> Option<Arc<str>> {
         match self {
             Self::Line(_) => None,
-            Self::Thread { id, .. } => Some(id),
+            Self::Thread { id, .. } => Some(id.clone()),
         }
     }
 }

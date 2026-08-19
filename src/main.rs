@@ -61,7 +61,7 @@ impl ThemeChoice {
 enum Message {
     Meta(Box<Meta>),
     Files(Vec<ChangedFile>),
-    Highlight(ThemeMode, String, Highlight),
+    Highlight(ThemeMode, Arc<str>, Highlight),
     MetaFailed(String),
     FilesFailed(String),
     /// GitHub is having an incident that explains a failure already shown.
@@ -306,7 +306,7 @@ async fn event_loop(
                         false
                     }
                     Message::Highlight(_, path, styled) => {
-                        let is_open = app.current_path() == Some(path.as_str());
+                        let is_open = app.current_path() == Some(&*path);
                         app.set_highlight(path, styled);
                         is_open
                     }

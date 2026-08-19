@@ -141,7 +141,7 @@ fn parses_files_and_threads() {
 
     let threads = fixture_threads();
     let thread = &threads[0];
-    assert_eq!(thread.id, "PRRT_kwDODKw3uc48Rk4m");
+    assert_eq!(&*thread.id, "PRRT_kwDODKw3uc48Rk4m");
     assert_eq!(thread.side, Side::Right);
     assert_eq!(thread.line, Some(130));
     assert_eq!(thread.original_line, Some(130));
@@ -370,7 +370,7 @@ fn multiple_threads_on_one_line_render_as_one_group() {
     let mut threads = Vec::new();
     for index in 1..=4 {
         let mut thread = base.clone();
-        thread.id = format!("thread-{index}");
+        thread.id = format!("thread-{index}").into();
         thread.comments[0].body = format!("Discussion number {index}");
         threads.push(thread);
     }
@@ -810,12 +810,12 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
 #[test]
 fn highlights_are_addressed_by_path_not_position() {
     let mut app = load();
-    let open = app.current_path().unwrap().to_string();
+    let open = app.current_file().unwrap().path.clone();
     let other = app
         .files
         .iter()
         .map(|file| file.path.clone())
-        .find(|path| *path != open)
+        .find(|path| path != &open)
         .unwrap();
 
     app.set_highlight(other, vec![Vec::new()]);

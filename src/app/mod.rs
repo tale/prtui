@@ -49,7 +49,7 @@ pub enum Target {
 pub struct Composer {
     pub editor: CommentEditor,
     pub target: Target,
-    pub path: String,
+    pub path: Arc<str>,
 }
 
 struct FileFilterSnapshot {
@@ -62,7 +62,7 @@ struct FileFilterSnapshot {
 struct SearchOrigin {
     query: Option<String>,
     cursor: usize,
-    focused_thread: Option<String>,
+    focused_thread: Option<Arc<str>>,
     diff_scroll: usize,
 }
 
@@ -79,7 +79,7 @@ pub struct App {
     /// Shared so the highlighting thread reads the same patches the diff is
     /// drawn from rather than a copy of them.
     pub files: Arc<[ChangedFile]>,
-    pub threads_by_path: HashMap<String, Vec<ReviewThread>>,
+    pub threads_by_path: HashMap<Arc<str>, Vec<ReviewThread>>,
     pub drafts: Vec<Draft>,
 
     pub mode: Mode,
@@ -93,8 +93,8 @@ pub struct App {
     pub search: Option<CommentEditor>,
     pub selected_file: usize,
     pub cursor: usize,
-    pub focused_thread: Option<String>,
-    pub expanded_thread: Option<String>,
+    pub focused_thread: Option<Arc<str>>,
+    pub expanded_thread: Option<Arc<str>>,
     pub thread_scroll: usize,
     /// First virtual row of the diff pane on screen. Rows are not source lines:
     /// a line's threads occupy rows of their own, so the offset addresses the
@@ -113,7 +113,7 @@ pub struct App {
     theme: Theme,
     /// Keyed by path, which is what a file is. A position would only mean
     /// anything for as long as the list it indexes stays put.
-    highlights: HashMap<String, Highlight>,
+    highlights: HashMap<Arc<str>, Highlight>,
     filter_snapshot: Option<FileFilterSnapshot>,
     search_origin: Option<SearchOrigin>,
     files_state: FilesState,
@@ -223,7 +223,7 @@ impl App {
     /// They move rather than copy: a review's whole comment history is the
     /// heaviest thing the app holds and one owner is enough.
     pub fn set_meta(&mut self, meta: Meta) {
-        let mut by_path: HashMap<String, Vec<ReviewThread>> = HashMap::new();
+        let mut by_path: HashMap<Arc<str>, Vec<ReviewThread>> = HashMap::new();
         for thread in meta.threads {
             by_path.entry(thread.path.clone()).or_default().push(thread);
         }
@@ -237,7 +237,7 @@ impl App {
     }
 
     pub fn current_path(&self) -> Option<&str> {
-        self.current_file().map(|file| file.path.as_str())
+        self.current_file().map(|file| &*file.path)
     }
 
     /// The pending file-level remark on the open file, if there is one.
@@ -246,7 +246,7 @@ impl App {
 
         self.drafts
             .iter()
-            .find(|draft| draft.path == path && draft.is_file_level())
+            .find(|draft| *draft.path == *path && draft.is_file_level())
             .map(|draft| draft.body.as_str())
     }
 
@@ -254,7 +254,7 @@ impl App {
         self.current_file().map_or(0, |f| f.lines.len())
     }
 
-    pub fn set_highlight(&mut self, path: String, styled: Highlight) {
+    pub fn set_highlight(&mut self, path: Arc<str>, styled: Highlight) {
         self.highlights.insert(path, styled);
     }
 
@@ -372,7 +372,8 @@ impl App {
     /// stacking another. Available from the tree too: no line is involved, so
     /// there is nothing the diff pane is needed for.
     fn start_file_comment(&mut self, layout: &Layout) {
-        let Some(path) = self.current_path().map(str::to_string) else {
+        let Some(path) = self.current_file().map(|file| file.path.clone())
+        else {
             self.status = "no file selected".into();
             return;
         };
@@ -451,7 +452,7 @@ impl App {
         self.threads_by_path
             .values()
             .flatten()
-            .find(|thread| thread.id == id)
+            .find(|thread| *thread.id == *id)
     }
 
     /// The open file's threads, which is what the row list indexes into.
@@ -499,7 +500,7 @@ impl App {
 
         let is_resolved = !thread.is_resolved;
         self.send(Request::Resolve {
-            thread_id: id,
+            thread_id: id.to_string(),
             is_resolved,
         });
         self.status = if is_resolved {
@@ -762,7 +763,7 @@ impl App {
             return;
         };
 
-        self.land_on(hit.row(), hit.thread_id().map(str::to_string), layout);
+        self.land_on(hit.row(), hit.thread_id(), layout);
     }
 
     pub fn search_query(&self) -> Option<String> {
@@ -781,7 +782,7 @@ impl App {
         };
 
         let threads = self.file_threads();
-        let hits: Vec<(usize, String)> = layout
+        let hits: Vec<(usize, Arc<str>)> = layout
             .rows
             .stops()
             .iter()
@@ -839,8 +840,7 @@ impl App {
 
     fn match_position(&self, matches: &[search::Match]) -> Option<usize> {
         matches.iter().position(|hit| {
-            hit.row() == self.cursor
-                && hit.thread_id() == self.focused_thread.as_deref()
+            hit.row() == self.cursor && hit.thread_id() == self.focused_thread
         })
     }
 
@@ -873,7 +873,7 @@ impl App {
         };
 
         let hit = matches[target].clone();
-        self.land_on(hit.row(), hit.thread_id().map(str::to_string), layout);
+        self.land_on(hit.row(), hit.thread_id(), layout);
     }
 
     pub fn filter_query(&self) -> Option<String> {
@@ -950,7 +950,7 @@ impl App {
     /// was reopened on one. Emptying a reopened draft is how it gets thrown away.
     fn save_draft(
         &mut self,
-        path: String,
+        path: Arc<str>,
         attachment: Attachment,
         body: String,
         replacing: Option<usize>,
@@ -1152,7 +1152,8 @@ impl App {
 
         if direction > 0 {
             if let Some(focused) = self.focused_thread.as_deref() {
-                if let Some(position) = ids.iter().position(|id| id == focused)
+                if let Some(position) =
+                    ids.iter().position(|id| **id == *focused)
                     && let Some(next) = ids.get(position + 1)
                 {
                     self.set_focused_thread(Some(next.clone()));
@@ -1178,7 +1179,7 @@ impl App {
         }
 
         if let Some(focused) = self.focused_thread.as_deref() {
-            if let Some(position) = ids.iter().position(|id| id == focused) {
+            if let Some(position) = ids.iter().position(|id| **id == *focused) {
                 if position > 0 {
                     self.set_focused_thread(Some(ids[position - 1].clone()));
                 } else {
@@ -1217,7 +1218,12 @@ impl App {
 
     /// Puts the cursor on a diff row, optionally focusing one of its threads,
     /// and scrolls the row into view.
-    fn land_on(&mut self, row: usize, thread: Option<String>, layout: &Layout) {
+    fn land_on(
+        &mut self,
+        row: usize,
+        thread: Option<Arc<str>>,
+        layout: &Layout,
+    ) {
         self.pane = Pane::Diff;
         self.selection = None;
         self.cursor = row;
@@ -1228,7 +1234,7 @@ impl App {
 
     /// The subset of threads that `}` and `{` stop at. Jumps cross files, so
     /// this anchors a file the layout has not laid out.
-    fn comment_stops(&self, index: usize) -> Vec<(usize, String)> {
+    fn comment_stops(&self, index: usize) -> Vec<(usize, Arc<str>)> {
         let Some(file) = self.files.get(index) else {
             return Vec::new();
         };
@@ -1247,12 +1253,11 @@ impl App {
 
     /// A focused thread that is not itself a stop (resolved or outdated) falls
     /// back to the cursor row, so the jump still moves in the right direction.
-    fn comment_stop_here(&self, direction: isize) -> Option<(usize, String)> {
+    fn comment_stop_here(&self, direction: isize) -> Option<(usize, Arc<str>)> {
         let stops = self.comment_stops(self.selected_file);
-        let current = self
-            .focused_thread
-            .as_deref()
-            .and_then(|focused| stops.iter().position(|(_, id)| id == focused));
+        let current = self.focused_thread.as_deref().and_then(|focused| {
+            stops.iter().position(|(_, id)| **id == *focused)
+        });
 
         let target = match (current, direction > 0) {
             (Some(index), true) => (index + 1 < stops.len()).then(|| index + 1),
@@ -1271,7 +1276,7 @@ impl App {
     fn comment_stop_elsewhere(
         &self,
         direction: isize,
-    ) -> Option<(usize, usize, String)> {
+    ) -> Option<(usize, usize, Arc<str>)> {
         let visible = self.filtered_file_indices();
         let position = visible.iter().position(|&i| i == self.selected_file)?;
 
@@ -1293,7 +1298,7 @@ impl App {
         })
     }
 
-    fn set_focused_thread(&mut self, focused: Option<String>) {
+    fn set_focused_thread(&mut self, focused: Option<Arc<str>>) {
         if self.focused_thread != focused {
             self.expanded_thread = None;
             self.thread_scroll = 0;
@@ -1302,7 +1307,7 @@ impl App {
     }
 
     /// The threads hanging under one source line, in the order `j` visits them.
-    fn thread_ids_at(&self, source: usize, layout: &Layout) -> Vec<String> {
+    fn thread_ids_at(&self, source: usize, layout: &Layout) -> Vec<Arc<str>> {
         let threads = self.file_threads();
 
         layout
@@ -1318,7 +1323,7 @@ impl App {
     fn cursor_row(&self, layout: &Layout) -> usize {
         let threads = self.file_threads();
         let focused = self.focused_thread.as_deref().and_then(|id| {
-            let thread = threads.iter().position(|thread| thread.id == id)?;
+            let thread = threads.iter().position(|thread| *thread.id == *id)?;
             layout.rows.summary_row(thread)
         });
 

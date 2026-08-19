@@ -1,5 +1,6 @@
 use crate::model::{ChangedFile, DiffLine, LineKind};
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 
 pub use crate::model::Side;
 
@@ -47,7 +48,7 @@ pub enum Attachment {
 /// review can be composed offline and sent in one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
-    pub path: String,
+    pub path: Arc<str>,
     pub attachment: Attachment,
     pub body: String,
 }
@@ -72,11 +73,12 @@ impl Draft {
     }
 
     pub fn covers(&self, path: &str, row: usize) -> bool {
-        self.path == path && self.rows().is_some_and(|rows| rows.contains(&row))
+        *self.path == *path
+            && self.rows().is_some_and(|rows| rows.contains(&row))
     }
 
     pub fn overlaps(&self, path: &str, rows: &RangeInclusive<usize>) -> bool {
-        self.path == path
+        *self.path == *path
             && self.rows().is_some_and(|own| {
                 own.start() <= rows.end() && rows.start() <= own.end()
             })
@@ -91,14 +93,14 @@ impl Draft {
     pub fn to_api(&self) -> serde_json::Value {
         let Attachment::Lines { anchor, .. } = &self.attachment else {
             return serde_json::json!({
-                "path": self.path,
+                "path": &*self.path,
                 "body": self.body,
                 "subject_type": "file",
             });
         };
 
         let mut comment = serde_json::json!({
-            "path": self.path,
+            "path": &*self.path,
             "body": self.body,
             "line": anchor.end_line,
             "side": anchor.side.as_api(),

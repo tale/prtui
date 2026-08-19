@@ -303,7 +303,7 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
     let drafts: Vec<&Draft> = app
         .drafts
         .iter()
-        .filter(|draft| Some(draft.path.as_str()) == app.current_path())
+        .filter(|draft| Some(&*draft.path) == app.current_path())
         .collect();
 
     let lines: Vec<Line<'_>> = layout

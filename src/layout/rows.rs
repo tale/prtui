@@ -366,11 +366,11 @@ impl Builder<'_> {
     }
 
     fn is_focused(&self, thread: usize) -> bool {
-        self.view.focused == Some(self.threads[thread].id.as_str())
+        self.view.focused == Some(&*self.threads[thread].id)
     }
 
     fn is_expanded(&self, thread: usize) -> bool {
-        self.view.expanded == Some(self.threads[thread].id.as_str())
+        self.view.expanded == Some(&*self.threads[thread].id)
     }
 
     /// A line wider than the pane folds onto further rows instead of being cut

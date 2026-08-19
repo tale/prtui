@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -44,7 +45,9 @@ pub struct DiffLine {
 
 #[derive(Debug, Clone)]
 pub struct ChangedFile {
-    pub path: String,
+    /// Shared: a file's path is its identity, and the threads, drafts and
+    /// syntax colors filed against it all hold the same one.
+    pub path: Arc<str>,
     pub status: String,
     pub additions: u32,
     pub deletions: u32,
@@ -73,8 +76,8 @@ pub struct Comment {
 
 #[derive(Debug, Clone)]
 pub struct ReviewThread {
-    pub id: String,
-    pub path: String,
+    pub id: Arc<str>,
+    pub path: Arc<str>,
     pub line: Option<u32>,
     pub original_line: Option<u32>,
     pub side: Side,
@@ -210,7 +213,7 @@ pub fn parse_files(val: &serde_json::Value) -> Result<Vec<ChangedFile>> {
                 raw.patch.as_deref().map(parse_patch).unwrap_or_default();
 
             files.push(ChangedFile {
-                path: raw.filename,
+                path: raw.filename.into(),
                 status: raw.status,
                 additions: raw.additions,
                 deletions: raw.deletions,
@@ -252,8 +255,8 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<Meta> {
             nodes
                 .iter()
                 .map(|t| ReviewThread {
-                    id: text_at(t, "/id"),
-                    path: text_at(t, "/path"),
+                    id: text_at(t, "/id").into(),
+                    path: text_at(t, "/path").into(),
                     line: t
                         .get("line")
                         .and_then(serde_json::Value::as_u64)
