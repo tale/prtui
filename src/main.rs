@@ -6,7 +6,7 @@ use prtui::app::input::InputRouter;
 use prtui::app::review::{Failure, Request, Sent};
 use prtui::layout::Layout;
 use prtui::model::{self, ChangedFile, PullRequest};
-use prtui::renderer::{Renderer, Segment, ThemeMode};
+use prtui::renderer::{self, Segment, Theme, ThemeMode};
 use prtui::{gh, ui};
 use std::{future::poll_fn, pin::Pin, time::Duration};
 use termina::escape::csi::{
@@ -152,24 +152,38 @@ fn spawn_request(
     });
 }
 
-/// Highlighting all files costs ~600ms single-threaded but only ~150ms across
-/// cores, which hides entirely inside the network wait.
-fn spawn_highlight_pass(
+/// One background thread colors the whole diff, starting with the file on
+/// screen so the first paint is already lit. Each file is published as it
+/// lands, tagged with the palette it was colored under: a straggler from
+/// before a theme switch has to be dropped rather than drawn.
+fn spawn_highlighting(
     files: &[ChangedFile],
-    renderer: Renderer,
+    first: usize,
+    mode: ThemeMode,
     tx: mpsc::UnboundedSender<Message>,
 ) {
-    let mode = renderer.theme().mode;
-    let payload: Vec<(String, Vec<prtui::model::DiffLine>)> = files
+    let payload: Vec<(String, Vec<model::DiffLine>)> = files
         .iter()
-        .map(|f| (f.path.clone(), f.lines.clone()))
+        .map(|file| (file.path.clone(), file.lines.clone()))
         .collect();
 
     std::thread::spawn(move || {
-        renderer.highlight_files_parallel(&payload, |index, styled| {
-            let _ = tx.send(Message::Highlight(mode, index, styled));
-        });
+        for index in highlight_order(payload.len(), first) {
+            let (path, lines) = &payload[index];
+            let styled = renderer::highlight_file(path, lines, mode);
+            if tx.send(Message::Highlight(mode, index, styled)).is_err() {
+                return;
+            }
+        }
     });
+}
+
+/// The file being read first, then everything else in order. Every index it
+/// yields is in range, so the worker can index straight into its payload.
+fn highlight_order(count: usize, first: usize) -> impl Iterator<Item = usize> {
+    std::iter::once(first)
+        .filter(move |index| *index < count)
+        .chain((0..count).filter(move |index| *index != first))
 }
 
 #[tokio::main]
@@ -206,10 +220,10 @@ async fn main() -> Result<()> {
     // Asking the terminal for its background costs a round trip that can time
     // out; both fetches are already in flight, so it overlaps the network
     // instead of delaying it.
-    let renderer = Renderer::new(args.theme.resolve());
+    let theme = Theme::for_mode(args.theme.resolve());
 
     // Syntax assets deserialize on a worker so the cost overlaps the fetch too.
-    std::thread::spawn(move || renderer.preload());
+    std::thread::spawn(move || renderer::preload(theme.mode));
 
     let session = Session {
         repo,
@@ -217,7 +231,7 @@ async fn main() -> Result<()> {
         follow_terminal,
     };
 
-    run(rx, tx_ui, renderer, session).await
+    run(rx, tx_ui, theme, session).await
 }
 
 /// What the event loop needs to talk back to GitHub after the first paint.
@@ -231,13 +245,13 @@ struct Session {
 async fn run(
     mut rx: mpsc::UnboundedReceiver<Message>,
     tx: mpsc::UnboundedSender<Message>,
-    renderer: Renderer,
+    theme: Theme,
     session: Session,
 ) -> Result<()> {
     let follow_terminal = session.follow_terminal;
 
     terminal::scope(follow_terminal, async |terminal, events| {
-        event_loop(terminal, events, &mut rx, tx, renderer, &session).await
+        event_loop(terminal, events, &mut rx, tx, theme, &session).await
     })
     .await
 }
@@ -247,11 +261,11 @@ async fn event_loop(
     events: &mut EventStream,
     rx: &mut mpsc::UnboundedReceiver<Message>,
     tx: mpsc::UnboundedSender<Message>,
-    renderer: Renderer,
+    theme: Theme,
     session: &Session,
 ) -> Result<()> {
     let follow_terminal = session.follow_terminal;
-    let mut app = App::with_renderer(renderer);
+    let mut app = App::with_theme(theme);
     let mut input = InputRouter::default();
     let mut pending: u8 = 2;
     let mut failure: Option<String> = None;
@@ -288,21 +302,25 @@ async fn event_loop(
 
                 let pending_before = pending;
                 let affects_display = match message {
-                    Message::Highlight(mode, index, styled) if mode == app.theme().mode => {
-                        let is_current = index == app.selected_file;
-                        app.set_highlight(index, styled);
-                        is_current
+                    // A result colored under the previous palette is dropped:
+                    // the pass that replaces it is already running.
+                    Message::Highlight(mode, ..) if mode != app.theme().mode => {
+                        false
                     }
-                    Message::Highlight(_, _, _) => false,
+                    Message::Highlight(_, index, styled) => {
+                        app.set_highlight(index, styled);
+                        index == app.selected_file
+                    }
                     Message::Meta(pr) => {
                         app.set_meta(*pr);
                         pending = pending.saturating_sub(1);
                         true
                     }
                     Message::Files(files) => {
-                        spawn_highlight_pass(
+                        spawn_highlighting(
                             &files,
-                            Renderer::new(app.theme().mode),
+                            app.selected_file,
+                            app.theme().mode,
                             tx.clone(),
                         );
                         app.set_files(files);
@@ -393,13 +411,12 @@ async fn event_loop(
                             TerminalThemeMode::Light => ThemeMode::Light,
                         };
                         if app.set_theme_mode(mode) {
-                            if !app.files.is_empty() {
-                                spawn_highlight_pass(
-                                    &app.files,
-                                    Renderer::new(mode),
-                                    tx.clone(),
-                                );
-                            }
+                            spawn_highlighting(
+                                &app.files,
+                                app.selected_file,
+                                mode,
+                                tx.clone(),
+                            );
                             is_dirty = true;
                         }
                     }
@@ -440,6 +457,13 @@ async fn next_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_open_file_is_colored_before_the_rest() {
+        assert_eq!(highlight_order(4, 2).collect::<Vec<_>>(), [2, 0, 1, 3]);
+        assert_eq!(highlight_order(3, 0).collect::<Vec<_>>(), [0, 1, 2]);
+        assert!(highlight_order(0, 0).next().is_none());
+    }
 
     #[test]
     fn auto_is_the_only_live_theme_choice() {

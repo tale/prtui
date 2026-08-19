@@ -96,6 +96,20 @@ fn paragraphs(count: usize, label: &str) -> String {
     })
 }
 
+/// Colors the open file the way the background thread does, since that is now
+/// the only path into the highlight store.
+fn highlight(app: &mut App) {
+    let index = app.selected_file;
+    let (path, lines) = {
+        let file = &app.files[index];
+        (file.path.clone(), file.lines.clone())
+    };
+
+    let styled =
+        prtui::renderer::highlight_file(&path, &lines, app.theme().mode);
+    app.set_highlight(index, styled);
+}
+
 fn load() -> App {
     let files: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
@@ -733,7 +747,7 @@ fn scrolling_stays_in_bounds() {
 #[test]
 fn word_diff_marks_only_changed_tokens() {
     use prtui::model::DiffLine;
-    use prtui::renderer::Renderer;
+    use prtui::renderer::ThemeMode;
 
     let line = |kind, text: &str| DiffLine {
         kind,
@@ -747,7 +761,8 @@ fn word_diff_marks_only_changed_tokens() {
         line(LineKind::Added, "let total = compute(beta, 20);"),
     ];
 
-    let styled = Renderer::default().highlight_file("x.rs", &lines);
+    let styled =
+        prtui::renderer::highlight_file("x.rs", &lines, ThemeMode::Dark);
 
     let marked =
         |row: &Vec<prtui::renderer::Segment>, source: &str| -> Vec<String> {
@@ -764,14 +779,14 @@ fn word_diff_marks_only_changed_tokens() {
 
 #[test]
 fn light_mode_uses_light_diff_and_syntax_palettes() {
-    use prtui::renderer::{Renderer, Theme, ThemeMode};
+    use prtui::renderer::{Theme, ThemeMode};
 
-    let mut app = App::with_renderer(Renderer::new(ThemeMode::Light));
+    let mut app = App::with_theme(Theme::for_mode(ThemeMode::Light));
     let files: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
     app.set_files(parse_files(&files).unwrap());
     app.is_files_visible = false;
-    app.ensure_highlighted();
+    highlight(&mut app);
 
     let added = app
         .current_file()
@@ -818,7 +833,7 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
 #[test]
 fn switching_terminal_appearance_invalidates_old_syntax_colors() {
     let mut app = load();
-    app.ensure_highlighted();
+    highlight(&mut app);
     assert!(app.highlighted().is_some());
 
     assert!(app.set_theme_mode(ThemeMode::Light));
@@ -1023,7 +1038,7 @@ fn search_paints_only_the_matched_bytes_of_a_diff_line() {
     let mut app = load();
     app.is_files_visible = false;
     app.pane = Pane::Diff;
-    app.ensure_highlighted();
+    highlight(&mut app);
 
     let row = app
         .current_file()
@@ -1072,45 +1087,6 @@ fn search_paints_only_the_matched_bytes_of_a_diff_line() {
         "the query shows in the status bar"
     );
     assert!(screen.contains("1/1 matches"));
-}
-
-#[test]
-fn parallel_highlighting_matches_the_serial_pass_for_every_file() {
-    use prtui::model::DiffLine;
-    use prtui::renderer::Renderer;
-    use std::sync::Mutex;
-
-    // More files than cores, so workers drain the queue rather than taking one
-    // apiece and the index each result carries is actually exercised.
-    let renderer = Renderer::default();
-    let files: Vec<(String, Vec<DiffLine>)> = (0..64)
-        .map(|n| {
-            (
-                format!("file{n}.rs"),
-                vec![DiffLine {
-                    kind: LineKind::Added,
-                    text: format!("let total{n} = compute(alpha, {n});"),
-                    old_line: None,
-                    new_line: Some(1),
-                }],
-            )
-        })
-        .collect();
-
-    let published = Mutex::new(vec![None; files.len()]);
-    renderer.highlight_files_parallel(&files, |index, styled| {
-        let mut slots = published.lock().unwrap();
-        assert!(slots[index].is_none(), "file {index} published twice");
-        slots[index] = Some(styled);
-    });
-
-    let published = published.into_inner().unwrap();
-    for (index, (path, lines)) in files.iter().enumerate() {
-        let styled = published[index]
-            .as_ref()
-            .unwrap_or_else(|| panic!("file {index} was never published"));
-        assert_eq!(*styled, renderer.highlight_file(path, lines));
-    }
 }
 
 #[test]

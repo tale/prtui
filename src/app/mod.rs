@@ -10,7 +10,7 @@ pub mod search;
 use crate::layout::Layout;
 use crate::layout::rows;
 use crate::model::{ChangedFile, PullRequest, ReviewThread};
-use crate::renderer::{Renderer, Segment, Theme, ThemeMode};
+use crate::renderer::{Segment, Theme, ThemeMode};
 use action::{Action, Motion};
 use draft::{Anchor, Attachment, Draft};
 use editor::CommentEditor;
@@ -104,8 +104,10 @@ pub struct App {
     pub in_flight: usize,
 
     outbox: Vec<Request>,
-    renderer: Renderer,
-    highlights: HashMap<usize, Vec<Vec<Segment>>>,
+    theme: Theme,
+    /// Syntax colors per file, in step with `files`. A slot stays empty until
+    /// the background pass reaches that file.
+    highlights: Vec<Vec<Vec<Segment>>>,
     filter_snapshot: Option<FileFilterSnapshot>,
     search_origin: Option<SearchOrigin>,
     files_state: FilesState,
@@ -119,10 +121,10 @@ impl Default for App {
 
 impl App {
     pub fn new() -> Self {
-        Self::with_renderer(Renderer::default())
+        Self::with_theme(Theme::dark())
     }
 
-    pub fn with_renderer(renderer: Renderer) -> Self {
+    pub fn with_theme(theme: Theme) -> Self {
         Self {
             pr: None,
             files: Vec::new(),
@@ -148,8 +150,8 @@ impl App {
             should_quit: false,
             in_flight: 0,
             outbox: Vec::new(),
-            renderer,
-            highlights: HashMap::new(),
+            theme,
+            highlights: Vec::new(),
             filter_snapshot: None,
             search_origin: None,
             files_state: FilesState::Loading,
@@ -157,7 +159,7 @@ impl App {
     }
 
     pub const fn theme(&self) -> Theme {
-        self.renderer.theme()
+        self.theme
     }
 
     pub const fn is_loading(&self) -> bool {
@@ -171,6 +173,7 @@ impl App {
     /// File patches are the only data required to make the main review surface
     /// useful. PR metadata and review threads may arrive independently later.
     pub fn set_files(&mut self, files: Vec<ChangedFile>) {
+        self.highlights = vec![Vec::new(); files.len()];
         self.files = files;
         self.files_state = FilesState::Loaded;
     }
@@ -200,12 +203,12 @@ impl App {
     /// Swap the complete renderer palette and discard syntax colors produced
     /// under the previous terminal appearance.
     pub fn set_theme_mode(&mut self, mode: ThemeMode) -> bool {
-        if self.renderer.theme().mode == mode {
+        if self.theme.mode == mode {
             return false;
         }
 
-        self.renderer = Renderer::new(mode);
-        self.highlights.clear();
+        self.theme = Theme::for_mode(mode);
+        self.highlights = vec![Vec::new(); self.files.len()];
         true
     }
 
@@ -244,29 +247,17 @@ impl App {
         self.current_file().map_or(0, |f| f.lines.len())
     }
 
-    pub fn ensure_highlighted(&mut self) {
-        let index = self.selected_file;
-        if self.highlights.contains_key(&index) {
-            return;
-        }
-
-        let Some(file) = self.files.get(index) else {
-            return;
-        };
-
-        let styled = self.renderer.highlight_file(&file.path, &file.lines);
-        self.highlights.insert(index, styled);
-    }
-
-    /// Never clobbers a file that was already highlighted on demand.
     pub fn set_highlight(&mut self, index: usize, styled: Vec<Vec<Segment>>) {
-        self.highlights.entry(index).or_insert(styled);
+        if let Some(slot) = self.highlights.get_mut(index) {
+            *slot = styled;
+        }
     }
 
     pub fn highlighted(&self) -> Option<&[Vec<Segment>]> {
         self.highlights
-            .get(&self.selected_file)
-            .map(std::vec::Vec::as_slice)
+            .get(self.selected_file)
+            .filter(|styled| !styled.is_empty())
+            .map(Vec::as_slice)
     }
 
     pub fn apply(&mut self, action: &Action, layout: &Layout) {
