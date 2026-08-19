@@ -1,4 +1,5 @@
 use prtui::app::action::Action;
+use prtui::app::draft::Parent;
 use prtui::app::input::DispatchResult;
 use prtui::app::input::InputRouter;
 use prtui::app::review::Failure;
@@ -1385,6 +1386,9 @@ fn a_file_note_is_revised_rather_than_stacked() {
     assert_eq!(app.drafts[0].body, "first thought and a second");
 }
 
+/// A file-level remark is a thread with `subjectType: FILE`, which is the only
+/// shape GitHub accepts for one. The review endpoint has no such field, and
+/// sending it there took the whole review down with it.
 #[test]
 fn a_file_note_ships_without_a_line() {
     let mut app = load();
@@ -1393,12 +1397,12 @@ fn a_file_note_ships_without_a_line() {
     paste(&mut InputRouter::default(), &mut app, "whole-file remark");
     act(&mut app, &Action::CommitComment);
 
-    let payload = app.drafts[0].to_api();
+    let input = app.drafts[0].to_input(&Parent::Review("PRR_1".into()));
 
-    assert_eq!(payload["subject_type"], "file");
-    assert!(payload.get("line").is_none(), "no line to point at");
-    assert!(payload.get("side").is_none());
-    assert_eq!(payload["body"], "whole-file remark");
+    assert_eq!(input["subjectType"], "FILE");
+    assert!(input.get("line").is_none(), "no line to point at");
+    assert!(input.get("side").is_none());
+    assert_eq!(input["body"], "whole-file remark");
 }
 
 /// A patch whose every line names itself, so a test can assert on the exact
@@ -1593,4 +1597,43 @@ fn the_cursor_covers_every_row_of_the_line_it_is_on() {
         let cell = buffer.cell((0, first + offset)).unwrap();
         assert_eq!(cell.symbol(), "▍", "row {offset} keeps the cursor bar");
     }
+}
+
+/// The pending review is where drafts live now, so reopening the pull request
+/// finds them again rather than starting empty.
+#[test]
+fn pending_threads_come_back_as_drafts() {
+    let files: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
+    let mut meta: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
+
+    let pr = &mut meta["data"]["repository"]["pullRequest"];
+    pr["pendingReview"] = serde_json::json!({ "nodes": [{ "id": "PRR_1" }] });
+
+    let submitted = pr["reviewThreads"]["nodes"][0].clone();
+    let mut pending = submitted.clone();
+    pending["id"] = "PRRT_pending".into();
+    pending["comments"]["nodes"] = serde_json::json!([{
+        "id": "PRRC_pending",
+        "state": "PENDING",
+        "fullDatabaseId": null,
+        "author": { "login": "tale" },
+        "body": "not sent yet",
+        "createdAt": "now",
+    }]);
+    pr["reviewThreads"]["nodes"] = serde_json::json!([submitted, pending]);
+
+    let mut app = App::new();
+    app.set_files(parse_files(&files).unwrap());
+    app.set_meta(parse_meta(&meta).unwrap());
+
+    assert_eq!(app.drafts.len(), 1, "the pending thread is a draft");
+    assert_eq!(app.drafts[0].body, "not sent yet");
+    assert_eq!(app.drafts[0].remote.as_deref(), Some("PRRC_pending"));
+    assert!(app.drafts[0].rows().is_some(), "it found its rows again");
+
+    // And it is not also drawn on the diff as a conversation.
+    let threads: usize = app.threads_by_path.values().map(Vec::len).sum();
+    assert_eq!(threads, 1);
 }

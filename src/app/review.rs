@@ -1,4 +1,6 @@
+use super::draft::Parent;
 use super::editor::CommentEditor;
+use std::sync::Arc;
 
 /// The verdict a submitted review carries, matching GitHub's review events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -62,46 +64,73 @@ pub struct Submission {
 /// Work that has to leave the process. The app queues these rather than
 /// reaching for the network itself, which keeps every state transition
 /// synchronous and testable.
+///
+/// Every draft request names the draft by its local id, since the answer has to
+/// find its way back to a draft that was already on screen before it left.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
+    AddThread {
+        draft: u64,
+        parent: Parent,
+        input: serde_json::Value,
+    },
+    UpdateComment {
+        draft: u64,
+        comment: Arc<str>,
+        body: String,
+    },
+    DeleteComment {
+        draft: u64,
+        comment: Arc<str>,
+    },
     Review {
+        parent: Parent,
         event: ReviewEvent,
         body: String,
-        comments: Vec<serde_json::Value>,
     },
     Reply {
         in_reply_to: u64,
         body: String,
     },
     Resolve {
-        thread_id: String,
+        thread_id: Arc<str>,
         is_resolved: bool,
     },
 }
 
 /// What a completed request retires, so the app knows which local state the
 /// server has now taken over.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sent {
-    /// The number of drafts the review carried, which are the oldest ones in
-    /// the list; anything written since is still pending.
-    Review(usize),
+    ThreadAdded {
+        draft: u64,
+        review: Arc<str>,
+        comment: Arc<str>,
+    },
+    CommentUpdated(u64),
+    CommentDeleted(u64),
+    Review,
     Reply,
     Resolution(bool),
 }
 
-/// Why a request came back empty-handed. A review is the one kind the app tells
-/// apart: it leaves a summary and a pile of drafts behind, and both have to be
-/// handed back rather than dropped.
+/// Why a request came back empty-handed.
+///
+/// A review leaves its summary behind, and a draft is left marked as ahead of
+/// the server; both have to be handed back rather than dropped, so both are
+/// told apart from the failures that only need reporting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
+    Draft(u64, String),
     Review(String),
     Other(String),
 }
 
 impl Failure {
     pub fn message(&self) -> &str {
-        let (Self::Review(message) | Self::Other(message)) = self;
+        let (Self::Draft(_, message)
+        | Self::Review(message)
+        | Self::Other(message)) = self;
 
         message
     }

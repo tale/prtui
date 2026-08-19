@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
@@ -10,20 +10,64 @@ const THREADS_QUERY: &str = r"
 query($owner:String!, $repo:String!, $number:Int!) {
   repository(owner:$owner, name:$repo) {
     pullRequest(number:$number) {
-      number title state isDraft additions deletions changedFiles
+      id number title state isDraft additions deletions changedFiles
       author { login }
       baseRefName headRefName body
+      pendingReview: reviews(first:1, states:[PENDING]) { nodes { id } }
       reviewThreads(first:100) {
         nodes {
-          id isResolved isOutdated viewerCanResolve path line originalLine diffSide
+          id isResolved isOutdated viewerCanResolve path subjectType
+          line originalLine diffSide startLine startDiffSide
           comments(first:50) {
-            nodes { fullDatabaseId author { login } body createdAt }
+            nodes { id fullDatabaseId state author { login } body createdAt }
           }
         }
       }
-      reviews(first:50) { nodes { author { login } state submittedAt } }
     }
   }
+}
+";
+
+/// Opens the pending review as a side effect when the pull request has none,
+/// which is how a first draft creates one without a round trip of its own.
+const ADD_THREAD_MUTATION: &str = r"
+mutation($input:AddPullRequestReviewThreadInput!) {
+  addPullRequestReviewThread(input:$input) {
+    thread {
+      id
+      comments(first:1) { nodes { id pullRequestReview { id } } }
+    }
+  }
+}
+";
+
+const UPDATE_COMMENT_MUTATION: &str = r"
+mutation($id:ID!, $body:String!) {
+  updatePullRequestReviewComment(input:{pullRequestReviewCommentId:$id, body:$body}) {
+    pullRequestReviewComment { id }
+  }
+}
+";
+
+const DELETE_COMMENT_MUTATION: &str = r"
+mutation($id:ID!) {
+  deletePullRequestReviewComment(input:{id:$id}) {
+    pullRequestReviewComment { id }
+  }
+}
+";
+
+const SUBMIT_REVIEW_MUTATION: &str = r"
+mutation($input:SubmitPullRequestReviewInput!) {
+  submitPullRequestReview(input:$input) { pullRequestReview { id state } }
+}
+";
+
+/// A verdict with no drafts under it has no pending review to publish, so it
+/// files and submits one in a single call.
+const CREATE_REVIEW_MUTATION: &str = r"
+mutation($input:AddPullRequestReviewInput!) {
+  addPullRequestReview(input:$input) { pullRequestReview { id state } }
 }
 ";
 
@@ -340,9 +384,10 @@ fn graphql(
     query: &str,
     variables: &serde_json::Value,
     what: &str,
+    retry: Retry,
 ) -> Result<serde_json::Value> {
     let body = serde_json::json!({ "query": query, "variables": variables });
-    let mut response = post(url, token, &body, Retry::Transient)?;
+    let mut response = post(url, token, &body, retry)?;
     check(&mut response, what)?;
 
     let val: serde_json::Value = response
@@ -421,43 +466,127 @@ pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<serde_json::Value> {
             THREADS_QUERY,
             &variables,
             "fetching pull request metadata",
+            Retry::Transient,
         )
     })
     .await
     .context("metadata fetch panicked")?
 }
 
-/// Post the whole review — summary body and every inline comment — in one
-/// request, which is what makes GitHub thread them under a single review rather
-/// than scattering them as standalone comments.
-pub async fn submit_review(
+/// A mutation that is not safe to send twice. A timeout or a 502 says the
+/// answer went missing, never that the write did not land, so only a refusal
+/// is retried.
+async fn mutate(
     repo: &Repo,
-    number: u32,
-    event: &str,
-    body: String,
-    comments: Vec<serde_json::Value>,
-) -> Result<()> {
+    query: &'static str,
+    variables: serde_json::Value,
+    what: &'static str,
+) -> Result<serde_json::Value> {
     let token = write_token().await?;
-    let url = repo.rest_url(&format!(
-        "/repos/{}/{}/pulls/{number}/reviews",
-        repo.owner, repo.name
-    ));
-    // An approval carries no summary, and GitHub reads an empty string as one
-    // rather than as its absence, so the field goes out only when it has text.
-    let mut payload = serde_json::json!({
-        "event": event,
-        "comments": comments,
-    });
-    if !body.is_empty() {
-        payload["body"] = body.into();
-    }
+    let url = repo.graphql_url();
 
     tokio::task::spawn_blocking(move || {
-        let mut response = post(&url, Some(&token), &payload, Retry::Refusals)?;
-        check(&mut response, "submitting review")
+        graphql(&url, Some(&token), query, &variables, what, Retry::Refusals)
     })
     .await
-    .context("review submission panicked")?
+    .context("mutation panicked")?
+}
+
+/// Files one draft comment against the pending review, opening that review when
+/// `input` names only the pull request. Answers with the payload the two new
+/// node ids are read out of.
+pub async fn add_thread(
+    repo: &Repo,
+    input: serde_json::Value,
+) -> Result<serde_json::Value> {
+    mutate(
+        repo,
+        ADD_THREAD_MUTATION,
+        serde_json::json!({ "input": input }),
+        "saving draft",
+    )
+    .await
+}
+
+pub async fn update_comment(
+    repo: &Repo,
+    comment: Arc<str>,
+    body: String,
+) -> Result<()> {
+    mutate(
+        repo,
+        UPDATE_COMMENT_MUTATION,
+        serde_json::json!({ "id": &*comment, "body": body }),
+        "updating draft",
+    )
+    .await
+    .map(|_| ())
+}
+
+pub async fn delete_comment(repo: &Repo, comment: Arc<str>) -> Result<()> {
+    mutate(
+        repo,
+        DELETE_COMMENT_MUTATION,
+        serde_json::json!({ "id": &*comment }),
+        "discarding draft",
+    )
+    .await
+    .map(|_| ())
+}
+
+/// An approval carries no summary, and GitHub reads an empty string as one
+/// rather than as its absence, so the field goes out only when it has text.
+fn verdict(
+    mut input: serde_json::Value,
+    event: &str,
+    body: String,
+) -> serde_json::Value {
+    input["event"] = event.into();
+    if !body.is_empty() {
+        input["body"] = body.into();
+    }
+
+    serde_json::json!({ "input": input })
+}
+
+/// Publishes the pending review the drafts were filed against. Everything it
+/// carries is already on GitHub, so this sends a verdict and a summary only.
+pub async fn submit_review(
+    repo: &Repo,
+    review: Arc<str>,
+    event: &str,
+    body: String,
+) -> Result<()> {
+    let input = serde_json::json!({ "pullRequestReviewId": &*review });
+
+    mutate(
+        repo,
+        SUBMIT_REVIEW_MUTATION,
+        verdict(input, event, body),
+        "submitting review",
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Files and publishes a review in one call, for a verdict that carries no
+/// drafts and so has no pending review waiting for it.
+pub async fn create_review(
+    repo: &Repo,
+    pull_request: Arc<str>,
+    event: &str,
+    body: String,
+) -> Result<()> {
+    let input = serde_json::json!({ "pullRequestId": &*pull_request });
+
+    mutate(
+        repo,
+        CREATE_REVIEW_MUTATION,
+        verdict(input, event, body),
+        "submitting review",
+    )
+    .await
+    .map(|_| ())
 }
 
 /// A reply is a standalone comment addressed to the thread's first comment; it
@@ -486,29 +615,18 @@ pub async fn reply(
 
 pub async fn set_resolved(
     repo: &Repo,
-    thread_id: String,
+    thread_id: Arc<str>,
     is_resolved: bool,
 ) -> Result<()> {
-    let token = write_token().await?;
-    let url = repo.graphql_url();
     let (query, what) = if is_resolved {
         (RESOLVE_MUTATION, "resolving thread")
     } else {
         (UNRESOLVE_MUTATION, "unresolving thread")
     };
 
-    tokio::task::spawn_blocking(move || {
-        graphql(
-            &url,
-            Some(&token),
-            query,
-            &serde_json::json!({ "id": thread_id }),
-            what,
-        )
+    mutate(repo, query, serde_json::json!({ "id": &*thread_id }), what)
+        .await
         .map(|_| ())
-    })
-    .await
-    .context("thread resolution panicked")?
 }
 
 /// Statuspage ranks a component from `operational` up to `major_outage`.

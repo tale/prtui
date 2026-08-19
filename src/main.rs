@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use futures_core::Stream;
+use prtui::app::draft::Parent;
 use prtui::app::input::InputRouter;
 use prtui::app::review::{Failure, Request, Sent};
 use prtui::app::{App, Highlight};
@@ -123,15 +124,48 @@ fn spawn_request(
 ) {
     tokio::spawn(async move {
         let outcome = match request {
+            Request::AddThread { draft, input, .. } => {
+                gh::add_thread(&repo, input)
+                    .await
+                    .and_then(|val| model::parse_added_thread(&val))
+                    .map(|added| Sent::ThreadAdded {
+                        draft,
+                        review: added.review,
+                        comment: added.comment,
+                    })
+                    .map_err(|err| Failure::Draft(draft, err.to_string()))
+            }
+            Request::UpdateComment {
+                draft,
+                comment,
+                body,
+            } => gh::update_comment(&repo, comment, body)
+                .await
+                .map(|()| Sent::CommentUpdated(draft))
+                .map_err(|err| Failure::Draft(draft, err.to_string())),
+            Request::DeleteComment { draft, comment } => {
+                gh::delete_comment(&repo, comment)
+                    .await
+                    .map(|()| Sent::CommentDeleted(draft))
+                    .map_err(|err| Failure::Draft(draft, err.to_string()))
+            }
             Request::Review {
+                parent,
                 event,
                 body,
-                comments,
             } => {
-                let count = comments.len();
-                gh::submit_review(&repo, number, event.as_api(), body, comments)
-                    .await
-                    .map(|()| Sent::Review(count))
+                let submitted = match parent {
+                    Parent::Review(review) => {
+                        gh::submit_review(&repo, review, event.as_api(), body)
+                            .await
+                    }
+                    Parent::PullRequest(pr) => {
+                        gh::create_review(&repo, pr, event.as_api(), body).await
+                    }
+                };
+
+                submitted
+                    .map(|()| Sent::Review)
                     .map_err(|err| Failure::Review(err.to_string()))
             }
             Request::Reply { in_reply_to, body } => {

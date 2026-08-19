@@ -44,16 +44,102 @@ pub enum Attachment {
     File,
 }
 
-/// A review comment written but not yet submitted. Held locally so a whole
-/// review can be composed offline and sent in one request.
+/// How far a draft has got towards the copy GitHub holds.
+///
+/// A draft is drawn the moment it is written, so every state but `Synced` says
+/// the screen is ahead of the server. `Queued` is written but not yet sent,
+/// which is where a draft waits while the first one opens the pending review.
+/// `Creating` carries `is_dirty` because a draft edited before its own creation
+/// lands has no comment id to address the edit to: the follow-up is held until
+/// one comes back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sync {
+    Queued,
+    Creating { is_dirty: bool },
+    Synced,
+    Updating,
+    Deleting,
+    Failed(String),
+}
+
+impl Sync {
+    pub const fn is_settled(&self) -> bool {
+        matches!(self, Self::Synced)
+    }
+
+    /// True while the draft is out at GitHub, which is when a second request
+    /// for the same one has to wait rather than race it.
+    pub const fn is_in_flight(&self) -> bool {
+        matches!(
+            self,
+            Self::Creating { .. } | Self::Updating | Self::Deleting
+        )
+    }
+
+    pub const fn marker(&self) -> &'static str {
+        match self {
+            Self::Synced => " ✎",
+            Self::Failed(_) => " !",
+            _ => " ⋯",
+        }
+    }
+}
+
+/// A comment on the pending review GitHub holds for this pull request.
+///
+/// Drafts are written straight through rather than piled up locally: they
+/// survive a restart, they show up on github.com, and submitting the review is
+/// a verdict rather than a bulk upload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
+    /// Local and monotonic. A draft is drawn before GitHub has named it, so
+    /// this is what an answer is matched back against.
+    pub id: u64,
     pub path: Arc<str>,
     pub attachment: Attachment,
     pub body: String,
+    /// The comment node id, absent until the creation lands.
+    pub remote: Option<Arc<str>>,
+    pub sync: Sync,
 }
 
 impl Draft {
+    /// The `addPullRequestReviewThread` input. `parent` names the pending
+    /// review when one is already open and the pull request when none is, which
+    /// is what opens it.
+    pub fn to_input(&self, parent: &Parent) -> serde_json::Value {
+        let mut input = match parent {
+            Parent::Review(id) => {
+                serde_json::json!({ "pullRequestReviewId": &**id })
+            }
+            Parent::PullRequest(id) => {
+                serde_json::json!({ "pullRequestId": &**id })
+            }
+        };
+
+        input["path"] = (&*self.path).into();
+        input["body"] = self.body.as_str().into();
+
+        let Attachment::Lines { anchor, .. } = &self.attachment else {
+            input["subjectType"] = "FILE".into();
+            return input;
+        };
+
+        input["subjectType"] = "LINE".into();
+        input["line"] = anchor.end_line.into();
+        input["side"] = anchor.side.as_api().into();
+
+        // GitHub anchors a span at its last line and takes the first as
+        // `startLine`, which is only sent when the comment really covers more
+        // than one.
+        if anchor.is_multiline() {
+            input["startLine"] = anchor.start_line.into();
+            input["startSide"] = anchor.start_side.as_api().into();
+        }
+
+        input
+    }
+
     pub const fn is_file_level(&self) -> bool {
         matches!(self.attachment, Attachment::File)
     }
@@ -83,36 +169,14 @@ impl Draft {
                 own.start() <= rows.end() && rows.start() <= own.end()
             })
     }
+}
 
-    /// One entry of a review's `comments` array.
-    ///
-    /// GitHub anchors a span at its last line and takes the first as
-    /// `start_line`, which is only sent when the comment really covers more than
-    /// one. A file-level comment carries no position at all and says so with
-    /// `subject_type`, which is what stops the API rejecting the missing line.
-    pub fn to_api(&self) -> serde_json::Value {
-        let Attachment::Lines { anchor, .. } = &self.attachment else {
-            return serde_json::json!({
-                "path": &*self.path,
-                "body": self.body,
-                "subject_type": "file",
-            });
-        };
-
-        let mut comment = serde_json::json!({
-            "path": &*self.path,
-            "body": self.body,
-            "line": anchor.end_line,
-            "side": anchor.side.as_api(),
-        });
-
-        if anchor.is_multiline() {
-            comment["start_line"] = anchor.start_line.into();
-            comment["start_side"] = anchor.start_side.as_api().into();
-        }
-
-        comment
-    }
+/// What a new draft hangs off. A pull request with no pending review gets one
+/// opened by the first draft filed against it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Parent {
+    Review(Arc<str>),
+    PullRequest(Arc<str>),
 }
 
 /// Resolves a span of diff rows to the anchor GitHub understands.
@@ -178,4 +242,34 @@ pub fn anchor_for(
         end_line: *present.iter().max()?,
         side: Side::Right,
     })
+}
+
+/// The inverse of `anchor_for`: the rows a pending thread read back from GitHub
+/// covers, which is what the gutter marks and the cursor tests.
+///
+/// A deletion is addressed by its old line number and everything else by its
+/// new one, so which of the two a row is matched on follows the anchor's side
+/// rather than the row's own kind.
+pub fn rows_for(
+    file: &ChangedFile,
+    anchor: &Anchor,
+) -> Option<RangeInclusive<usize>> {
+    let matches = |line: &DiffLine, number: u32, side: Side| match side {
+        Side::Left => {
+            line.kind == LineKind::Removed && line.old_line == Some(number)
+        }
+        Side::Right => {
+            line.kind != LineKind::Removed && line.new_line == Some(number)
+        }
+    };
+
+    let start = file
+        .lines
+        .iter()
+        .position(|line| matches(line, anchor.start_line, anchor.start_side))?;
+    let end = file.lines[start..]
+        .iter()
+        .position(|line| matches(line, anchor.end_line, anchor.side))?;
+
+    Some(start..=start + end)
 }

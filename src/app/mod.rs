@@ -12,12 +12,12 @@ use crate::layout::rows;
 use crate::model::{ChangedFile, DiffLine, Meta, PullRequest, ReviewThread};
 use crate::renderer::{Segment, Theme, ThemeMode};
 use action::{Action, Motion};
-use draft::{Anchor, Attachment, Draft};
+use draft::{Anchor, Attachment, Draft, Parent, Sync};
 use editor::CommentEditor;
 use mode::{Mode, Selection};
 use review::{Failure, Request, Sent, Submission};
 use search::Query;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
@@ -112,17 +112,19 @@ impl Focus<'_> {
 /// Where a composed body will land once it leaves the editor.
 pub enum Target {
     /// A span of diff rows. `replacing` names the draft being reopened, so
-    /// editing revises it instead of stacking a second comment.
+    /// editing revises it instead of stacking a second comment. It is a draft
+    /// id rather than a position: a metadata fetch landing while the composer
+    /// is open rebuilds the list, and a position would then name someone else.
     Line {
         anchor: Anchor,
         rows: RangeInclusive<usize>,
-        replacing: Option<usize>,
+        replacing: Option<u64>,
     },
     /// A reply under an existing thread, addressed to its first comment.
     Reply { in_reply_to: u64 },
     /// The whole file. `replacing` names the draft being revised, since a file
     /// takes one remark rather than a stack of them.
-    File { replacing: Option<usize> },
+    File { replacing: Option<u64> },
 }
 
 /// An in-progress comment: the editor buffer plus where it will land.
@@ -154,13 +156,52 @@ enum FilesState {
     Failed,
 }
 
+/// Where a pending thread sits in the diff, in the terms a draft is held in.
+///
+/// A thread whose line no longer exists in the patch — outdated, or against a
+/// file the diff does not carry — has no row to mark, so it is dropped rather
+/// than drawn in the wrong place.
+fn attachment_for(
+    thread: &ReviewThread,
+    files: &HashMap<&str, &ChangedFile>,
+) -> Option<Attachment> {
+    if thread.is_file_level {
+        return Some(Attachment::File);
+    }
+
+    let end_line = thread.anchor_line()?;
+    let anchor = Anchor {
+        start_line: thread.start_line.unwrap_or(end_line),
+        start_side: thread.start_side.unwrap_or(thread.side),
+        end_line,
+        side: thread.side,
+    };
+
+    let file = files.get(&*thread.path)?;
+    let rows = draft::rows_for(file, &anchor)?;
+
+    Some(Attachment::Lines { rows, anchor })
+}
+
 pub struct App {
     pub pr: Option<PullRequest>,
     /// Shared so the highlighting thread reads the same patches the diff is
     /// drawn from rather than a copy of them.
     pub files: Arc<[ChangedFile]>,
     pub threads_by_path: HashMap<Arc<str>, Vec<ReviewThread>>,
+    /// The pending review's comments, mirrored locally so they can be drawn
+    /// before GitHub has answered for them.
     pub drafts: Vec<Draft>,
+    /// The review the drafts hang off. Absent until the first draft opens one.
+    pending_review: Option<Arc<str>>,
+    /// Pending threads exactly as GitHub last reported them. Held apart from
+    /// the drafts because turning one into a draft needs the file's patch, and
+    /// the two arrive independently.
+    pending_threads: Vec<ReviewThread>,
+    /// Comments discarded here but possibly still in a metadata fetch that left
+    /// before the discard landed. Without this they come back from the dead.
+    retired: HashSet<Arc<str>>,
+    next_draft_id: u64,
 
     pub mode: Mode,
     pub selection: Option<Selection>,
@@ -216,6 +257,10 @@ impl App {
             files: Arc::from([]),
             threads_by_path: HashMap::new(),
             drafts: Vec::new(),
+            pending_review: None,
+            pending_threads: Vec::new(),
+            retired: HashSet::new(),
+            next_draft_id: 0,
             mode: Mode::Normal,
             selection: None,
             composer: None,
@@ -263,6 +308,7 @@ impl App {
         self.highlights.clear();
         self.files = files.into();
         self.files_state = FilesState::Loaded;
+        self.reseed_drafts();
     }
 
     /// Threads arrive over GraphQL, which stays up independently of the REST
@@ -302,14 +348,93 @@ impl App {
     /// Files the threads by path, which is the only way anything looks one up.
     /// They move rather than copy: a review's whole comment history is the
     /// heaviest thing the app holds and one owner is enough.
+    ///
+    /// A pending thread is this session's own unsubmitted work, so it becomes a
+    /// draft instead of a conversation on the diff.
     pub fn set_meta(&mut self, meta: Meta) {
         let mut by_path: HashMap<Arc<str>, Vec<ReviewThread>> = HashMap::new();
+        let mut pending = Vec::new();
+
         for thread in meta.threads {
-            by_path.entry(thread.path.clone()).or_default().push(thread);
+            if !thread.is_pending() {
+                by_path.entry(thread.path.clone()).or_default().push(thread);
+                continue;
+            }
+
+            // A discard that GitHub has already answered can still be missing
+            // from a fetch that left before it, so the thread is dropped rather
+            // than drawn back onto the diff.
+            if !self.is_retired(&thread) {
+                pending.push(thread);
+            }
         }
 
+        self.retired.retain(|id| {
+            pending.iter().any(|thread| thread.comments[0].id == *id)
+        });
+
         self.threads_by_path = by_path;
+        self.pending_threads = pending;
+        self.pending_review = meta.pending_review;
         self.pr = Some(meta.pr);
+        self.reseed_drafts();
+        self.create_drafts();
+    }
+
+    fn is_retired(&self, thread: &ReviewThread) -> bool {
+        thread
+            .comments
+            .first()
+            .is_some_and(|first| self.retired.contains(&first.id))
+    }
+
+    /// Rebuilds the drafts from what GitHub last reported.
+    ///
+    /// A draft the server has not caught up with yet outranks its own stale
+    /// copy: the screen is the newer of the two until the write lands, and
+    /// dropping the local one would undo an edit in front of the user.
+    fn reseed_drafts(&mut self) {
+        let files: HashMap<&str, &ChangedFile> =
+            self.files.iter().map(|file| (&*file.path, file)).collect();
+
+        let mut seeded: Vec<Draft> = Vec::new();
+        for thread in &self.pending_threads {
+            let Some(comment) = thread.comments.first() else {
+                continue;
+            };
+            let Some(attachment) = attachment_for(thread, &files) else {
+                continue;
+            };
+
+            seeded.push(Draft {
+                id: 0,
+                path: thread.path.clone(),
+                attachment,
+                body: comment.body.clone(),
+                remote: Some(comment.id.clone()),
+                sync: Sync::Synced,
+            });
+        }
+
+        let mut in_flight: Vec<Draft> = std::mem::take(&mut self.drafts)
+            .into_iter()
+            .filter(|draft| !draft.sync.is_settled())
+            .collect();
+
+        seeded.retain(|seed| {
+            !in_flight.iter().any(|draft| draft.remote == seed.remote)
+        });
+        for draft in &mut seeded {
+            draft.id = self.take_draft_id();
+        }
+
+        seeded.append(&mut in_flight);
+        self.drafts = seeded;
+    }
+
+    const fn take_draft_id(&mut self) -> u64 {
+        self.next_draft_id += 1;
+        self.next_draft_id
     }
 
     pub fn current_file(&self) -> Option<&ChangedFile> {
@@ -488,13 +613,14 @@ impl App {
             return;
         };
 
-        let replacing = self
+        let existing = self
             .drafts
             .iter()
-            .position(|draft| draft.path == path && draft.is_file_level());
+            .find(|draft| draft.path == path && draft.is_file_level());
+        let replacing = existing.map(|draft| draft.id);
         let mut editor = CommentEditor::default();
-        if let Some(index) = replacing {
-            editor.set_text(&self.drafts[index].body);
+        if let Some(draft) = existing {
+            editor.set_text(&draft.body);
         }
 
         self.composer = Some(Composer {
@@ -532,7 +658,7 @@ impl App {
             target: Target::Line {
                 anchor,
                 rows,
-                replacing: Some(index),
+                replacing: Some(draft.id),
             },
             path: draft.path.clone(),
         });
@@ -590,8 +716,32 @@ impl App {
             return;
         };
 
-        self.drafts.remove(index);
-        self.status = "draft discarded".into();
+        self.discard_draft(index);
+    }
+
+    /// Discards a draft, which means asking GitHub to drop the comment holding
+    /// it. One whose own creation is still out has no comment id to name yet,
+    /// so it is marked and the discard rides on that answer.
+    fn discard_draft(&mut self, index: usize) {
+        let draft = &mut self.drafts[index];
+
+        if let Sync::Creating { .. } = draft.sync {
+            draft.sync = Sync::Deleting;
+            self.status = "discarding draft…".into();
+            return;
+        }
+
+        let Some(comment) = draft.remote.clone() else {
+            self.drafts.remove(index);
+            self.status = "draft discarded".into();
+            return;
+        };
+
+        let id = draft.id;
+        draft.sync = Sync::Deleting;
+        self.retired.insert(comment.clone());
+        self.send(Request::DeleteComment { draft: id, comment });
+        self.status = "discarding draft…".into();
     }
 
     fn toggle_resolved(&mut self) {
@@ -610,7 +760,7 @@ impl App {
 
         let is_resolved = !thread.is_resolved;
         self.send(Request::Resolve {
-            thread_id: id.to_string(),
+            thread_id: id,
             is_resolved,
         });
         self.status = if is_resolved {
@@ -649,33 +799,43 @@ impl App {
         let event = submission.event;
         let body = submission.editor.text().trim().to_string();
 
+        // Drafts are already on GitHub, so the review that publishes them is
+        // the one the app opened for them. Without any, the verdict rides alone
+        // and files a review of its own.
+        let parent = match (&self.pending_review, self.pr.as_ref()) {
+            (Some(review), _) => Some(Parent::Review(review.clone())),
+            (None, Some(pr)) => Some(Parent::PullRequest(pr.id.clone())),
+            (None, None) => None,
+        };
+
         // An approval is a verdict in itself, so a bare one with no summary and
         // no inline comments is the whole point rather than an empty review.
         let refusal = if self.is_review_sending() {
             Some("a review is already going out".to_string())
         } else if body.is_empty() && event.requires_body() {
             Some(format!("{} needs a summary", event.label()))
+        } else if self.is_draft_in_flight() {
+            Some("a draft is still saving".to_string())
+        } else if parent.is_none() {
+            Some("the pull request has not loaded yet".to_string())
         } else {
             None
         };
 
-        if let Some(refusal) = refusal {
-            self.status = refusal;
+        let (Some(parent), None) = (parent, refusal.as_ref()) else {
+            self.status = refusal.unwrap_or_default();
             self.submission = Some(submission);
             return;
-        }
+        };
 
         submission.error = None;
         self.sending = Some(submission);
         self.mode = Mode::Normal;
 
-        let comments: Vec<serde_json::Value> =
-            self.drafts.iter().map(Draft::to_api).collect();
-
         self.send(Request::Review {
+            parent,
             event,
             body,
-            comments,
         });
         self.status = format!("submitting {}…", event.label());
     }
@@ -696,8 +856,24 @@ impl App {
         self.in_flight = self.in_flight.saturating_sub(1);
 
         self.status = match outcome {
-            Ok(Sent::Review(count)) => {
-                self.drafts.drain(..count.min(self.drafts.len()));
+            Ok(Sent::ThreadAdded {
+                draft,
+                review,
+                comment,
+            }) => self.draft_created(draft, review, comment),
+            Ok(Sent::CommentUpdated(draft)) => self.draft_settled(draft),
+            Ok(Sent::CommentDeleted(draft)) => {
+                if let Some(index) = self.draft_by_id(draft) {
+                    self.drafts.remove(index);
+                }
+
+                "draft discarded".into()
+            }
+            Ok(Sent::Review) => {
+                // Everything it carried is GitHub's now, and the refetch that
+                // follows brings the whole review back as submitted threads.
+                self.drafts.clear();
+                self.pending_review = None;
                 self.sending = None;
                 "review submitted".into()
             }
@@ -706,13 +882,77 @@ impl App {
             Ok(Sent::Resolution(false)) => "thread unresolved".into(),
             Err(failure) => {
                 let status = format!("error: {}", failure.message());
-                if let Failure::Review(error) = failure {
-                    self.reject_review(error);
+                match failure {
+                    Failure::Review(error) => self.reject_review(error),
+                    Failure::Draft(draft, error) => {
+                        self.reject_draft(draft, error);
+                    }
+                    Failure::Other(_) => {}
                 }
 
                 status
             }
         };
+    }
+
+    /// GitHub has named the draft. Whatever was asked of it while it had no
+    /// name — an edit, a discard — goes out now that it has one.
+    fn draft_created(
+        &mut self,
+        draft: u64,
+        review: Arc<str>,
+        comment: Arc<str>,
+    ) -> String {
+        self.pending_review = Some(review);
+
+        let Some(index) = self.draft_by_id(draft) else {
+            return "draft saved".into();
+        };
+
+        self.drafts[index].remote = Some(comment);
+        let status = match self.drafts[index].sync.clone() {
+            Sync::Deleting => {
+                self.drafts[index].sync = Sync::Synced;
+                self.discard_draft(index);
+                "discarding draft…".into()
+            }
+            Sync::Creating { is_dirty: true } => {
+                self.update_draft(index);
+                "saving draft…".into()
+            }
+            _ => {
+                self.drafts[index].sync = Sync::Synced;
+                "draft saved".into()
+            }
+        };
+
+        // The review this opened is what everything still queued was waiting
+        // for.
+        self.create_drafts();
+
+        status
+    }
+
+    fn draft_settled(&mut self, draft: u64) -> String {
+        if let Some(index) = self.draft_by_id(draft) {
+            self.drafts[index].sync = Sync::Synced;
+        }
+
+        "draft saved".into()
+    }
+
+    /// A draft the server refused stays on screen carrying the reason. Dropping
+    /// it would throw away writing the user cannot get back.
+    fn reject_draft(&mut self, draft: u64, error: String) {
+        let Some(index) = self.draft_by_id(draft) else {
+            return;
+        };
+
+        if let Some(comment) = &self.drafts[index].remote {
+            self.retired.remove(comment);
+        }
+
+        self.drafts[index].sync = Sync::Failed(error);
     }
 
     /// A rejected review keeps everything it was made of. The summary goes back
@@ -1059,36 +1299,126 @@ impl App {
 
     /// Files a composed body as a draft, revising `replacing` when the composer
     /// was reopened on one. Emptying a reopened draft is how it gets thrown away.
+    ///
+    /// The draft is on screen before GitHub has been told about it, so writing
+    /// one is two steps: the local copy, then the request that catches the
+    /// server up with it.
     fn save_draft(
         &mut self,
         path: Arc<str>,
         attachment: Attachment,
         body: String,
-        replacing: Option<usize>,
+        replacing: Option<u64>,
     ) {
-        let Some(index) = replacing else {
+        let Some(index) = replacing.and_then(|id| self.draft_by_id(id)) else {
             if body.is_empty() {
                 self.status = "empty comment discarded".into();
                 return;
             }
 
+            let id = self.take_draft_id();
             self.drafts.push(Draft {
+                id,
                 path,
                 attachment,
                 body,
+                remote: None,
+                sync: Sync::Queued,
             });
-            self.status = "draft saved".into();
+            self.status = "saving draft…".into();
+            self.create_drafts();
             return;
         };
 
         if body.is_empty() {
-            self.drafts.remove(index);
-            self.status = "draft discarded".into();
+            self.discard_draft(index);
             return;
         }
 
-        self.drafts[index].body = body;
-        self.status = "draft updated".into();
+        let draft = &mut self.drafts[index];
+        draft.body = body;
+
+        match draft.sync {
+            // Nothing has left yet, so the new body is simply what gets sent.
+            Sync::Queued => self.status = "saving draft…".into(),
+            // An edit that beats its own creation home has nothing to address
+            // itself to, so it rides along on that answer instead.
+            Sync::Creating { .. } => {
+                draft.sync = Sync::Creating { is_dirty: true };
+                self.status = "saving draft…".into();
+            }
+            _ => self.update_draft(index),
+        }
+    }
+
+    /// Sends the body of an already-created draft. A draft with no comment id
+    /// has nothing to send it to, which only happens after a creation failed.
+    fn update_draft(&mut self, index: usize) {
+        let draft = &mut self.drafts[index];
+        let Some(comment) = draft.remote.clone() else {
+            draft.sync = Sync::Queued;
+            self.create_drafts();
+            return;
+        };
+
+        let (id, body) = (draft.id, draft.body.clone());
+        draft.sync = Sync::Updating;
+        self.send(Request::UpdateComment {
+            draft: id,
+            comment,
+            body,
+        });
+        self.status = "saving draft…".into();
+    }
+
+    /// Sends every draft GitHub has not been told about yet.
+    ///
+    /// The first one has to open the pending review, and a second sent beside
+    /// it would open a second review, so nothing else leaves until that answer
+    /// names the review the rest can join.
+    fn create_drafts(&mut self) {
+        let Some(pull_request) = self.pr.as_ref().map(|pr| pr.id.clone())
+        else {
+            return;
+        };
+
+        let parent = match &self.pending_review {
+            Some(review) => Parent::Review(review.clone()),
+            None if self.is_draft_in_flight() => return,
+            None => Parent::PullRequest(pull_request),
+        };
+
+        let queued: Vec<usize> = self
+            .drafts
+            .iter()
+            .enumerate()
+            .filter(|(_, draft)| draft.sync == Sync::Queued)
+            .map(|(index, _)| index)
+            .collect();
+
+        let is_opening = matches!(parent, Parent::PullRequest(_));
+        for index in queued {
+            let request = Request::AddThread {
+                draft: self.drafts[index].id,
+                parent: parent.clone(),
+                input: self.drafts[index].to_input(&parent),
+            };
+
+            self.drafts[index].sync = Sync::Creating { is_dirty: false };
+            self.send(request);
+
+            if is_opening {
+                return;
+            }
+        }
+    }
+
+    fn is_draft_in_flight(&self) -> bool {
+        self.drafts.iter().any(|draft| draft.sync.is_in_flight())
+    }
+
+    fn draft_by_id(&self, id: u64) -> Option<usize> {
+        self.drafts.iter().position(|draft| draft.id == id)
     }
 
     fn toggle_pane(&mut self) {

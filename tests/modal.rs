@@ -1,5 +1,5 @@
 use prtui::app::action::{Action, Motion};
-use prtui::app::draft::Side;
+use prtui::app::draft::{Parent, Side, Sync};
 use prtui::app::input::{DispatchResult, InputRouter};
 use prtui::app::keymap::{Keymap, Resolution};
 use prtui::app::mode::Mode;
@@ -62,6 +62,40 @@ fn fixture_threads() -> Vec<prtui::model::ReviewThread> {
         serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
 
     parse_meta(&meta).unwrap().threads
+}
+
+/// Answers every draft request the way GitHub would.
+///
+/// Drafts are written straight through now, so a test that wants the state
+/// after a save has to let the round trip finish rather than staging it.
+fn settle(app: &mut App) {
+    for _ in 0..8 {
+        let requests = app.take_requests();
+        if requests.is_empty() {
+            return;
+        }
+
+        for request in requests {
+            match request {
+                Request::AddThread { draft, .. } => {
+                    app.finish(Ok(Sent::ThreadAdded {
+                        draft,
+                        review: "PRR_1".into(),
+                        comment: format!("PRRC_{draft}").into(),
+                    }));
+                }
+                Request::UpdateComment { draft, .. } => {
+                    app.finish(Ok(Sent::CommentUpdated(draft)));
+                }
+                Request::DeleteComment { draft, .. } => {
+                    app.finish(Ok(Sent::CommentDeleted(draft)));
+                }
+                other => panic!("unexpected request {other:?}"),
+            }
+        }
+    }
+
+    panic!("draft requests never settled");
 }
 
 fn load() -> App {
@@ -412,11 +446,13 @@ fn a_selection_across_both_sides_keeps_the_whole_block() {
     assert_eq!(anchor.end_line, 2, "the added line");
     assert!(anchor.is_multiline(), "a cross-side span is never one line");
 
-    let comment = app.drafts[0].to_api();
-    assert_eq!(comment["start_line"], 2);
-    assert_eq!(comment["start_side"], "LEFT");
-    assert_eq!(comment["line"], 2);
-    assert_eq!(comment["side"], "RIGHT");
+    let input = app.drafts[0].to_input(&Parent::Review("PRR_1".into()));
+    assert_eq!(input["pullRequestReviewId"], "PRR_1");
+    assert_eq!(input["subjectType"], "LINE");
+    assert_eq!(input["startLine"], 2);
+    assert_eq!(input["startSide"], "LEFT");
+    assert_eq!(input["line"], 2);
+    assert_eq!(input["side"], "RIGHT");
 }
 
 /// Ending back on a deletion has no cross-side form, so it stays on the left
@@ -440,7 +476,8 @@ fn a_selection_ending_in_deletions_stays_on_the_old_side() {
     assert_eq!(anchor.start_side, Side::Left);
     assert_eq!(anchor.side, Side::Left);
     assert_eq!((anchor.start_line, anchor.end_line), (2, 3));
-    assert_eq!(app.drafts[0].to_api()["start_side"], "LEFT");
+    let input = app.drafts[0].to_input(&Parent::Review("PRR_1".into()));
+    assert_eq!(input["startSide"], "LEFT");
 }
 
 #[test]
@@ -1262,8 +1299,10 @@ fn both_prompts_step_with_arrows_and_control_keys() {
     assert!(app.search.is_none());
 }
 
+/// Each draft is filed against the pending review as it is written, so the
+/// first one opens that review and the rest join it.
 #[test]
-fn submitting_ships_every_draft_as_one_review() {
+fn every_draft_is_filed_against_one_pending_review() {
     let mut app = load();
     let added: Vec<usize> = app.files[app.selected_file]
         .lines
@@ -1278,12 +1317,58 @@ fn submitting_ships_every_draft_as_one_review() {
     app.composer.as_mut().unwrap().editor.set_text("first");
     act(&mut app, &Action::CommitComment);
 
+    let opening = app.take_requests();
+    let Request::AddThread {
+        draft,
+        parent,
+        input,
+    } = opening[0].clone()
+    else {
+        panic!("expected a draft request, got {:?}", opening[0]);
+    };
+
+    assert_eq!(parent, Parent::PullRequest("PR_fixture".into()));
+    assert_eq!(input["body"], "first");
+    assert_eq!(input["subjectType"], "LINE");
+    assert_eq!(input["side"], "RIGHT");
+    assert!(
+        input.get("startLine").is_none(),
+        "a single-line comment sends no span"
+    );
+
+    app.finish(Ok(Sent::ThreadAdded {
+        draft,
+        review: "PRR_1".into(),
+        comment: "PRRC_1".into(),
+    }));
+    assert_eq!(app.drafts[0].sync, Sync::Synced);
+
     // Well clear of the first draft, so this is a second one and not a revision.
     app.cursor = *added.iter().find(|row| **row > added[0] + 4).unwrap();
     press(&mut app, "V2jc");
     app.composer.as_mut().unwrap().editor.set_text("spanning");
     act(&mut app, &Action::CommitComment);
-    assert_eq!(app.drafts.len(), 2);
+
+    let joining = app.take_requests();
+    let Request::AddThread { parent, input, .. } = joining[0].clone() else {
+        panic!("expected a draft request, got {:?}", joining[0]);
+    };
+
+    assert_eq!(parent, Parent::Review("PRR_1".into()), "joins the review");
+    assert!(input["startLine"].as_u64() < input["line"].as_u64());
+    assert_eq!(input["startSide"], "RIGHT");
+}
+
+/// Everything the review carries is already on GitHub, so submitting sends a
+/// verdict against the pending review and nothing else.
+#[test]
+fn submitting_publishes_the_pending_review() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("first");
+    act(&mut app, &Action::CommitComment);
+    settle(&mut app);
 
     press(&mut app, "s");
     assert_eq!(app.mode, Mode::Submit);
@@ -1297,34 +1382,40 @@ fn submitting_ships_every_draft_as_one_review() {
 
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.in_flight, 1);
-
-    let requests = app.take_requests();
-    let Request::Review {
-        event,
-        body,
-        comments,
-    } = &requests[0]
-    else {
-        panic!("expected a review request, got {:?}", requests[0]);
-    };
-
-    assert_eq!(*event, ReviewEvent::Approve);
-    assert_eq!(body, "looks good");
-    assert_eq!(comments.len(), 2);
-    assert_eq!(comments[0]["body"], "first");
-    assert_eq!(comments[0]["side"], "RIGHT");
-    assert!(
-        comments[0].get("start_line").is_none(),
-        "a single-line comment sends no span"
+    assert_eq!(
+        app.take_requests(),
+        vec![Request::Review {
+            parent: Parent::Review("PRR_1".into()),
+            event: ReviewEvent::Approve,
+            body: "looks good".into(),
+        }]
     );
-    assert!(comments[1]["start_line"].as_u64() < comments[1]["line"].as_u64());
-    assert_eq!(comments[1]["start_side"], "RIGHT");
 
     // The drafts only retire once GitHub has actually taken them.
-    assert_eq!(app.drafts.len(), 2);
-    app.finish(Ok(Sent::Review(2)));
+    assert_eq!(app.drafts.len(), 1);
+    app.finish(Ok(Sent::Review));
     assert!(app.drafts.is_empty());
     assert_eq!(app.in_flight, 0);
+}
+
+/// A draft still in flight would not be part of the review it is meant for, so
+/// the verdict waits for it rather than publishing without it.
+#[test]
+fn submitting_waits_for_a_draft_still_saving() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("hold on");
+    act(&mut app, &Action::CommitComment);
+    app.take_requests();
+
+    press(&mut app, "s");
+    app.submission.as_mut().unwrap().editor.set_text("summary");
+    act(&mut app, &Action::CommitSubmit);
+
+    assert_eq!(app.status, "a draft is still saving");
+    assert!(app.take_requests().is_empty());
+    assert_eq!(app.mode, Mode::Submit);
 }
 
 #[test]
@@ -1334,6 +1425,7 @@ fn a_failed_submission_keeps_the_drafts() {
     press(&mut app, "c");
     app.composer.as_mut().unwrap().editor.set_text("keep me");
     act(&mut app, &Action::CommitComment);
+    settle(&mut app);
 
     press(&mut app, "s");
     app.submission
@@ -1396,6 +1488,7 @@ fn a_second_review_waits_for_the_one_in_flight() {
     press(&mut app, "c");
     app.composer.as_mut().unwrap().editor.set_text("once");
     act(&mut app, &Action::CommitComment);
+    settle(&mut app);
 
     press(&mut app, "s");
     app.submission.as_mut().unwrap().editor.set_text("summary");
@@ -1412,37 +1505,8 @@ fn a_second_review_waits_for_the_one_in_flight() {
     assert_eq!(app.in_flight, 1);
 }
 
-#[test]
-fn a_draft_written_during_a_submission_survives_it() {
-    let mut app = load();
-    park_on_code(&mut app);
-    press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("sent");
-    act(&mut app, &Action::CommitComment);
-
-    press(&mut app, "s");
-    app.submission
-        .as_mut()
-        .unwrap()
-        .editor
-        .set_text("a summary");
-    act(&mut app, &Action::CommitSubmit);
-    assert_eq!(app.take_requests().len(), 1);
-
-    app.cursor += 1;
-    press(&mut app, "c");
-    app.composer
-        .as_mut()
-        .unwrap()
-        .editor
-        .set_text("written later");
-    act(&mut app, &Action::CommitComment);
-
-    app.finish(Ok(Sent::Review(1)));
-    assert_eq!(app.drafts.len(), 1);
-    assert_eq!(app.drafts[0].body, "written later");
-}
-
+/// A verdict with nothing under it has no pending review to publish, so it
+/// files and submits one against the pull request itself.
 #[test]
 fn a_bare_approval_needs_neither_summary_nor_comments() {
     let mut app = load();
@@ -1458,9 +1522,9 @@ fn a_bare_approval_needs_neither_summary_nor_comments() {
     assert_eq!(
         app.take_requests(),
         vec![Request::Review {
+            parent: Parent::PullRequest("PR_fixture".into()),
             event: ReviewEvent::Approve,
             body: String::new(),
-            comments: Vec::new(),
         }]
     );
 }
@@ -1495,6 +1559,7 @@ fn a_verdict_that_needs_a_summary_says_so_before_sending() {
         .editor
         .set_text("inline only");
     act(&mut app, &Action::CommitComment);
+    settle(&mut app);
 
     for (event, label) in [
         (ReviewEvent::Comment, "comment needs a summary"),
@@ -1568,7 +1633,7 @@ fn resolving_toggles_the_focused_thread() {
     assert_eq!(
         app.take_requests(),
         vec![Request::Resolve {
-            thread_id: thread.id.to_string(),
+            thread_id: thread.id,
             is_resolved: true,
         }]
     );
@@ -1586,6 +1651,7 @@ fn e_reopens_the_draft_instead_of_stacking_another() {
     press(&mut app, "c");
     app.composer.as_mut().unwrap().editor.set_text("first pass");
     act(&mut app, &Action::CommitComment);
+    settle(&mut app);
     let rows = app.drafts[0].rows().unwrap().clone();
 
     press(&mut app, "e");
@@ -1600,6 +1666,7 @@ fn e_reopens_the_draft_instead_of_stacking_another() {
         .editor
         .set_text("second pass");
     act(&mut app, &Action::CommitComment);
+    settle(&mut app);
 
     assert_eq!(app.drafts.len(), 1);
     assert_eq!(app.drafts[0].body, "second pass");
@@ -1613,6 +1680,7 @@ fn e_reopens_the_draft_instead_of_stacking_another() {
     press(&mut app, "e");
     app.composer.as_mut().unwrap().editor.set_text("");
     act(&mut app, &Action::CommitComment);
+    settle(&mut app);
     assert!(app.drafts.is_empty());
 
     press(&mut app, "e");
@@ -1697,4 +1765,214 @@ fn the_submit_overlay_types_its_summary_and_tabs_the_verdict() {
     send(&mut input, &mut app, KeyEvent::from(KeyCode::Enter));
     assert_eq!(app.mode, Mode::Normal, "enter sends the review");
     assert_eq!(app.in_flight, 1);
+}
+
+/// A draft is on screen before GitHub has taken it, so the gutter has to say
+/// which of the two the reader is looking at.
+#[test]
+fn a_draft_reports_how_far_it_has_got() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("wip");
+    act(&mut app, &Action::CommitComment);
+
+    assert_eq!(app.drafts[0].sync, Sync::Creating { is_dirty: false });
+    assert_eq!(app.status, "saving draft…");
+
+    let requests = app.take_requests();
+    let Request::AddThread { draft, .. } = requests[0] else {
+        panic!("expected a draft request, got {:?}", requests[0]);
+    };
+
+    app.finish(Err(Failure::Draft(draft, "HTTP 422: nope".into())));
+    assert_eq!(app.drafts[0].sync, Sync::Failed("HTTP 422: nope".into()));
+    assert_eq!(app.drafts[0].body, "wip", "the writing is not thrown away");
+}
+
+/// The first draft opens the pending review. A second sent beside it would open
+/// a second review, so it waits for the id the first one comes back with.
+#[test]
+fn drafts_written_together_share_one_review() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("one");
+    act(&mut app, &Action::CommitComment);
+
+    let opening = app.take_requests();
+    assert_eq!(opening.len(), 1);
+
+    app.cursor += 1;
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("two");
+    act(&mut app, &Action::CommitComment);
+
+    assert!(
+        app.take_requests().is_empty(),
+        "the second waits for the review the first opens"
+    );
+    assert_eq!(app.drafts[1].sync, Sync::Queued);
+
+    let Request::AddThread { draft, .. } = opening[0] else {
+        panic!("expected a draft request");
+    };
+    app.finish(Ok(Sent::ThreadAdded {
+        draft,
+        review: "PRR_1".into(),
+        comment: "PRRC_1".into(),
+    }));
+
+    let joining = app.take_requests();
+    assert!(matches!(
+        joining.as_slice(),
+        [Request::AddThread {
+            parent: Parent::Review(_),
+            ..
+        }]
+    ));
+}
+
+/// An edit that beats its own creation home has no comment id to name, so it
+/// rides on that answer rather than being lost or sent to nothing.
+#[test]
+fn an_edit_before_the_creation_lands_follows_it() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("first");
+    act(&mut app, &Action::CommitComment);
+
+    let requests = app.take_requests();
+    let Request::AddThread { draft, .. } = requests[0] else {
+        panic!("expected a draft request");
+    };
+
+    press(&mut app, "e");
+    app.composer.as_mut().unwrap().editor.set_text("revised");
+    act(&mut app, &Action::CommitComment);
+
+    assert_eq!(app.drafts[0].sync, Sync::Creating { is_dirty: true });
+    assert!(app.take_requests().is_empty(), "nothing to address it to");
+
+    app.finish(Ok(Sent::ThreadAdded {
+        draft,
+        review: "PRR_1".into(),
+        comment: "PRRC_1".into(),
+    }));
+
+    assert_eq!(
+        app.take_requests(),
+        vec![Request::UpdateComment {
+            draft,
+            comment: "PRRC_1".into(),
+            body: "revised".into(),
+        }]
+    );
+}
+
+/// Same for a discard: the comment has to exist before it can be dropped.
+#[test]
+fn a_discard_before_the_creation_lands_follows_it() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("nevermind");
+    act(&mut app, &Action::CommitComment);
+
+    let requests = app.take_requests();
+    let Request::AddThread { draft, .. } = requests[0] else {
+        panic!("expected a draft request");
+    };
+
+    act(&mut app, &Action::DeleteDraft);
+    assert_eq!(app.drafts[0].sync, Sync::Deleting);
+    assert!(app.take_requests().is_empty());
+
+    app.finish(Ok(Sent::ThreadAdded {
+        draft,
+        review: "PRR_1".into(),
+        comment: "PRRC_1".into(),
+    }));
+
+    assert_eq!(
+        app.take_requests(),
+        vec![Request::DeleteComment {
+            draft,
+            comment: "PRRC_1".into(),
+        }]
+    );
+
+    app.finish(Ok(Sent::CommentDeleted(draft)));
+    assert!(app.drafts.is_empty());
+}
+
+/// A metadata fetch that left before a discard landed still carries the comment
+/// it dropped. Trusting it would put the draft back on screen.
+#[test]
+fn a_discarded_draft_does_not_come_back_from_a_stale_fetch() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("gone");
+    act(&mut app, &Action::CommitComment);
+    settle(&mut app);
+
+    let comment = app.drafts[0].remote.clone().unwrap();
+    act(&mut app, &Action::DeleteDraft);
+    settle(&mut app);
+    assert!(app.drafts.is_empty());
+
+    app.set_meta(meta_with_pending(&comment, "gone"));
+    assert!(
+        app.drafts.is_empty(),
+        "the discard outranks the stale fetch"
+    );
+}
+
+/// The screen is the newer of the two while a write is out, so a fetch that
+/// predates it must not undo an edit in front of the user.
+#[test]
+fn a_fetch_does_not_overwrite_a_draft_still_saving() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("first");
+    act(&mut app, &Action::CommitComment);
+    settle(&mut app);
+
+    let comment = app.drafts[0].remote.clone().unwrap();
+    press(&mut app, "e");
+    app.composer.as_mut().unwrap().editor.set_text("revised");
+    act(&mut app, &Action::CommitComment);
+    assert_eq!(app.drafts[0].sync, Sync::Updating);
+
+    app.set_meta(meta_with_pending(&comment, "first"));
+
+    assert_eq!(app.drafts.len(), 1);
+    assert_eq!(app.drafts[0].body, "revised");
+    assert_eq!(app.drafts[0].sync, Sync::Updating);
+}
+
+/// The fixture's metadata with one pending thread bolted on, standing in for a
+/// fetch that still believes in a draft.
+fn meta_with_pending(comment: &str, body: &str) -> prtui::model::Meta {
+    let mut meta: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
+    let pr = &mut meta["data"]["repository"]["pullRequest"];
+
+    pr["pendingReview"] = serde_json::json!({ "nodes": [{ "id": "PRR_1" }] });
+    let mut thread = pr["reviewThreads"]["nodes"][0].clone();
+    thread["id"] = "PRRT_pending".into();
+    thread["comments"]["nodes"] = serde_json::json!([{
+        "id": comment,
+        "state": "PENDING",
+        "fullDatabaseId": null,
+        "author": { "login": "tale" },
+        "body": body,
+        "createdAt": "now",
+    }]);
+    pr["reviewThreads"]["nodes"] = serde_json::json!([thread]);
+
+    parse_meta(&meta).unwrap()
 }

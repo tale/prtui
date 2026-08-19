@@ -65,21 +65,37 @@ struct RawFile {
 
 #[derive(Debug, Clone)]
 pub struct Comment {
+    /// The GraphQL node id, which is what editing and discarding a draft are
+    /// addressed to.
+    pub id: Arc<str>,
     /// The REST id, which is what a reply has to be addressed to. GraphQL node
     /// ids are not interchangeable with it.
     pub rest_id: Option<u64>,
     pub author: String,
     pub body: String,
     pub created_at: String,
+    /// A comment nobody but its author can see yet, because the review holding
+    /// it has not been submitted.
+    pub is_pending: bool,
 }
 
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each one mirrors an independent field of GitHub's thread"
+)]
 pub struct ReviewThread {
     pub id: Arc<str>,
     pub path: Arc<str>,
     pub line: Option<u32>,
     pub original_line: Option<u32>,
+    pub start_line: Option<u32>,
     pub side: Side,
+    /// Null for a thread that covers one line, where the start side is the
+    /// only side there is.
+    pub start_side: Option<Side>,
+    /// A remark on the file rather than on any line in it.
+    pub is_file_level: bool,
     pub is_resolved: bool,
     pub is_outdated: bool,
     pub can_resolve: bool,
@@ -87,6 +103,12 @@ pub struct ReviewThread {
 }
 
 impl ReviewThread {
+    /// A thread is pending exactly when its first comment is, since a reply
+    /// cannot be filed against a review that has not been submitted.
+    pub fn is_pending(&self) -> bool {
+        self.comments.first().is_some_and(|first| first.is_pending)
+    }
+
     /// Current threads use `line`; GitHub clears it when a thread becomes
     /// outdated, leaving `originalLine` as the only usable display anchor.
     pub fn anchor_line(&self) -> Option<u32> {
@@ -112,6 +134,9 @@ impl ReviewThread {
 
 #[derive(Debug, Clone, Default)]
 pub struct PullRequest {
+    /// The GraphQL node id, which is what a new draft names when no pending
+    /// review exists yet to hang it on.
+    pub id: Arc<str>,
     pub number: u32,
     pub title: String,
     pub state: String,
@@ -129,6 +154,9 @@ pub struct PullRequest {
 pub struct Meta {
     pub pr: PullRequest,
     pub threads: Vec<ReviewThread>,
+    /// The review the viewer has open but not submitted, which every draft is
+    /// filed against once the first one has opened it.
+    pub pending_review: Option<Arc<str>>,
 }
 
 /// `@@ -old,count +new,count @@` — captures the two start line numbers.
@@ -266,6 +294,7 @@ impl WireAuthor {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WirePullRequest {
+    id: String,
     number: u32,
     title: String,
     state: String,
@@ -274,7 +303,13 @@ struct WirePullRequest {
     base_ref_name: String,
     head_ref_name: String,
     body: String,
+    pending_review: Nodes<WireReview>,
     review_threads: Nodes<WireThread>,
+}
+
+#[derive(Deserialize)]
+struct WireReview {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -282,9 +317,12 @@ struct WirePullRequest {
 struct WireThread {
     id: String,
     path: String,
+    subject_type: String,
     line: Option<u32>,
     original_line: Option<u32>,
+    start_line: Option<u32>,
     diff_side: String,
+    start_diff_side: Option<String>,
     is_resolved: bool,
     is_outdated: bool,
     viewer_can_resolve: bool,
@@ -294,7 +332,9 @@ struct WireThread {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireComment {
+    id: String,
     full_database_id: Option<RestId>,
+    state: String,
     author: Option<WireAuthor>,
     body: String,
     created_at: String,
@@ -321,10 +361,12 @@ impl RestId {
 impl From<WireComment> for Comment {
     fn from(wire: WireComment) -> Self {
         Self {
+            id: wire.id.into(),
             rest_id: wire.full_database_id.and_then(RestId::value),
             author: WireAuthor::login(wire.author),
             body: wire.body,
             created_at: wire.created_at,
+            is_pending: wire.state == "PENDING",
         }
     }
 }
@@ -336,9 +378,15 @@ impl From<WireThread> for ReviewThread {
             path: wire.path.into(),
             line: wire.line,
             original_line: wire.original_line,
+            start_line: wire.start_line,
             // A side the app does not recognize is treated as the new file,
             // which is where all but deletions live.
             side: Side::from_api(&wire.diff_side).unwrap_or(Side::Right),
+            start_side: wire
+                .start_diff_side
+                .as_deref()
+                .and_then(Side::from_api),
+            is_file_level: wire.subject_type == "FILE",
             is_resolved: wire.is_resolved,
             is_outdated: wire.is_outdated,
             can_resolve: wire.viewer_can_resolve,
@@ -357,7 +405,14 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<Meta> {
         .context("PR not found in graphql response")?;
 
     Ok(Meta {
+        pending_review: pr
+            .pending_review
+            .nodes
+            .into_iter()
+            .next()
+            .map(|review| review.id.into()),
         pr: PullRequest {
+            id: pr.id.into(),
             number: pr.number,
             title: pr.title,
             state: pr.state,
@@ -376,6 +431,61 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<Meta> {
     })
 }
 
+/// What filing a draft comment hands back: the comment to address later edits
+/// to, and the review it was filed against, which the next draft reuses.
+#[derive(Debug, Clone)]
+pub struct AddedThread {
+    pub review: Arc<str>,
+    pub comment: Arc<str>,
+}
+
+#[derive(Deserialize)]
+struct AddThreadResponse {
+    data: AddThreadData,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddThreadData {
+    add_pull_request_review_thread: AddThreadPayload,
+}
+
+#[derive(Deserialize)]
+struct AddThreadPayload {
+    thread: WireAddedThread,
+}
+
+#[derive(Deserialize)]
+struct WireAddedThread {
+    comments: Nodes<WireAddedComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireAddedComment {
+    id: String,
+    pull_request_review: WireReview,
+}
+
+pub fn parse_added_thread(val: &serde_json::Value) -> Result<AddedThread> {
+    let payload = AddThreadResponse::deserialize(val)
+        .context("unexpected addPullRequestReviewThread response")?;
+    let comment = payload
+        .data
+        .add_pull_request_review_thread
+        .thread
+        .comments
+        .nodes
+        .into_iter()
+        .next()
+        .context("draft came back with no comment")?;
+
+    Ok(AddedThread {
+        review: comment.pull_request_review.id.into(),
+        comment: comment.id.into(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,6 +498,7 @@ mod tests {
 
     fn pull_request(threads: &serde_json::Value) -> serde_json::Value {
         serde_json::json!({
+            "id": "PR_1",
             "number": 9000,
             "title": "A change",
             "state": "OPEN",
@@ -396,6 +507,7 @@ mod tests {
             "baseRefName": "trunk",
             "headRefName": "work",
             "body": "",
+            "pendingReview": { "nodes": [] },
             "reviewThreads": { "nodes": threads },
         })
     }
@@ -424,16 +536,20 @@ mod tests {
         let threads = serde_json::json!([{
             "id": "PRRT_1",
             "path": "src/main.rs",
+            "subjectType": "LINE",
             // An outdated thread loses its line, and a deleted account its login.
             "line": null,
             "originalLine": 12,
+            "startLine": null,
             "diffSide": "LEFT",
+            // Null on a thread covering one line, where there is only one side.
+            "startDiffSide": null,
             "isResolved": false,
             "isOutdated": true,
             "viewerCanResolve": true,
             "comments": { "nodes": [
-                { "fullDatabaseId": "1234", "author": null, "body": "hi", "createdAt": "now" },
-                { "fullDatabaseId": 5678, "author": { "login": "tale" }, "body": "ho", "createdAt": "now" },
+                { "id": "PRRC_1", "state": "SUBMITTED", "fullDatabaseId": "1234", "author": null, "body": "hi", "createdAt": "now" },
+                { "id": "PRRC_2", "state": "SUBMITTED", "fullDatabaseId": 5678, "author": { "login": "tale" }, "body": "ho", "createdAt": "now" },
             ] },
         }]);
 
@@ -441,10 +557,46 @@ mod tests {
         let thread = &meta.threads[0];
 
         assert_eq!(thread.side, Side::Left);
+        assert_eq!(thread.start_side, None);
         assert_eq!(thread.anchor_line(), Some(12));
         assert_eq!(thread.comments[0].author, "");
+        assert!(!thread.is_pending());
         // A BigInt arrives as a string, but older deployments send a number.
         assert_eq!(thread.reply_target(), Some(1234));
         assert_eq!(thread.comments[1].rest_id, Some(5678));
+    }
+
+    /// An unsubmitted comment is this session's own draft. It comes back on
+    /// every fetch, so telling it apart is what keeps it off the diff as a
+    /// conversation.
+    #[test]
+    fn a_pending_thread_names_itself_and_its_review() {
+        let threads = serde_json::json!([{
+            "id": "PRRT_2",
+            "path": "src/main.rs",
+            "subjectType": "FILE",
+            "line": null,
+            "originalLine": null,
+            "startLine": null,
+            "diffSide": "RIGHT",
+            "startDiffSide": null,
+            "isResolved": false,
+            "isOutdated": false,
+            "viewerCanResolve": false,
+            "comments": { "nodes": [
+                { "id": "PRRC_3", "state": "PENDING", "fullDatabaseId": null, "author": { "login": "tale" }, "body": "wip", "createdAt": "now" },
+            ] },
+        }]);
+
+        let mut pr = pull_request(&threads);
+        pr["pendingReview"] =
+            serde_json::json!({ "nodes": [{ "id": "PRR_1" }] });
+
+        let meta = parse_meta(&response(&pr)).unwrap();
+
+        assert_eq!(meta.pending_review.as_deref(), Some("PRR_1"));
+        assert!(meta.threads[0].is_pending());
+        assert!(meta.threads[0].is_file_level);
+        assert_eq!(&*meta.threads[0].comments[0].id, "PRRC_3");
     }
 }

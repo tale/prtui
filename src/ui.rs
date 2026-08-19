@@ -4,7 +4,7 @@
 //! only to the frame. Where things go and how tall they are was decided by the
 //! layout, so nothing has to be discovered mid-render and written back.
 
-use crate::app::draft::Side;
+use crate::app::draft::{Side, Sync};
 use crate::app::mode::Mode;
 use crate::app::review::ReviewEvent;
 use crate::app::search::Query;
@@ -425,14 +425,23 @@ fn code_line<'a>(
     let has_thread = open.threads.iter().any(|thread| {
         !thread.is_outdated && thread.anchors_to(line) && !thread.is_resolved
     });
-    let has_draft = open
+    let draft = open
         .drafts
         .iter()
-        .any(|draft| draft.rows().is_some_and(|rows| rows.contains(&index)));
+        .find(|draft| draft.rows().is_some_and(|rows| rows.contains(&index)));
 
-    let (marker, marker_color) = match (has_draft, has_thread) {
-        (true, _) => (" ✎", theme.orange),
-        (false, true) => (" ◆", theme.purple),
+    // A draft GitHub has not accepted yet says so in the gutter: the review is
+    // held on the server now, so the two can be out of step.
+    let (marker, marker_color) = match (draft, has_thread) {
+        (Some(draft), _) => (
+            draft.sync.marker(),
+            match draft.sync {
+                Sync::Failed(_) => theme.danger,
+                Sync::Synced => theme.orange,
+                _ => theme.dim,
+            },
+        ),
+        (None, true) => (" ◆", theme.purple),
         _ => ("  ", theme.dim),
     };
 
