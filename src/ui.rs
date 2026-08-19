@@ -344,6 +344,7 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
             Row::Code { source, fragment } => {
                 code_line(&open, focus, *source, *fragment, width, theme)
             }
+            Row::Draft { draft } => draft_line(&open, *draft, width, theme),
             Row::FileDraft => file_draft_line(&open, width, theme),
             Row::Heading { state, count } => {
                 heading_line(*state, *count, width, theme)
@@ -433,14 +434,9 @@ fn code_line<'a>(
     // A draft GitHub has not accepted yet says so in the gutter: the review is
     // held on the server now, so the two can be out of step.
     let (marker, marker_color) = match (draft, has_thread) {
-        (Some(draft), _) => (
-            draft.sync.marker(),
-            match draft.sync {
-                Sync::Failed(_) => theme.danger,
-                Sync::Synced => theme.orange,
-                _ => theme.dim,
-            },
-        ),
+        (Some(draft), _) => {
+            (draft.sync.marker(), draft_tint(&draft.sync, theme))
+        }
         (None, true) => (" ◆", theme.purple),
         _ => ("  ", theme.dim),
     };
@@ -610,6 +606,68 @@ const fn state_color(state: ThreadState, theme: Theme) -> Color {
 
 fn card_indent(width: usize) -> usize {
     GUTTER.min(width.saturating_sub(1))
+}
+
+/// How far a draft has got towards the copy GitHub holds: waiting, saved, or
+/// refused. The gutter and the card have to agree on it.
+const fn draft_tint(sync: &Sync, theme: Theme) -> Color {
+    match sync {
+        Sync::Failed(_) => theme.danger,
+        Sync::Synced => theme.orange,
+        _ => theme.dim,
+    }
+}
+
+/// A pending remark of the reader's own, under the line it answers to, so a
+/// review can be read back before it ships rather than one draft at a time
+/// through the editor. A refusal names its reason here: the gutter has room to
+/// say only that something went wrong.
+fn draft_line(
+    open: &OpenFile<'_>,
+    index: usize,
+    width: usize,
+    theme: Theme,
+) -> Line<'static> {
+    let Some(draft) = open.drafts.get(index) else {
+        return Line::default();
+    };
+
+    let indent = card_indent(width);
+    let label = "draft";
+    let suffix = match &draft.sync {
+        Sync::Synced => String::new(),
+        Sync::Failed(error) => format!(" · {error}"),
+        _ => " · saving".to_string(),
+    };
+    let summary = comment_summary(&draft.body, theme);
+    let tint = draft_tint(&draft.sync, theme);
+    let budget = width
+        .saturating_sub(indent)
+        .saturating_sub(text_width(label) + text_width(&suffix) + 4);
+
+    thread_card_line(
+        indent,
+        width,
+        vec![
+            rows::card_span(
+                format!("{} ", draft.sync.marker().trim()),
+                tint,
+                Modifier::BOLD,
+                theme,
+            ),
+            rows::card_span(label, theme.heading, Modifier::BOLD, theme),
+            rows::card_span("  ", theme.muted, Modifier::empty(), theme),
+            rows::card_span(
+                truncate(&summary, budget),
+                theme.code,
+                Modifier::empty(),
+                theme,
+            ),
+            rows::card_span(suffix, tint, Modifier::empty(), theme),
+        ],
+        theme,
+        false,
+    )
 }
 
 /// The pending remark about the file as a whole. It has no line to sit under, so

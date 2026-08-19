@@ -12,6 +12,7 @@
 //! length depends on how its markdown wraps — that content is rendered here
 //! because its row count is a layout fact.
 
+use crate::app::draft::Draft;
 use crate::model::{ChangedFile, DiffLine, LineKind, ReviewThread, Side};
 use crate::renderer::Theme;
 use crate::renderer::markdown::{self, Block as MarkdownBlock};
@@ -89,6 +90,8 @@ pub enum Row {
     /// One row's worth of a line of the patch. A line too wide for the pane
     /// folds across several of these, all naming the same `source`.
     Code { source: usize, fragment: Fragment },
+    /// A pending note of the reader's own, by index into [`View::drafts`].
+    Draft { draft: usize },
     /// The file-level draft, which answers to no line and leads the pane.
     FileDraft,
     /// A pile's heading, drawn only when the pile holds more than one thread.
@@ -137,8 +140,8 @@ pub struct View<'a> {
     /// Rows the expanded conversation may occupy before it scrolls.
     pub window: usize,
     pub theme: Theme,
-    /// Body of the file-level draft on this file, if one is pending.
-    pub file_draft: Option<&'a str>,
+    /// Pending notes on this file, in the order the view indexes them.
+    pub drafts: &'a [&'a Draft],
 }
 
 /// A conversation about the file rather than any line in it.
@@ -254,6 +257,21 @@ fn resolve_anchors(
     anchored
 }
 
+/// Line drafts paired with the row each is drawn under, sorted by that row.
+///
+/// GitHub anchors a span at its last line, so a note covering several rows sits
+/// under the end of what it covers rather than the start.
+fn placed_drafts(drafts: &[&Draft]) -> Vec<(usize, usize)> {
+    let mut placed: Vec<(usize, usize)> = drafts
+        .iter()
+        .enumerate()
+        .filter_map(|(draft, pending)| Some((*pending.rows()?.end(), draft)))
+        .collect();
+
+    placed.sort_unstable();
+    placed
+}
+
 /// Indices of the threads a predicate picks out, in their original order.
 fn select(
     threads: &[ReviewThread],
@@ -309,7 +327,12 @@ impl Rows {
 
         // Remarks about the file as a whole answer to no line, so they lead the
         // pane the way GitHub puts them above a file's diff.
-        if builder.view.file_draft.is_some() {
+        if builder
+            .view
+            .drafts
+            .iter()
+            .any(|draft| draft.is_file_level())
+        {
             builder.rows.push(Row::FileDraft);
         }
         builder.emit_piles(&select(threads, is_file_level));
@@ -336,10 +359,12 @@ impl Rows {
             by_source[stop.source].push(stop.thread);
         }
 
+        let placed = placed_drafts(view.drafts);
         let last = file.lines.len() - 1;
         for (source, anchored) in by_source.iter().enumerate() {
             builder.code.push(builder.rows.len());
             builder.emit_code(&file.lines[source], source);
+            builder.emit_drafts(&placed, source);
             builder.emit_piles(anchored);
 
             if source == last {
@@ -462,6 +487,19 @@ impl Builder<'_> {
         let budget = self.view.width.saturating_sub(GUTTER);
         for fragment in wrap::fragments(&line.text, budget) {
             self.rows.push(Row::Code { source, fragment });
+        }
+    }
+
+    /// The reader's own pending notes on this line. They lead the line's
+    /// conversations, since an unsent remark is what is still being worked on.
+    fn emit_drafts(&mut self, placed: &[(usize, usize)], source: usize) {
+        let start = placed.partition_point(|&(row, _)| row < source);
+
+        for &(row, draft) in &placed[start..] {
+            if row != source {
+                break;
+            }
+            self.rows.push(Row::Draft { draft });
         }
     }
 

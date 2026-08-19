@@ -947,9 +947,8 @@ fn the_composer_opens_over_the_diff_with_its_anchor_in_the_title() {
     );
 }
 
-#[test]
-fn a_saved_draft_marks_its_lines_in_the_gutter() {
-    let mut app = load();
+/// Commits `body` as a draft on the first commentable line and reports it.
+fn write_draft(app: &mut App, body: &str) -> usize {
     app.pane = Pane::Diff;
     app.cursor = app.files[app.selected_file]
         .lines
@@ -957,24 +956,64 @@ fn a_saved_draft_marks_its_lines_in_the_gutter() {
         .position(|l| l.kind != LineKind::Hunk)
         .unwrap();
 
-    act(&mut app, &Action::StartComment);
-    app.composer
-        .as_mut()
-        .unwrap()
-        .editor
-        .set_text("needs a guard");
-    act(&mut app, &Action::CommitComment);
+    act(app, &Action::StartComment);
+    app.composer.as_mut().unwrap().editor.set_text(body);
+    act(app, &Action::CommitComment);
     assert_eq!(app.drafts.len(), 1);
 
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal
-        .draw(|frame| {
-            paint(frame, &app);
-        })
-        .unwrap();
+    app.cursor
+}
 
-    let rendered = terminal.backend().to_string();
-    assert!(rendered.contains('✎'), "draft lines carry a pencil marker");
+/// The review being written has to be readable in the diff. Before, a draft was
+/// a single glyph in the gutter and its body could only be seen by reopening the
+/// editor on it, one draft at a time.
+#[test]
+fn a_saved_draft_shows_its_body_under_the_line() {
+    let mut app = load();
+    let commented = write_draft(&mut app, "needs a guard");
+
+    let rendered = draw(&app);
+    assert!(
+        rendered.contains("draft  needs a guard"),
+        "the body is on screen:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("· saving"),
+        "and a draft GitHub has not answered for says so"
+    );
+
+    let layout = layout_of(&app);
+    let row = (0..layout.rows.len())
+        .find(|&row| matches!(layout.rows.get(row), Some(Row::Draft { .. })))
+        .expect("the draft owns a row");
+
+    assert!(
+        matches!(
+            layout.rows.get(row - 1),
+            Some(Row::Code { source, .. }) if *source == commented
+        ),
+        "it sits directly under the line it answers to"
+    );
+}
+
+/// The refusal used to be a red glyph and nothing else, so a draft GitHub threw
+/// out looked much like one it had accepted.
+#[test]
+fn a_refused_draft_names_the_reason() {
+    let mut app = load();
+    write_draft(&mut app, "needs a guard");
+    let id = app.drafts[0].id;
+
+    app.finish(Err(Failure::Draft(
+        id,
+        "line must be part of the diff".into(),
+    )));
+
+    let rendered = draw(&app);
+    assert!(
+        rendered.contains("line must be part of the diff"),
+        "the reason is on screen:\n{rendered}"
+    );
 }
 
 const IMAGE_URL: &str = "https://github.com/user-attachments/assets/shot.png";
