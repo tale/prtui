@@ -7,7 +7,7 @@
 use crate::app::draft::Side;
 use crate::app::mode::Mode;
 use crate::app::review::ReviewEvent;
-use crate::app::{App, Focus, OpenFile, Pane, Target};
+use crate::app::{App, Focus, OpenFile, Pane, Target, TreeRow};
 use crate::layout::Layout;
 use crate::layout::rows::{self, BodyRow, Connector, GUTTER, Row, ThreadState};
 use crate::model::{LineKind, ReviewThread};
@@ -176,20 +176,13 @@ fn draw_files(frame: &mut Frame, app: &App, layout: &Layout) {
 
     let height = list_area.height as usize;
     let width = list_area.width as usize;
-    let matches = app.filtered_file_indices();
-    let selected_position = matches
-        .iter()
-        .position(|&index| index == app.selected_file)
-        .unwrap_or(0);
-    let start = selected_position
-        .saturating_sub(height / 2)
-        .min(matches.len().saturating_sub(height));
 
-    let mut list: Vec<Line> = matches
+    let mut list: Vec<Line> = layout
+        .files
+        .window(height)
         .iter()
-        .skip(start)
-        .take(height)
-        .map(|&index| file_line(app, index, width, theme))
+        .filter_map(|&index| app.tree_row(index))
+        .map(|row| file_line(&row, width, theme))
         .collect();
 
     if list.is_empty() && app.file_filter.is_some() {
@@ -202,18 +195,17 @@ fn draw_files(frame: &mut Frame, app: &App, layout: &Layout) {
     frame.render_widget(Paragraph::new(list), list_area);
 }
 
-fn file_line(app: &App, index: usize, width: usize, theme: Theme) -> Line<'_> {
-    let file = &app.files[index];
-    let is_selected = index == app.selected_file;
-    let threads = app
-        .threads_by_path
-        .get(&file.path)
-        .map_or(&[][..], Vec::as_slice);
-    let unresolved = threads.iter().filter(|t| !t.is_resolved).count();
+fn file_line<'a>(row: &TreeRow<'a>, width: usize, theme: Theme) -> Line<'a> {
+    let TreeRow {
+        file,
+        is_selected,
+        threads,
+        unresolved,
+    } = *row;
 
     // A settled conversation still says something about the file, so it keeps a
     // hollow marker instead of disappearing from the tree.
-    let (marker, marker_color) = match (unresolved, threads.len()) {
+    let (marker, marker_color) = match (unresolved, threads) {
         (0, 0) => ("  ".to_string(), theme.dim),
         (0, total) => (format!(" ◇ {total}"), theme.muted),
         (open, _) => (format!(" ◆ {open}"), theme.purple),
@@ -1096,14 +1088,11 @@ fn draw_bottom_bar(
             let (current, total) = app.search_summary(layout);
             format!("  {current}/{total} matches")
         }
-        (false, true, _) => {
-            let matches = app.filtered_file_indices();
-            let selected = matches
-                .iter()
-                .position(|&index| index == app.selected_file)
-                .map_or(0, |position| position + 1);
-            format!("  {selected}/{} matches", matches.len())
-        }
+        (false, true, _) => format!(
+            "  {}/{} matches",
+            layout.files.position_of(app.selected_file),
+            layout.files.matches.len()
+        ),
         (false, false, Some(file)) => format!(
             "  {}/{} · {}/{}",
             app.selected_file + 1,

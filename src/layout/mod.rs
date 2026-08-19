@@ -28,6 +28,52 @@ pub struct Layout {
     /// The submit form, docked in the same place.
     pub submit: Option<Rect>,
     pub rows: Rows,
+    pub files: FileList,
+}
+
+/// The tree as this frame will draw it.
+///
+/// Which files passed the filter, and where the window onto them starts. Both
+/// were worked out inside the renderer before, which is the one place that
+/// must not be discovering things.
+pub struct FileList {
+    /// Indices into `App::files`, in tree order.
+    pub matches: Vec<usize>,
+    /// First match on screen.
+    pub start: usize,
+}
+
+impl FileList {
+    /// The matches this frame has room for.
+    pub fn window(&self, height: usize) -> &[usize] {
+        let end = (self.start + height).min(self.matches.len());
+
+        &self.matches[self.start.min(end)..end]
+    }
+
+    /// Where the open file sits in the list, counting from one.
+    pub fn position_of(&self, index: usize) -> usize {
+        self.matches
+            .iter()
+            .position(|&candidate| candidate == index)
+            .map_or(0, |position| position + 1)
+    }
+}
+
+/// Keeps the open file centred until the list runs out at either end.
+fn file_window_start(
+    matches: &[usize],
+    selected: usize,
+    height: usize,
+) -> usize {
+    let position = matches
+        .iter()
+        .position(|&index| index == selected)
+        .unwrap_or(0);
+
+    position
+        .saturating_sub(height / 2)
+        .min(matches.len().saturating_sub(height))
 }
 
 impl Layout {
@@ -82,6 +128,19 @@ impl Layout {
             composer,
             submit,
             rows: build_rows(app, diff),
+            files: {
+                let matches = app.filtered_file_indices();
+                let height = files_list.map_or(0, |list| list.height as usize);
+
+                FileList {
+                    start: file_window_start(
+                        &matches,
+                        app.selected_file,
+                        height,
+                    ),
+                    matches,
+                }
+            },
         }
     }
 
@@ -200,6 +259,34 @@ mod tests {
         assert_eq!(files_width(400), 34);
         // Narrow ones give the diff its floor first.
         assert_eq!(files_width(40), 20);
+    }
+
+    #[test]
+    fn the_tree_centres_the_open_file_until_the_list_runs_out() {
+        let matches: Vec<usize> = (0..20).collect();
+
+        // Near either end the window pins rather than scrolling past.
+        assert_eq!(file_window_start(&matches, 0, 10), 0);
+        assert_eq!(file_window_start(&matches, 4, 10), 0);
+        assert_eq!(file_window_start(&matches, 19, 10), 10);
+
+        assert_eq!(file_window_start(&matches, 12, 10), 7);
+
+        // A list shorter than the pane never scrolls at all.
+        assert_eq!(file_window_start(&matches[..3], 2, 10), 0);
+    }
+
+    #[test]
+    fn the_tree_window_stops_at_the_end_of_the_matches() {
+        let files = FileList {
+            matches: (0..20).collect(),
+            start: 7,
+        };
+
+        assert_eq!(files.window(4), [7, 8, 9, 10]);
+        assert_eq!(files.window(100).len(), 13);
+        assert_eq!(files.position_of(9), 10);
+        assert_eq!(files.position_of(404), 0, "an unmatched file has no place");
     }
 
     #[test]

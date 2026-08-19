@@ -54,6 +54,14 @@ impl<'a> OpenFile<'a> {
     }
 }
 
+/// One row of the file tree, with the conversation counts it shows.
+pub struct TreeRow<'a> {
+    pub file: &'a ChangedFile,
+    pub is_selected: bool,
+    pub threads: usize,
+    pub unresolved: usize,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Pane {
     Files,
@@ -311,6 +319,21 @@ impl App {
 
     pub fn current_path(&self) -> Option<&str> {
         self.current_file().map(|file| &*file.path)
+    }
+
+    pub fn tree_row(&self, index: usize) -> Option<TreeRow<'_>> {
+        let file = self.files.get(index)?;
+        let threads = self
+            .threads_by_path
+            .get(&file.path)
+            .map_or(&[][..], Vec::as_slice);
+
+        Some(TreeRow {
+            file,
+            is_selected: index == self.selected_file,
+            threads: threads.len(),
+            unresolved: threads.iter().filter(|t| !t.is_resolved).count(),
+        })
     }
 
     pub fn focus(&self) -> Focus<'_> {
