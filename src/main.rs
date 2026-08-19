@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use futures_core::Stream;
-use prtui::app::App;
 use prtui::app::input::InputRouter;
 use prtui::app::review::{Failure, Request, Sent};
+use prtui::app::{App, Highlight};
 use prtui::layout::Layout;
 use prtui::model::{self, ChangedFile, PullRequest};
-use prtui::renderer::{self, Segment, Theme, ThemeMode};
+use prtui::renderer::{self, Theme, ThemeMode};
 use prtui::{gh, ui};
 use std::sync::Arc;
 use std::{future::poll_fn, pin::Pin, time::Duration};
@@ -61,7 +61,7 @@ impl ThemeChoice {
 enum Message {
     Meta(Box<PullRequest>),
     Files(Vec<ChangedFile>),
-    Highlight(ThemeMode, usize, Vec<Vec<Segment>>),
+    Highlight(ThemeMode, String, Highlight),
     MetaFailed(String),
     FilesFailed(String),
     /// GitHub is having an incident that explains a failure already shown.
@@ -168,7 +168,8 @@ fn spawn_highlighting(
             let file = &files[index];
             let styled =
                 renderer::highlight_file(&file.path, &file.lines, mode);
-            if tx.send(Message::Highlight(mode, index, styled)).is_err() {
+            let message = Message::Highlight(mode, file.path.clone(), styled);
+            if tx.send(message).is_err() {
                 return;
             }
         }
@@ -304,9 +305,10 @@ async fn event_loop(
                     Message::Highlight(mode, ..) if mode != app.theme().mode => {
                         false
                     }
-                    Message::Highlight(_, index, styled) => {
-                        app.set_highlight(index, styled);
-                        index == app.selected_file
+                    Message::Highlight(_, path, styled) => {
+                        let is_open = app.current_path() == Some(path.as_str());
+                        app.set_highlight(path, styled);
+                        is_open
                     }
                     Message::Meta(pr) => {
                         app.set_meta(*pr);

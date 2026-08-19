@@ -111,8 +111,9 @@ pub struct App {
 
     outbox: Vec<Request>,
     theme: Theme,
-    /// In step with `files`; `None` until the background pass reaches one.
-    highlights: Vec<Option<Highlight>>,
+    /// Keyed by path, which is what a file is. A position would only mean
+    /// anything for as long as the list it indexes stays put.
+    highlights: HashMap<String, Highlight>,
     filter_snapshot: Option<FileFilterSnapshot>,
     search_origin: Option<SearchOrigin>,
     files_state: FilesState,
@@ -156,7 +157,7 @@ impl App {
             in_flight: 0,
             outbox: Vec::new(),
             theme,
-            highlights: Vec::new(),
+            highlights: HashMap::new(),
             filter_snapshot: None,
             search_origin: None,
             files_state: FilesState::Loading,
@@ -178,7 +179,8 @@ impl App {
     /// File patches are the only data required to make the main review surface
     /// useful. PR metadata and review threads may arrive independently later.
     pub fn set_files(&mut self, files: Vec<ChangedFile>) {
-        self.highlights = vec![None; files.len()];
+        // A path that comes back with a new patch cannot keep its old colors.
+        self.highlights.clear();
         self.files = files.into();
         self.files_state = FilesState::Loaded;
     }
@@ -213,7 +215,7 @@ impl App {
         }
 
         self.theme = Theme::for_mode(mode);
-        self.highlights = vec![None; self.files.len()];
+        self.highlights.clear();
         true
     }
 
@@ -252,14 +254,12 @@ impl App {
         self.current_file().map_or(0, |f| f.lines.len())
     }
 
-    pub fn set_highlight(&mut self, index: usize, styled: Highlight) {
-        if let Some(slot) = self.highlights.get_mut(index) {
-            *slot = Some(styled);
-        }
+    pub fn set_highlight(&mut self, path: String, styled: Highlight) {
+        self.highlights.insert(path, styled);
     }
 
     pub fn highlighted(&self) -> Option<&[Vec<Segment>]> {
-        self.highlights.get(self.selected_file)?.as_deref()
+        self.highlights.get(self.current_path()?).map(Vec::as_slice)
     }
 
     pub fn apply(&mut self, action: &Action, layout: &Layout) {

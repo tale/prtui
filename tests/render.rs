@@ -99,15 +99,15 @@ fn paragraphs(count: usize, label: &str) -> String {
 /// Colors the open file the way the background thread does, since that is now
 /// the only path into the highlight store.
 fn highlight(app: &mut App) {
-    let index = app.selected_file;
-    let (path, lines) = {
-        let file = &app.files[index];
-        (file.path.clone(), file.lines.clone())
-    };
+    let file = &app.files[app.selected_file];
+    let styled = prtui::renderer::highlight_file(
+        &file.path,
+        &file.lines,
+        app.theme().mode,
+    );
+    let path = file.path.clone();
 
-    let styled =
-        prtui::renderer::highlight_file(&path, &lines, app.theme().mode);
-    app.set_highlight(index, styled);
+    app.set_highlight(path, styled);
 }
 
 fn load() -> App {
@@ -828,6 +828,35 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
             .all(|&(r, g, b)| u16::from(r) + u16::from(g) + u16::from(b) < 600),
         "light-mode syntax must use dark foregrounds: {colors:?}",
     );
+}
+
+/// A late result has to reach the file it was computed for. Addressed by
+/// position it would land on whatever happens to sit at that index instead.
+#[test]
+fn highlights_are_addressed_by_path_not_position() {
+    let mut app = load();
+    let open = app.current_path().unwrap().to_string();
+    let other = app
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .find(|path| *path != open)
+        .unwrap();
+
+    app.set_highlight(other, vec![Vec::new()]);
+    assert!(
+        app.highlighted().is_none(),
+        "those are another file's colors"
+    );
+
+    app.set_highlight(open, vec![Vec::new()]);
+    assert!(app.highlighted().is_some());
+
+    // The same path can come back carrying a different patch, so a reload
+    // cannot keep colors computed against the old one.
+    let files = app.files.to_vec();
+    app.set_files(files);
+    assert!(app.highlighted().is_none());
 }
 
 #[test]
