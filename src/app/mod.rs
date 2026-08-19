@@ -9,6 +9,7 @@ pub mod search;
 
 use crate::layout::Layout;
 use crate::layout::rows;
+use crate::layout::tree::Row as TreeNode;
 use crate::model::{ChangedFile, DiffLine, Meta, PullRequest, ReviewThread};
 use crate::renderer::{Segment, Theme, ThemeMode};
 use action::{Action, Motion};
@@ -213,6 +214,13 @@ pub struct App {
     pub file_filter: Option<CommentEditor>,
     pub search: Option<CommentEditor>,
     pub selected_file: usize,
+    /// Directories the reader has folded away, keyed by path with its trailing
+    /// slash. Held here rather than in the tree so a fold survives a refetch.
+    collapsed: HashSet<Arc<str>>,
+    /// The heading the tree cursor is resting on, when it is on one rather than
+    /// on a file. The same shape as `focused_thread` in the diff: a cursor plus
+    /// an optional thing above it that captures the keys.
+    tree_directory: Option<Arc<str>>,
     pub cursor: usize,
     pub focused_thread: Option<Arc<str>>,
     pub expanded_thread: Option<Arc<str>>,
@@ -269,6 +277,8 @@ impl App {
             file_filter: None,
             search: None,
             selected_file: 0,
+            collapsed: HashSet::new(),
+            tree_directory: None,
             cursor: 0,
             focused_thread: None,
             expanded_thread: None,
@@ -445,6 +455,14 @@ impl App {
         self.current_file().map(|file| &*file.path)
     }
 
+    pub const fn collapsed(&self) -> &HashSet<Arc<str>> {
+        &self.collapsed
+    }
+
+    pub fn tree_directory(&self) -> Option<&str> {
+        self.tree_directory.as_deref()
+    }
+
     pub fn tree_row(&self, index: usize) -> Option<TreeRow<'_>> {
         let file = self.files.get(index)?;
         let threads = self
@@ -509,7 +527,7 @@ impl App {
                     self.pane = Pane::Diff;
                 }
             }
-            Action::Activate => self.activate(),
+            Action::Activate => self.activate(layout),
             Action::LeaveThread => self.set_focused_thread(None),
             Action::FocusFiles => self.focus_files(),
             Action::FocusDiff => self.focus_diff(),
@@ -521,8 +539,8 @@ impl App {
             Action::CancelSearch => self.cancel_search(),
             Action::NextMatch => self.jump_match(1, layout),
             Action::PrevMatch => self.jump_match(-1, layout),
-            Action::NextFile => self.step_file(1),
-            Action::PrevFile => self.step_file(-1),
+            Action::NextFile => self.step_file(1, layout),
+            Action::PrevFile => self.step_file(-1, layout),
             Action::NextComment => self.jump_comment(1, layout),
             Action::PrevComment => self.jump_comment(-1, layout),
             Action::Move(motion) => self.travel(motion, layout),
@@ -1433,9 +1451,14 @@ impl App {
         }
     }
 
-    fn activate(&mut self) {
+    fn activate(&mut self, layout: &Layout) {
         if self.pane == Pane::Files {
-            self.focus_diff();
+            // A heading has nothing to open, so the same key folds it.
+            if self.tree_directory.is_some() {
+                self.toggle_directory(layout);
+            } else {
+                self.focus_diff();
+            }
             return;
         }
 
@@ -1470,24 +1493,20 @@ impl App {
         self.set_selected_file(index, true);
     }
 
-    fn step_file(&mut self, direction: isize) {
-        if self.file_filter.is_none() {
-            let target = self.selected_file.saturating_add_signed(direction);
-            self.select_file(target);
-            return;
-        }
-
-        let matches = self.filtered_file_indices();
-        let Some(position) = matches
-            .iter()
-            .position(|&index| index == self.selected_file)
+    /// `]` and `[` walk files only, skipping the headings `j` stops on, and in
+    /// the order the tree lists them rather than the order GitHub sent them.
+    fn step_file(&mut self, direction: isize, layout: &Layout) {
+        let files: Vec<usize> = layout.files.files().collect();
+        let Some(position) =
+            files.iter().position(|&index| index == self.selected_file)
         else {
             return;
         };
+
         let target = position
             .saturating_add_signed(direction)
-            .min(matches.len().saturating_sub(1));
-        self.select_file(matches[target]);
+            .min(files.len().saturating_sub(1));
+        self.select_file(files[target]);
     }
 
     fn set_selected_file(&mut self, index: usize, leave_transient_mode: bool) {
@@ -1496,6 +1515,7 @@ impl App {
         }
 
         self.selected_file = index.min(self.files.len() - 1);
+        self.tree_directory = None;
         self.cursor = 0;
         self.set_focused_thread(None);
         self.diff_scroll = 0;
@@ -1507,7 +1527,7 @@ impl App {
 
     fn travel(&mut self, motion: Motion, layout: &Layout) {
         if self.pane == Pane::Files {
-            self.travel_files(motion, layout.files_viewport());
+            self.travel_files(motion, layout);
             return;
         }
 
@@ -1553,24 +1573,61 @@ impl App {
         self.follow_cursor(layout);
     }
 
-    fn travel_files(&mut self, motion: Motion, viewport: usize) {
-        if self.file_filter.is_none() {
-            let target =
-                step(motion, self.selected_file, self.files.len(), viewport);
-            self.select_file(target);
+    /// The cursor walks headings as well as files, since a heading has to be
+    /// reachable to be unfolded.
+    fn travel_files(&mut self, motion: Motion, layout: &Layout) {
+        let tree = &layout.files;
+        if tree.is_empty() {
             return;
         }
 
-        let matches = self.filtered_file_indices();
-        let Some(position) = matches
-            .iter()
-            .position(|&index| index == self.selected_file)
-        else {
+        let current = self.tree_cursor(layout);
+        let target = step(motion, current, tree.len(), layout.files_viewport());
+
+        match tree.get(target) {
+            Some(TreeNode::File { index, .. }) => {
+                self.tree_directory = None;
+                self.set_selected_file(*index, false);
+            }
+            Some(TreeNode::Directory { path, .. }) => {
+                self.tree_directory = Some(path.clone());
+            }
+            None => {}
+        }
+    }
+
+    /// Which row the tree cursor is on: the heading it rests on, or the row of
+    /// the open file.
+    fn tree_cursor(&self, layout: &Layout) -> usize {
+        self.tree_directory
+            .as_deref()
+            .map_or_else(
+                || layout.files.row_of(self.selected_file),
+                |path| layout.files.row_of_directory(path),
+            )
+            .unwrap_or(0)
+    }
+
+    /// Folds the heading the cursor is on, or the one the open file sits under.
+    /// Unfolding leaves the cursor where it is, so the contents appear below it.
+    fn toggle_directory(&mut self, layout: &Layout) {
+        let mut path = self.tree_directory.clone();
+
+        if path.is_none() {
+            let row = self.tree_cursor(layout);
+            // Folding away the file the cursor is on would strand it, so the
+            // cursor moves up to the heading swallowing it.
+            path = layout.files.enclosing_directory(row).cloned();
+            self.tree_directory.clone_from(&path);
+        }
+
+        let Some(path) = path else {
             return;
         };
 
-        let target = step(motion, position, matches.len(), viewport);
-        self.set_selected_file(matches[target], false);
+        if !self.collapsed.remove(&path) {
+            self.collapsed.insert(path);
+        }
     }
 
     fn move_diff_stops(

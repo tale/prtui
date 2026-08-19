@@ -1,8 +1,10 @@
 pub mod rows;
+pub mod tree;
 
 use crate::app::App;
 use ratatui::layout::{Constraint, Direction, Rect};
 use rows::{Rows, View};
+use tree::Tree;
 
 /// Narrowest the diff is allowed to get before the tree stops taking room.
 const MIN_DIFF_WIDTH: u16 = 20;
@@ -28,52 +30,7 @@ pub struct Layout {
     /// The submit form, docked in the same place.
     pub submit: Option<Rect>,
     pub rows: Rows,
-    pub files: FileList,
-}
-
-/// The tree as this frame will draw it.
-///
-/// Which files passed the filter, and where the window onto them starts. Both
-/// were worked out inside the renderer before, which is the one place that
-/// must not be discovering things.
-pub struct FileList {
-    /// Indices into `App::files`, in tree order.
-    pub matches: Vec<usize>,
-    /// First match on screen.
-    pub start: usize,
-}
-
-impl FileList {
-    /// The matches this frame has room for.
-    pub fn window(&self, height: usize) -> &[usize] {
-        let end = (self.start + height).min(self.matches.len());
-
-        &self.matches[self.start.min(end)..end]
-    }
-
-    /// Where the open file sits in the list, counting from one.
-    pub fn position_of(&self, index: usize) -> usize {
-        self.matches
-            .iter()
-            .position(|&candidate| candidate == index)
-            .map_or(0, |position| position + 1)
-    }
-}
-
-/// Keeps the open file centred until the list runs out at either end.
-fn file_window_start(
-    matches: &[usize],
-    selected: usize,
-    height: usize,
-) -> usize {
-    let position = matches
-        .iter()
-        .position(|&index| index == selected)
-        .unwrap_or(0);
-
-    position
-        .saturating_sub(height / 2)
-        .min(matches.len().saturating_sub(height))
+    pub files: Tree,
 }
 
 impl Layout {
@@ -104,8 +61,13 @@ impl Layout {
         };
 
         // Both panes carry their title on a top border, so a row of each goes
-        // to chrome before any content is placed.
-        let files_inner = files_pane.map(inside);
+        // to chrome before any content is placed. The tree also carries the
+        // rule between the two panes, and its list used to be measured wide
+        // enough to paint over it.
+        let files_inner = files_pane.map(|pane| Rect {
+            width: pane.width.saturating_sub(1),
+            ..inside(pane)
+        });
         let has_prompt = app.file_filter.is_some();
         let files_prompt = files_inner
             .filter(|inner| has_prompt && inner.height > 0)
@@ -128,19 +90,10 @@ impl Layout {
             composer,
             submit,
             rows: build_rows(app, diff),
-            files: {
-                let matches = app.filtered_file_indices();
-                let height = files_list.map_or(0, |list| list.height as usize);
-
-                FileList {
-                    start: file_window_start(
-                        &matches,
-                        app.selected_file,
-                        height,
-                    ),
-                    matches,
-                }
-            },
+            files: build_tree(
+                app,
+                files_list.map_or(0, |list| list.height as usize),
+            ),
         }
     }
 
@@ -198,6 +151,24 @@ fn dock(diff: Rect, app: &App) -> (Rect, Option<Rect>, Option<Rect>) {
     } else {
         (rows[0], Some(rows[1]), None)
     }
+}
+
+/// The file tree, scrolled to wherever the cursor is resting.
+fn build_tree(app: &App, height: usize) -> Tree {
+    let mut tree = Tree::build(
+        &app.files,
+        &app.filtered_file_indices(),
+        app.collapsed(),
+        app.file_filter.is_some(),
+    );
+
+    let cursor = app.tree_directory().map_or_else(
+        || tree.row_of(app.selected_file),
+        |path| tree.row_of_directory(path),
+    );
+    tree.focus(cursor.unwrap_or(0), height);
+
+    tree
 }
 
 fn build_rows(app: &App, diff: Rect) -> Rows {
@@ -259,34 +230,6 @@ mod tests {
         assert_eq!(files_width(400), 34);
         // Narrow ones give the diff its floor first.
         assert_eq!(files_width(40), 20);
-    }
-
-    #[test]
-    fn the_tree_centres_the_open_file_until_the_list_runs_out() {
-        let matches: Vec<usize> = (0..20).collect();
-
-        // Near either end the window pins rather than scrolling past.
-        assert_eq!(file_window_start(&matches, 0, 10), 0);
-        assert_eq!(file_window_start(&matches, 4, 10), 0);
-        assert_eq!(file_window_start(&matches, 19, 10), 10);
-
-        assert_eq!(file_window_start(&matches, 12, 10), 7);
-
-        // A list shorter than the pane never scrolls at all.
-        assert_eq!(file_window_start(&matches[..3], 2, 10), 0);
-    }
-
-    #[test]
-    fn the_tree_window_stops_at_the_end_of_the_matches() {
-        let files = FileList {
-            matches: (0..20).collect(),
-            start: 7,
-        };
-
-        assert_eq!(files.window(4), [7, 8, 9, 10]);
-        assert_eq!(files.window(100).len(), 13);
-        assert_eq!(files.position_of(9), 10);
-        assert_eq!(files.position_of(404), 0, "an unmatched file has no place");
     }
 
     #[test]

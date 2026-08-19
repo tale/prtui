@@ -23,8 +23,9 @@ use std::borrow::Cow;
 use std::fmt::Write;
 
 /// Columns the line-number gutter occupies, which is also how far a thread card
-/// is indented so it hangs under the code rather than beside it.
-pub const GUTTER: usize = 13;
+/// is indented so it hangs under the code rather than beside it: two line
+/// numbers, the draft or thread mark, and the sigil.
+pub const GUTTER: usize = 12;
 
 /// Summaries shown at once when several threads share a line; the rest elide.
 const MAX_VISIBLE_SUMMARIES: usize = 4;

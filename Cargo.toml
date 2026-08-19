@@ -39,6 +39,7 @@ strip = "symbols"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
+devicons = "0.6.13"
 futures-core = { version = "0.3.31", default-features = false }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = { version = "0.30.2", default-features = false, features = ["layout-cache", "termina"] }
@@ -51,3 +52,7 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process"
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 unicode-width = "0.2.2"
 ureq = { version = "3.4.0", default-features = false, features = ["rustls", "json"] }
+
+[dev-dependencies]
+devicons = "0.6.13"
+unicode-width = "0.2.2"

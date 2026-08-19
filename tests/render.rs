@@ -251,7 +251,6 @@ fn focused_thread_expands_into_its_full_conversation() {
         .find(|line| line.contains("2 comments"))
         .expect("expanded thread summary should be visible");
 
-    assert!(focused_row.contains('▍'));
     assert!(focused_row.contains("◆ ▾ 2 comments · open"));
     assert!(rendered.contains("Lol not suspicious of coupling at all."));
     assert!(rendered.contains("This is the full reply body."));
@@ -1062,10 +1061,22 @@ fn the_file_tree_marks_files_whose_threads_are_all_resolved() {
         .unwrap();
     let rendered = terminal.backend().to_string();
 
-    assert!(
-        rendered.lines().any(|line| line.contains("◇ 2")),
+    // The mark sits in a fixed column at the left, right of the cursor bar, so
+    // scanning for files that still need reading is one glance down the edge
+    // rather than a hunt across names of different lengths.
+    // `TestBackend` quotes each row, so the mark is the first column of one.
+    let marked: Vec<&str> = rendered
+        .lines()
+        .map(|line| line.trim_start_matches('"'))
+        .filter(|line| line.starts_with('◇'))
+        .collect();
+
+    assert_eq!(
+        marked.len(),
+        1,
         "a settled conversation still marks its file, got:\n{rendered}"
     );
+    assert!(marked[0].contains("verify.go"), "{:?}", marked[0]);
 }
 
 /// The tree filter and the diff search share a matcher, so the tree can show
@@ -1101,9 +1112,174 @@ fn the_file_filter_paints_its_hit_in_the_path() {
         .map(ratatui::buffer::Cell::symbol)
         .collect();
 
-    // Only one of the two rows has room to show its hit: the other elides to
-    // `…heck_test.go`, and what is not on screen is not painted.
-    assert_eq!(painted, "check");
+    // Both rows have room for their hit now that the tree spends its columns on
+    // names. What is elided away is still not painted.
+    assert_eq!(painted, "checkcheck");
+}
+
+/// The tree used to spend eleven columns on `+31    -0` and elide the path
+/// mid-segment, which left `…y.go` on an 80-column terminal.
+#[test]
+fn the_tree_spends_its_columns_on_names() {
+    let app = load();
+
+    for width in [80, 120] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+        terminal.draw(|frame| paint(frame, &app)).unwrap();
+        let rendered = terminal.backend().to_string();
+
+        for name in ["verify.go", "verify_test.go", "auth_check.go"] {
+            assert!(
+                rendered.contains(name),
+                "{name} is named in full at {width} columns:\n{rendered}"
+            );
+        }
+    }
+}
+
+/// The tree budgets two columns for an icon and the space after it. A glyph
+/// two columns wide would push everything after it past the pane's edge.
+#[test]
+fn every_tree_icon_is_one_column() {
+    use devicons::{Theme as DeviconTheme, icon_for_file};
+    use unicode_width::UnicodeWidthChar;
+
+    let samples = [
+        "a.rs",
+        "a.go",
+        "a.ts",
+        "a.tsx",
+        "a.py",
+        "a.md",
+        "a.json",
+        "a.yaml",
+        "a.toml",
+        "a.css",
+        "a.html",
+        "a.sh",
+        "a.c",
+        "a.cpp",
+        "a.java",
+        "a.rb",
+        "a.php",
+        "a.swift",
+        "a.kt",
+        "a.lua",
+        "a.sql",
+        "a.png",
+        "a.svg",
+        "Dockerfile",
+        "Makefile",
+        "Cargo.lock",
+        "LICENSE",
+        "unknown.qqq",
+        ".gitignore",
+    ];
+
+    for path in samples {
+        let icon = icon_for_file(path, &Some(DeviconTheme::Dark));
+        assert_eq!(
+            UnicodeWidthChar::width(icon.icon),
+            Some(1),
+            "{path} drew U+{:04X}",
+            icon.icon as u32
+        );
+    }
+}
+
+/// A directory every file is under is worth naming once. Paying an indent level
+/// and a row to repeat it is what makes a tree cost more room than a flat list.
+#[test]
+fn the_shared_directory_names_the_pane_rather_than_a_row() {
+    let app = load();
+    let rendered = draw(&app);
+
+    assert!(
+        rendered.contains("Files · 4 · pkg/"),
+        "the pane is titled with what every file shares:\n{rendered}"
+    );
+    assert_eq!(
+        layout_of(&app).files.root(),
+        Some("pkg/"),
+        "and it is not also a row"
+    );
+}
+
+/// A chain of directories with nothing else in it is one heading, or a deep
+/// path spends more columns on indentation than the grouping saves.
+#[test]
+fn an_unbranching_directory_chain_is_one_heading() {
+    let app = load();
+    let rendered = draw(&app);
+
+    assert!(
+        rendered.contains("cmd/attestation/verify/"),
+        "three levels, one row:\n{rendered}"
+    );
+}
+
+#[test]
+fn a_folded_directory_hides_its_files_and_says_how_many() {
+    let mut app = load();
+    app.pane = Pane::Files;
+
+    // Down onto the first heading, then fold it.
+    press(&mut app, "gg");
+    assert_eq!(app.tree_directory(), Some("pkg/cmd/attestation/verify/"));
+
+    act(&mut app, &Action::Activate);
+    let rendered = draw(&app);
+
+    assert!(
+        !rendered.contains("verify_test.go"),
+        "the files are folded away:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("▸ 2"),
+        "and the heading says how many:\n{rendered}"
+    );
+
+    act(&mut app, &Action::Activate);
+    assert!(
+        draw(&app).contains("verify_test.go"),
+        "the same key brings them back"
+    );
+}
+
+/// Folding is keyed on the directory, not on where the tree happened to draw
+/// it, so a fold outlives the refetch that rebuilds the rows.
+#[test]
+fn a_fold_survives_a_refetch() {
+    let mut app = load();
+    app.pane = Pane::Files;
+    press(&mut app, "gg");
+    act(&mut app, &Action::Activate);
+
+    let files: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
+    app.set_files(parse_files(&files).unwrap());
+
+    assert!(
+        !draw(&app).contains("verify_test.go"),
+        "the fold is still folded"
+    );
+}
+
+/// The list used to be measured wide enough to paint over the rule between the
+/// panes, so every row that named a file erased it.
+#[test]
+fn the_tree_keeps_the_rule_between_the_panes() {
+    let app = load();
+    let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+    terminal.draw(|frame| paint(frame, &app)).unwrap();
+
+    let rendered = terminal.backend().to_string();
+    let rules = rendered.lines().filter(|line| line.contains('│')).count();
+
+    assert!(
+        rules >= app.files.len(),
+        "every file row still shows the rule:\n{rendered}"
+    );
 }
 
 #[test]
@@ -1631,11 +1807,23 @@ fn the_cursor_covers_every_row_of_the_line_it_is_on() {
     let buffer = terminal.backend().buffer();
 
     // A folded line is one logical row, so the whole of it highlights together
-    // and the bar runs down its full height.
-    for offset in 0..fold_count(&app, 1) as u16 {
+    // rather than only the row carrying the line numbers.
+    let cursor_background = buffer.cell((0, first)).unwrap().bg;
+    for offset in 1..fold_count(&app, 1) as u16 {
         let cell = buffer.cell((0, first + offset)).unwrap();
-        assert_eq!(cell.symbol(), "▍", "row {offset} keeps the cursor bar");
+        assert_eq!(
+            cell.bg, cursor_background,
+            "row {offset} of the folded line keeps the highlight"
+        );
     }
+
+    // And it is a highlight, not the pane's own background.
+    let elsewhere = layout.diff.y + layout.rows.code_row(3) as u16;
+    assert_ne!(
+        buffer.cell((0, elsewhere)).unwrap().bg,
+        cursor_background,
+        "a line the cursor is not on is not highlighted"
+    );
 }
 
 /// The pending review is where drafts live now, so reopening the pull request

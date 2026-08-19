@@ -811,12 +811,15 @@ fn filtering_narrows_the_tree_and_survives_commit() {
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.filter_query().as_deref(), Some("auth_check"));
 
+    // Both matches share one directory, which names the pane rather than taking
+    // a row, so the filtered tree is a flat list of the two.
     for (keys, selected) in [("j", 3), ("gg", 2), ("G", 3)] {
         press(&mut app, keys);
         assert_eq!(
             app.selected_file, selected,
             "{keys} stays within the matches"
         );
+        assert_eq!(app.tree_directory(), None, "{keys} lands on a file");
     }
 
     send(&mut input, &mut app, KeyCode::Enter.into());
