@@ -1,5 +1,6 @@
 use crate::text::url::escape_path;
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -72,6 +73,25 @@ mutation($input:SubmitPullRequestReviewInput!) {
 const CREATE_REVIEW_MUTATION: &str = r"
 mutation($input:AddPullRequestReviewInput!) {
   addPullRequestReview(input:$input) { pullRequestReview { id state } }
+}
+";
+
+const USER_PULL_REQUESTS_QUERY: &str = r"
+query($endCursor:String) {
+  viewer {
+    pullRequests(
+      first:100
+      after:$endCursor
+      states:OPEN
+      orderBy:{field:UPDATED_AT,direction:DESC}
+    ) {
+      nodes {
+        number title isDraft reviewDecision
+        repository { nameWithOwner }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
 }
 ";
 
@@ -152,6 +172,13 @@ impl Repo {
         Self::parse(rest.trim_end_matches(".git"))
     }
 
+    pub fn slug(&self) -> String {
+        match &self.host {
+            Some(host) => format!("{host}/{}/{}", self.owner, self.name),
+            None => format!("{}/{}", self.owner, self.name),
+        }
+    }
+
     /// Enterprise installations serve the same API under `/api/v3`, so an
     /// explicit `github.com` has to resolve to the public host instead.
     fn enterprise_host(&self) -> Option<&str> {
@@ -181,6 +208,254 @@ impl Repo {
             None => "https://api.github.com/graphql".to_string(),
         }
     }
+}
+
+pub struct PullRequest {
+    pub number: u32,
+    pub title: String,
+    pub review_status: ReviewStatus,
+}
+
+pub struct LocatedPullRequest {
+    pub repo: Repo,
+    pub pull: PullRequest,
+}
+
+/// Keeps repository scope and rows together so one local repository is owned
+/// once rather than cloned into every result.
+pub enum PullRequestList {
+    Repository { repo: Repo, pulls: Vec<PullRequest> },
+    User { pulls: Vec<LocatedPullRequest> },
+}
+
+pub struct PullRequestRow<'a> {
+    pub repository: Option<&'a Repo>,
+    pub number: u32,
+    pub title: &'a str,
+    pub review_status: &'a ReviewStatus,
+}
+
+pub struct PullRequestTarget {
+    pub repo: Repo,
+    pub number: u32,
+}
+
+impl PullRequestList {
+    pub const fn len(&self) -> usize {
+        match self {
+            Self::Repository { pulls, .. } => pulls.len(),
+            Self::User { pulls } => pulls.len(),
+        }
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub const fn shows_repositories(&self) -> bool {
+        matches!(self, Self::User { .. })
+    }
+
+    pub fn row(&self, index: usize) -> Option<PullRequestRow<'_>> {
+        match self {
+            Self::Repository { pulls, .. } => {
+                pulls.get(index).map(|pull| pull.row(None))
+            }
+            Self::User { pulls } => pulls
+                .get(index)
+                .map(|located| located.pull.row(Some(&located.repo))),
+        }
+    }
+
+    pub fn select(self, index: usize) -> Option<PullRequestTarget> {
+        match self {
+            Self::Repository { repo, pulls } => {
+                let number = pulls.get(index)?.number;
+                Some(PullRequestTarget { repo, number })
+            }
+            Self::User { mut pulls } => {
+                if index >= pulls.len() {
+                    return None;
+                }
+                let selected = pulls.swap_remove(index);
+                Some(PullRequestTarget {
+                    repo: selected.repo,
+                    number: selected.pull.number,
+                })
+            }
+        }
+    }
+}
+
+impl PullRequest {
+    fn row<'a>(&'a self, repository: Option<&'a Repo>) -> PullRequestRow<'a> {
+        PullRequestRow {
+            repository,
+            number: self.number,
+            title: &self.title,
+            review_status: &self.review_status,
+        }
+    }
+}
+
+pub enum ReviewStatus {
+    Draft,
+    ChangesRequested,
+    ReviewRequired,
+    Approved,
+    NoDecision,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum ReviewDecision {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireRepositoryPullRequest {
+    number: u32,
+    title: String,
+    is_draft: bool,
+    #[serde(deserialize_with = "deserialize_cli_review_decision")]
+    review_decision: Option<ReviewDecision>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireUserPullRequest {
+    number: u32,
+    title: String,
+    is_draft: bool,
+    review_decision: Option<ReviewDecision>,
+    repository: WireRepository,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireRepository {
+    name_with_owner: String,
+}
+
+#[derive(Deserialize)]
+struct WireUserPullRequestPage {
+    data: WireUserPullRequestData,
+}
+
+#[derive(Deserialize)]
+struct WireUserPullRequestData {
+    viewer: WireUserPullRequests,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireUserPullRequests {
+    pull_requests: WireUserPullRequestConnection,
+}
+
+#[derive(Deserialize)]
+struct WireUserPullRequestConnection {
+    nodes: Vec<WireUserPullRequest>,
+}
+
+fn deserialize_cli_review_decision<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<ReviewDecision>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let decision = Option::<String>::deserialize(deserializer)?;
+
+    match decision.as_deref() {
+        None | Some("") => Ok(None),
+        Some("APPROVED") => Ok(Some(ReviewDecision::Approved)),
+        Some("CHANGES_REQUESTED") => Ok(Some(ReviewDecision::ChangesRequested)),
+        Some("REVIEW_REQUIRED") => Ok(Some(ReviewDecision::ReviewRequired)),
+        Some(other) => Err(serde::de::Error::unknown_variant(
+            other,
+            &["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"],
+        )),
+    }
+}
+
+const fn review_status(
+    is_draft: bool,
+    decision: Option<&ReviewDecision>,
+) -> ReviewStatus {
+    if is_draft {
+        return ReviewStatus::Draft;
+    }
+
+    match decision {
+        Some(ReviewDecision::ChangesRequested) => {
+            ReviewStatus::ChangesRequested
+        }
+        Some(ReviewDecision::ReviewRequired) => ReviewStatus::ReviewRequired,
+        Some(ReviewDecision::Approved) => ReviewStatus::Approved,
+        None => ReviewStatus::NoDecision,
+    }
+}
+
+const fn pull_request(
+    number: u32,
+    title: String,
+    is_draft: bool,
+    decision: Option<&ReviewDecision>,
+) -> PullRequest {
+    PullRequest {
+        number,
+        title,
+        review_status: review_status(is_draft, decision),
+    }
+}
+
+fn parse_repository_pull_requests(
+    repo: Repo,
+    bytes: &[u8],
+) -> Result<PullRequestList> {
+    let pulls: Vec<WireRepositoryPullRequest> =
+        serde_json::from_slice(bytes)
+            .context("failed to parse gh pr list output")?;
+
+    Ok(PullRequestList::Repository {
+        repo,
+        pulls: pulls
+            .into_iter()
+            .map(|pull| {
+                pull_request(
+                    pull.number,
+                    pull.title,
+                    pull.is_draft,
+                    pull.review_decision.as_ref(),
+                )
+            })
+            .collect(),
+    })
+}
+
+fn parse_user_pull_requests(bytes: &[u8]) -> Result<PullRequestList> {
+    let pages: Vec<WireUserPullRequestPage> = serde_json::from_slice(bytes)
+        .context("failed to parse user pull requests response")?;
+    let pulls = pages
+        .into_iter()
+        .flat_map(|page| page.data.viewer.pull_requests.nodes)
+        .map(|pull| {
+            Ok(LocatedPullRequest {
+                repo: Repo::parse(&pull.repository.name_with_owner)?,
+                pull: pull_request(
+                    pull.number,
+                    pull.title,
+                    pull.is_draft,
+                    pull.review_decision.as_ref(),
+                ),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(PullRequestList::User { pulls })
 }
 
 /// One pooled agent for the whole session so the files, metadata and attachment
@@ -771,24 +1046,92 @@ pub async fn fetch_outage(repo: &Repo) -> Option<String> {
     .ok()?
 }
 
+async fn gh_output(args: &[&str], failure: &str) -> Result<Vec<u8>> {
+    let output = Command::new("gh")
+        .args(args)
+        .output()
+        .await
+        .context("failed to spawn gh; is it installed and on PATH?")?;
+
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        bail!("{failure}: {}", error.trim());
+    }
+
+    Ok(output.stdout)
+}
+
+pub async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
+    let slug = repo.slug();
+    let output = gh_output(
+        &[
+            "pr",
+            "list",
+            "--repo",
+            &slug,
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,title,isDraft,reviewDecision",
+        ],
+        "gh pr list failed",
+    )
+    .await?;
+
+    parse_repository_pull_requests(repo, &output)
+}
+
+pub async fn user_pull_requests() -> Result<PullRequestList> {
+    let query = format!("query={USER_PULL_REQUESTS_QUERY}");
+    let output = gh_output(
+        &[
+            "api",
+            "graphql",
+            "--paginate",
+            "--slurp",
+            "--raw-field",
+            &query,
+        ],
+        "gh api graphql failed",
+    )
+    .await?;
+
+    parse_user_pull_requests(&output)
+}
+
+/// Returns the current GitHub repository when the process is inside a Git
+/// worktree.
+pub async fn current_repo_if_present() -> Result<Option<Repo>> {
+    let git = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .await
+        .context("failed to spawn git; is it installed and on PATH?")?;
+
+    if !git.status.success()
+        || String::from_utf8_lossy(&git.stdout).trim() != "true"
+    {
+        return Ok(None);
+    }
+
+    current_repo().await.map(Some)
+}
+
 /// Resolved from the local git remotes, which is the CLI's job rather than an
 /// API call.
 pub async fn current_repo() -> Result<Repo> {
     // The web URL rather than `nameWithOwner`, which names the repository but
     // not the host it lives on. Dropping the host sent an enterprise checkout
     // to github.com.
-    let out = Command::new("gh")
-        .args(["repo", "view", "--json", "url", "--jq", ".url"])
-        .output()
-        .await
-        .context("failed to spawn gh; is it installed and on PATH?")?;
+    let output = gh_output(
+        &["repo", "view", "--json", "url", "--jq", ".url"],
+        "gh repo view failed",
+    )
+    .await?;
 
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        bail!("gh repo view failed: {}", err.trim());
-    }
-
-    Repo::from_url(String::from_utf8_lossy(&out.stdout).trim())
+    Repo::from_url(String::from_utf8_lossy(&output).trim())
 }
 
 #[cfg(test)]
@@ -980,5 +1323,102 @@ mod tests {
             "https://ghe.corp/api/v3/repos/owner/repo/pulls"
         );
         assert_eq!(enterprise.graphql_url(), "https://ghe.corp/api/graphql");
+    }
+
+    #[test]
+    fn parses_repository_pull_requests_and_moves_the_repository_once() {
+        let local = parse_repository_pull_requests(
+            Repo::parse("owner/repo").unwrap(),
+            br#"[
+                {"number":12,"title":"Draft","isDraft":true,"reviewDecision":null},
+                {"number":13,"title":"Ready","isDraft":false,"reviewDecision":"APPROVED"},
+                {"number":14,"title":"Changes","isDraft":false,"reviewDecision":"CHANGES_REQUESTED"},
+                {"number":15,"title":"Review","isDraft":false,"reviewDecision":"REVIEW_REQUIRED"},
+                {"number":16,"title":"Unreviewed","isDraft":false,"reviewDecision":""}
+            ]"#,
+        )
+        .unwrap();
+        assert!(!local.shows_repositories());
+        assert_eq!(local.row(0).unwrap().number, 12);
+        assert!(matches!(
+            local.row(0).unwrap().review_status,
+            ReviewStatus::Draft
+        ));
+        assert!(matches!(
+            local.row(1).unwrap().review_status,
+            ReviewStatus::Approved
+        ));
+        assert!(matches!(
+            local.row(2).unwrap().review_status,
+            ReviewStatus::ChangesRequested
+        ));
+        assert!(matches!(
+            local.row(3).unwrap().review_status,
+            ReviewStatus::ReviewRequired
+        ));
+        assert!(matches!(
+            local.row(4).unwrap().review_status,
+            ReviewStatus::NoDecision
+        ));
+
+        let target = local.select(1).unwrap();
+        assert_eq!(target.repo.slug(), "owner/repo");
+        assert_eq!(target.number, 13);
+    }
+
+    #[test]
+    fn parses_user_pull_requests_and_moves_the_selected_repository() {
+        let global = parse_user_pull_requests(
+            br#"[{
+                "data": {
+                    "viewer": {
+                        "pullRequests": {
+                            "nodes": [{
+                                "number": 34,
+                                "title": "Global change",
+                                "isDraft": false,
+                                "reviewDecision": "CHANGES_REQUESTED",
+                                "repository": {
+                                    "nameWithOwner": "other/repo"
+                                }
+                            }],
+                            "pageInfo": {
+                                "hasNextPage": false,
+                                "endCursor": null
+                            }
+                        }
+                    }
+                }
+            }]"#,
+        )
+        .unwrap();
+        assert!(global.shows_repositories());
+        let row = global.row(0).unwrap();
+        assert_eq!(row.repository.unwrap().slug(), "other/repo");
+        assert_eq!(row.title, "Global change");
+        assert!(matches!(row.review_status, ReviewStatus::ChangesRequested));
+
+        let target = global.select(0).unwrap();
+        assert_eq!(target.repo.slug(), "other/repo");
+        assert_eq!(target.number, 34);
+    }
+
+    #[test]
+    fn rejects_unknown_review_decisions() {
+        let local = parse_repository_pull_requests(
+            Repo::parse("owner/repo").unwrap(),
+            br#"[{"number":1,"title":"Unknown","isDraft":false,
+                "reviewDecision":"QUEUED"}]"#,
+        );
+        assert!(local.is_err());
+
+        let global = parse_user_pull_requests(
+            br#"[{"data":{"viewer":{"pullRequests":{"nodes":[{
+                "number":1,"title":"Unknown","isDraft":false,
+                "reviewDecision":"QUEUED",
+                "repository":{"nameWithOwner":"owner/repo"}
+            }],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]"#,
+        );
+        assert!(global.is_err());
     }
 }

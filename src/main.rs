@@ -19,6 +19,7 @@ use termina::event::KeyEventKind;
 use termina::{Event, EventStream};
 use tokio::sync::mpsc;
 
+mod selector;
 mod terminal;
 
 #[derive(Parser)]
@@ -29,7 +30,7 @@ mod terminal;
 )]
 struct Args {
     /// Pull request number
-    number: u32,
+    number: Option<u32>,
 
     /// Select another repository using the [HOST/]OWNER/REPO format
     #[arg(short = 'R', long = "repo", value_name = "[HOST/]OWNER/REPO")]
@@ -314,56 +315,38 @@ fn highlight_order(count: usize, first: usize) -> impl Iterator<Item = usize> {
         .chain((0..count).filter(move |index| *index != first))
 }
 
+enum Launch {
+    Review { repo: gh::Repo, number: u32 },
+    Select(gh::PullRequestList),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     let follow_terminal = args.theme.follows_terminal();
 
     let repo = match &args.repo {
-        Some(slug) => gh::Repo::parse(slug)?,
-        None => gh::current_repo()
-            .await
-            .context("not inside a GitHub repo; pass -R OWNER/REPO")?,
+        Some(slug) => Some(gh::Repo::parse(slug)?),
+        None => gh::current_repo_if_present().await?,
     };
 
-    let (tx, rx) = mpsc::unbounded_channel();
-
-    // Both round trips leave immediately; whichever lands first paints.
-    let tx_ui = tx.clone();
-    let number = args.number;
-    spawn_meta_fetch(repo.clone(), number, tx.clone());
-
-    let files_repo = repo.clone();
-    tokio::spawn(async move {
-        let msg = match gh::fetch_files(&files_repo, number).await {
-            Ok(val) => match model::parse_files(&val) {
-                Ok(files) => Message::Files(files),
-                Err(err) => Message::FilesFailed(err.to_string()),
-            },
-            Err(err) => Message::FilesFailed(err.to_string()),
-        };
-        let _ = tx.send(msg);
-    });
-
-    // Asking the terminal for its background costs a round trip that can time
-    // out; both fetches are already in flight, so it overlaps the network
-    // instead of delaying it.
-    let theme = Theme::for_mode(args.theme.resolve());
-
-    // Syntax assets deserialize on a worker so the cost overlaps the fetch too.
-    std::thread::spawn(move || renderer::preload(theme.mode));
-
-    let session = Session {
-        origin: Origin {
-            repo_url: repo.web_url(),
+    let launch = match (args.number, repo) {
+        (Some(number), repo) => Launch::Review {
+            repo: repo
+                .context("not inside a GitHub repo; pass -R OWNER/REPO")?,
             number,
         },
-        repo,
-        number,
-        follow_terminal,
+        (None, Some(repo)) => {
+            Launch::Select(gh::repository_pull_requests(repo).await?)
+        }
+        (None, None) => Launch::Select(gh::user_pull_requests().await?),
     };
 
-    run(rx, tx_ui, theme, session).await
+    // Resolve the initial palette before entering the alternate screen. In
+    // auto mode the live notification can still update it inside the session.
+    let theme = Theme::for_mode(args.theme.resolve());
+
+    run(theme, follow_terminal, launch).await
 }
 
 /// What the event loop needs to talk back to GitHub after the first paint.
@@ -378,14 +361,67 @@ struct Session {
 }
 
 async fn run(
-    mut rx: mpsc::UnboundedReceiver<Message>,
-    tx: mpsc::UnboundedSender<Message>,
     theme: Theme,
-    session: Session,
+    follow_terminal: bool,
+    launch: Launch,
 ) -> Result<()> {
-    let follow_terminal = session.follow_terminal;
+    terminal::scope(follow_terminal, async move |terminal, events| {
+        let mut theme = theme;
+        let session = match launch {
+            Launch::Review { repo, number } => Session {
+                origin: Origin {
+                    repo_url: repo.web_url(),
+                    number,
+                },
+                repo,
+                number,
+                follow_terminal,
+            },
+            Launch::Select(pull_requests) => {
+                let Some(target) = selector::select(
+                    terminal,
+                    events,
+                    pull_requests,
+                    &mut theme,
+                    follow_terminal,
+                )
+                .await?
+                else {
+                    return Ok(());
+                };
 
-    terminal::scope(follow_terminal, async |terminal, events| {
+                Session {
+                    origin: Origin {
+                        repo_url: target.repo.web_url(),
+                        number: target.number,
+                    },
+                    repo: target.repo,
+                    number: target.number,
+                    follow_terminal,
+                }
+            }
+        };
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        // Both round trips leave immediately; whichever lands first paints.
+        spawn_meta_fetch(session.repo.clone(), session.number, tx.clone());
+        let files_repo = session.repo.clone();
+        let files_tx = tx.clone();
+        tokio::spawn(async move {
+            let msg = match gh::fetch_files(&files_repo, session.number).await {
+                Ok(val) => match model::parse_files(&val) {
+                    Ok(files) => Message::Files(files),
+                    Err(err) => Message::FilesFailed(err.to_string()),
+                },
+                Err(err) => Message::FilesFailed(err.to_string()),
+            };
+            let _ = files_tx.send(msg);
+        });
+
+        // Syntax assets deserialize while the initial requests are in flight.
+        std::thread::spawn(move || renderer::preload(theme.mode));
+
         event_loop(terminal, events, &mut rx, tx, theme, &session).await
     })
     .await
@@ -623,6 +659,15 @@ async fn next_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_request_number_is_optional() {
+        assert_eq!(Args::try_parse_from(["prtui"]).unwrap().number, None);
+        assert_eq!(
+            Args::try_parse_from(["prtui", "42"]).unwrap().number,
+            Some(42)
+        );
+    }
 
     #[test]
     fn the_open_file_is_colored_before_the_rest() {
