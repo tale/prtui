@@ -270,6 +270,9 @@ async fn event_loop(
     let mut outage: Option<String> = None;
     let mut is_outage_probed = false;
     let mut is_dirty = true;
+    // Replaced by the first frame's own layout before any input is routed
+    // against it, since the loop draws before it reads.
+    let mut layout = Layout::compute(terminal.get_frame().area(), &app);
     let mut animation = tokio::time::interval(Duration::from_millis(90));
     animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -284,7 +287,7 @@ async fn event_loop(
         }
 
         if is_dirty {
-            present_frame(terminal, &app, &input.pending_hint())?;
+            layout = present_frame(terminal, &app, &input.pending_hint())?;
             is_dirty = false;
         }
 
@@ -386,10 +389,6 @@ async fn event_loop(
                     .context("terminal event stream closed")?
                     .context("reading terminal event")?;
 
-                // The layout the last frame was drawn with, which is what the
-                // cursor and the scroll offset are still addressing.
-                let layout = Layout::compute(terminal.get_frame().area(), &app);
-
                 match event {
                     Event::WindowResized(_) => is_dirty = true,
                     Event::Key(key) => {
@@ -432,19 +431,22 @@ async fn event_loop(
     Ok(())
 }
 
-/// Layout is computed before the draw and shared with it, so what the renderer
-/// slices is exactly what the next keystroke will address.
+/// Draws a frame and hands back the layout it was drawn with, which is what
+/// the next keystroke addresses: the cursor and the scroll offset are still
+/// pointing at what is on screen.
 fn present_frame(
     terminal: &mut terminal::AppTerminal,
     app: &App,
     pending_hint: &str,
-) -> Result<()> {
+) -> Result<Layout> {
     let layout = Layout::compute(terminal.get_frame().area(), app);
 
     terminal::render(terminal, |frame| {
         ui::draw(frame, app, &layout, pending_hint);
     })
-    .context("drawing a frame")
+    .context("drawing a frame")?;
+
+    Ok(layout)
 }
 
 async fn next_event(

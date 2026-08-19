@@ -4,10 +4,10 @@
 //! only to the frame. Where things go and how tall they are was decided by the
 //! layout, so nothing has to be discovered mid-render and written back.
 
-use crate::app::draft::{Draft, Side};
+use crate::app::draft::Side;
 use crate::app::mode::Mode;
 use crate::app::review::ReviewEvent;
-use crate::app::{App, Pane, Target};
+use crate::app::{App, Focus, OpenFile, Pane, Target};
 use crate::layout::Layout;
 use crate::layout::rows::{self, BodyRow, Connector, GUTTER, Row, ThreadState};
 use crate::model::{LineKind, ReviewThread};
@@ -293,28 +293,22 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
         layout.diff_pane,
     );
 
-    if app.current_file().is_none() {
+    let Some(open) = app.open() else {
         draw_centered(frame, area, "no diff selected", theme.dim);
         return;
-    }
+    };
 
     let width = area.width as usize;
-    let threads = app.file_threads();
-    let drafts: Vec<&Draft> = app
-        .drafts
-        .iter()
-        .filter(|draft| Some(&*draft.path) == app.current_path())
-        .collect();
-
+    let focus = app.focus();
     let lines: Vec<Line<'_>> = layout
         .rows
         .window(app.diff_scroll, area.height as usize)
         .iter()
         .map(|row| match row {
-            Row::Code { source, fragment } => code_line(
-                app, *source, *fragment, &drafts, threads, width, theme,
-            ),
-            Row::FileDraft => file_draft_line(app, width, theme),
+            Row::Code { source, fragment } => {
+                code_line(&open, focus, *source, *fragment, width, theme)
+            }
+            Row::FileDraft => file_draft_line(&open, width, theme),
             Row::Heading { state, count } => {
                 heading_line(*state, *count, width, theme)
             }
@@ -329,8 +323,8 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
                 connector,
                 has_state_label,
             } => summary_line(
-                app,
-                &threads[*thread],
+                focus,
+                &open.threads[*thread],
                 *state,
                 *connector,
                 *has_state_label,
@@ -347,23 +341,19 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
 }
 
 fn code_line<'a>(
-    app: &'a App,
+    open: &OpenFile<'a>,
+    focus: Focus<'_>,
     index: usize,
     fragment: Fragment,
-    drafts: &[&Draft],
-    threads: &[ReviewThread],
     width: usize,
     theme: Theme,
 ) -> Line<'a> {
-    let Some(line) = app.current_file().and_then(|file| file.lines.get(index))
-    else {
+    let Some(line) = open.line(index) else {
         return Line::default();
     };
 
-    let is_cursor = app.pane == Pane::Diff
-        && index == app.cursor
-        && app.focused_thread.is_none();
-    let is_selected = app.selection.is_some_and(|s| s.contains(index));
+    let is_cursor = focus.is_cursor(index);
+    let is_selected = focus.is_selected(index);
 
     if line.kind == LineKind::Hunk {
         let text = format!("{:<width$}", line.text, width = width);
@@ -396,10 +386,11 @@ fn code_line<'a>(
         _ => base_bg,
     };
 
-    let has_thread = threads.iter().any(|thread| {
+    let has_thread = open.threads.iter().any(|thread| {
         !thread.is_outdated && thread.anchors_to(line) && !thread.is_resolved
     });
-    let has_draft = drafts
+    let has_draft = open
+        .drafts
         .iter()
         .any(|draft| draft.rows().is_some_and(|rows| rows.contains(&index)));
 
@@ -437,9 +428,8 @@ fn code_line<'a>(
         ));
     }
 
-    let styled = app.highlighted();
     let colored: Vec<Piece> =
-        match styled.and_then(|s| s.get(index)).filter(|s| !s.is_empty()) {
+        match open.segments(index).filter(|segments| !segments.is_empty()) {
             Some(segments) => segments
                 .iter()
                 .map(|segment| Piece {
@@ -462,7 +452,7 @@ fn code_line<'a>(
         };
 
     let mut used = GUTTER;
-    for piece in split_by_matches(colored, &app.line_match_ranges(index)) {
+    for piece in split_by_matches(colored, &focus.matches(&line.text)) {
         // Syntax runs and search hits span the whole line; this row shows one
         // slice of it, so each run is trimmed to what falls inside the fragment.
         let start = piece.range.start.max(fragment.start);
@@ -579,10 +569,14 @@ fn card_indent(width: usize) -> usize {
 
 /// The pending remark about the file as a whole. It has no line to sit under, so
 /// it leads the pane and carries the draft marker the gutter uses elsewhere.
-fn file_draft_line(app: &App, width: usize, theme: Theme) -> Line<'static> {
+fn file_draft_line(
+    open: &OpenFile<'_>,
+    width: usize,
+    theme: Theme,
+) -> Line<'static> {
     let indent = card_indent(width);
     let label = "file note";
-    let body = app.file_draft().unwrap_or_default();
+    let body = open.file_draft().unwrap_or_default();
     let summary = comment_summary(body, theme);
     let budget = width
         .saturating_sub(indent)
@@ -662,7 +656,7 @@ fn hidden_line(
 }
 
 fn summary_line(
-    app: &App,
+    focus: Focus<'_>,
     thread: &ReviewThread,
     state: ThreadState,
     connector: Connector,
@@ -672,8 +666,8 @@ fn summary_line(
 ) -> Line<'static> {
     let indent = card_indent(width);
     let card_width = width.saturating_sub(indent);
-    let is_focused = app.focused_thread.as_deref() == Some(&thread.id);
-    let is_expanded = app.is_thread_expanded(&thread.id);
+    let is_focused = focus.is_thread_focused(&thread.id);
+    let is_expanded = focus.is_thread_expanded(&thread.id);
 
     // An expanded card gives its one line to the conversation's shape instead of
     // repeating the first comment, which is about to be printed underneath.

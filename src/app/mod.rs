@@ -9,7 +9,7 @@ pub mod search;
 
 use crate::layout::Layout;
 use crate::layout::rows;
-use crate::model::{ChangedFile, Meta, PullRequest, ReviewThread};
+use crate::model::{ChangedFile, DiffLine, Meta, PullRequest, ReviewThread};
 use crate::renderer::{Segment, Theme, ThemeMode};
 use action::{Action, Motion};
 use draft::{Anchor, Attachment, Draft};
@@ -17,16 +17,89 @@ use editor::CommentEditor;
 use mode::{Mode, Selection};
 use review::{Failure, Request, Sent, Submission};
 use std::collections::HashMap;
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
 /// Syntax colors for one file: the segments of each of its lines.
 pub type Highlight = Vec<Vec<Segment>>;
 
+/// The file under review, gathered from the four places its parts live.
+///
+/// The patch comes from REST, the conversation from GraphQL, the colors from
+/// the highlighting thread, and the drafts from this session. Derived per
+/// frame rather than stored, so nothing has to be kept in step with anything.
+pub struct OpenFile<'a> {
+    pub patch: &'a ChangedFile,
+    pub threads: &'a [ReviewThread],
+    pub drafts: Vec<&'a Draft>,
+    highlight: Option<&'a Highlight>,
+}
+
+impl<'a> OpenFile<'a> {
+    pub fn line(&self, index: usize) -> Option<&'a DiffLine> {
+        self.patch.lines.get(index)
+    }
+
+    /// Colors for one line, absent until the background pass reaches the file.
+    pub fn segments(&self, index: usize) -> Option<&'a [Segment]> {
+        self.highlight?.get(index).map(Vec::as_slice)
+    }
+
+    /// The remark on the file as a whole, if one is pending.
+    pub fn file_draft(&self) -> Option<&'a str> {
+        self.drafts
+            .iter()
+            .find(|draft| draft.is_file_level())
+            .map(|draft| draft.body.as_str())
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Pane {
     Files,
     Diff,
+}
+
+/// Where the reader is.
+///
+/// This is what a diff row needs to know that is not a property of the row
+/// itself, gathered once so the renderers take a value instead of reaching
+/// into the app for whatever they like.
+#[derive(Clone, Copy)]
+pub struct Focus<'a> {
+    pub cursor: usize,
+    pub selection: Option<Selection>,
+    pub pane: Pane,
+    pub thread: Option<&'a str>,
+    pub expanded: Option<&'a str>,
+    pub query: Option<&'a str>,
+}
+
+impl Focus<'_> {
+    /// The diff cursor gives way while a thread holds the focus.
+    pub fn is_cursor(&self, row: usize) -> bool {
+        self.pane == Pane::Diff && self.thread.is_none() && row == self.cursor
+    }
+
+    pub fn is_selected(&self, row: usize) -> bool {
+        self.selection
+            .is_some_and(|selection| selection.contains(row))
+    }
+
+    pub fn is_thread_focused(&self, id: &str) -> bool {
+        self.thread == Some(id)
+    }
+
+    pub fn is_thread_expanded(&self, id: &str) -> bool {
+        self.expanded == Some(id)
+    }
+
+    /// Byte ranges of the active query within one line of the diff.
+    pub fn matches(&self, text: &str) -> Vec<Range<usize>> {
+        self.query
+            .filter(|query| !query.is_empty())
+            .map_or_else(Vec::new, |query| search::ranges(text, query))
+    }
 }
 
 /// Where a composed body will land once it leaves the editor.
@@ -240,14 +313,33 @@ impl App {
         self.current_file().map(|file| &*file.path)
     }
 
-    /// The pending file-level remark on the open file, if there is one.
-    pub fn file_draft(&self) -> Option<&str> {
-        let path = self.current_path()?;
+    pub fn focus(&self) -> Focus<'_> {
+        Focus {
+            cursor: self.cursor,
+            selection: self.selection,
+            pane: self.pane,
+            thread: self.focused_thread.as_deref(),
+            expanded: self.expanded_thread.as_deref(),
+            query: self.search_query(),
+        }
+    }
 
-        self.drafts
-            .iter()
-            .find(|draft| *draft.path == *path && draft.is_file_level())
-            .map(|draft| draft.body.as_str())
+    pub fn open(&self) -> Option<OpenFile<'_>> {
+        let patch = self.current_file()?;
+
+        Some(OpenFile {
+            patch,
+            threads: self
+                .threads_by_path
+                .get(&patch.path)
+                .map_or(&[], Vec::as_slice),
+            drafts: self
+                .drafts
+                .iter()
+                .filter(|draft| draft.path == patch.path)
+                .collect(),
+            highlight: self.highlights.get(&patch.path),
+        })
     }
 
     pub fn diff_len(&self) -> usize {
@@ -256,10 +348,6 @@ impl App {
 
     pub fn set_highlight(&mut self, path: Arc<str>, styled: Highlight) {
         self.highlights.insert(path, styled);
-    }
-
-    pub fn highlighted(&self) -> Option<&[Vec<Segment>]> {
-        self.highlights.get(self.current_path()?).map(Vec::as_slice)
     }
 
     pub fn apply(&mut self, action: &Action, layout: &Layout) {
@@ -696,7 +784,7 @@ impl App {
     /// still what `n` repeats, and cancelling puts it back.
     fn start_search(&mut self) {
         self.search_origin = Some(SearchOrigin {
-            query: self.search_query(),
+            query: self.search_query().map(str::to_string),
             cursor: self.cursor,
             focused_thread: self.focused_thread.clone(),
             diff_scroll: self.diff_scroll,
@@ -766,8 +854,12 @@ impl App {
         self.land_on(hit.row(), hit.thread_id(), layout);
     }
 
-    pub fn search_query(&self) -> Option<String> {
-        self.search.as_ref().map(CommentEditor::text)
+    /// The search box holds a single line, so the query is a slice of it.
+    pub fn search_query(&self) -> Option<&str> {
+        self.search
+            .as_ref()
+            .and_then(|editor| editor.lines().first())
+            .map(String::as_str)
     }
 
     /// Every hit in the open file, ordered the way the diff renders them: a code
@@ -789,8 +881,8 @@ impl App {
             .map(|stop| (stop.source, &threads[stop.thread]))
             .filter(|(_, thread)| {
                 thread.comments.iter().any(|comment| {
-                    search::is_match(&comment.body, &query)
-                        || search::is_match(&comment.author, &query)
+                    search::is_match(&comment.body, query)
+                        || search::is_match(&comment.author, query)
                 })
             })
             .map(|(row, thread)| (row, thread.id.clone()))
@@ -798,7 +890,7 @@ impl App {
 
         let mut matches = Vec::new();
         for (row, line) in file.lines.iter().enumerate() {
-            if search::is_match(&line.text, &query) {
+            if search::is_match(&line.text, query) {
                 matches.push(search::Match::Line(row));
             }
 
@@ -824,20 +916,6 @@ impl App {
     }
 
     /// Byte ranges to paint on one diff row, for the renderer.
-    pub fn line_match_ranges(&self, row: usize) -> Vec<std::ops::Range<usize>> {
-        let Some(query) = self.search_query().filter(|query| !query.is_empty())
-        else {
-            return Vec::new();
-        };
-        let Some(line) =
-            self.current_file().and_then(|file| file.lines.get(row))
-        else {
-            return Vec::new();
-        };
-
-        search::ranges(&line.text, &query)
-    }
-
     fn match_position(&self, matches: &[search::Match]) -> Option<usize> {
         matches.iter().position(|hit| {
             hit.row() == self.cursor && hit.thread_id() == self.focused_thread

@@ -142,19 +142,13 @@ fn dock(diff: Rect, app: &App) -> (Rect, Option<Rect>, Option<Rect>) {
 }
 
 fn build_rows(app: &App, diff: Rect) -> Rows {
-    let Some(file) = app.current_file() else {
+    let Some(open) = app.open() else {
         return Rows::empty();
     };
 
-    let threads = app
-        .threads_by_path
-        .get(&file.path)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-
     Rows::build(
-        file,
-        threads,
+        open.patch,
+        open.threads,
         View {
             focused: app.focused_thread.as_deref(),
             expanded: app.expanded_thread.as_deref(),
@@ -162,7 +156,7 @@ fn build_rows(app: &App, diff: Rect) -> Rows {
             width: diff.width as usize,
             window: rows::thread_window(diff.height as usize),
             theme: app.theme(),
-            file_draft: app.file_draft(),
+            file_draft: open.file_draft(),
         },
     )
 }

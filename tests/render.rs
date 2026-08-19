@@ -793,7 +793,11 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
         Some(Theme::light().add),
     );
 
-    let colors = app.highlighted().unwrap()[added]
+    let colors = app
+        .open()
+        .unwrap()
+        .segments(added)
+        .unwrap()
         .iter()
         .map(|segment| segment.color)
         .collect::<Vec<_>>();
@@ -820,28 +824,28 @@ fn highlights_are_addressed_by_path_not_position() {
 
     app.set_highlight(other, vec![Vec::new()]);
     assert!(
-        app.highlighted().is_none(),
+        app.open().unwrap().segments(0).is_none(),
         "those are another file's colors"
     );
 
     app.set_highlight(open, vec![Vec::new()]);
-    assert!(app.highlighted().is_some());
+    assert!(app.open().unwrap().segments(0).is_some());
 
     // The same path can come back carrying a different patch, so a reload
     // cannot keep colors computed against the old one.
     let files = app.files.to_vec();
     app.set_files(files);
-    assert!(app.highlighted().is_none());
+    assert!(app.open().unwrap().segments(0).is_none());
 }
 
 #[test]
 fn switching_terminal_appearance_invalidates_old_syntax_colors() {
     let mut app = load();
     highlight(&mut app);
-    assert!(app.highlighted().is_some());
+    assert!(app.open().unwrap().segments(0).is_some());
 
     assert!(app.set_theme_mode(ThemeMode::Light));
-    assert!(app.highlighted().is_none());
+    assert!(app.open().unwrap().segments(0).is_none());
     assert!(!app.set_theme_mode(ThemeMode::Light));
 }
 
