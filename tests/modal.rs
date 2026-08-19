@@ -109,7 +109,14 @@ fn park_on_unresolved_thread(app: &mut App) -> prtui::model::ReviewThread {
     thread
 }
 
-/// A synthetic patch, for diff shapes the captured fixture does not contain.
+/// Swaps a synthetic patch in for the open file, for diff shapes the captured
+/// fixture does not contain.
+fn open_patch(app: &mut App, patch: &str) {
+    let mut files = app.files.to_vec();
+    files[app.selected_file] = file_from(patch);
+    app.set_files(files);
+}
+
 fn file_from(patch: &str) -> prtui::model::ChangedFile {
     let page = serde_json::json!([[{
         "filename": "synthetic.go",
@@ -378,7 +385,8 @@ fn commenting_a_selection_produces_one_multiline_draft() {
 fn a_selection_across_both_sides_keeps_the_whole_block() {
     let mut app = load();
 
-    app.files[app.selected_file] = file_from(
+    open_patch(
+        &mut app,
         "@@ -1,4 +1,4 @@\n context\n-gone one\n-gone two\n+added one\n context after",
     );
     app.cursor = 1;
@@ -413,8 +421,10 @@ fn a_selection_across_both_sides_keeps_the_whole_block() {
 fn a_selection_ending_in_deletions_stays_on_the_old_side() {
     let mut app = load();
 
-    app.files[app.selected_file] =
-        file_from("@@ -1,3 +1,3 @@\n context\n-gone one\n-gone two\n");
+    open_patch(
+        &mut app,
+        "@@ -1,3 +1,3 @@\n context\n-gone one\n-gone two\n",
+    );
     app.cursor = 1;
 
     press(&mut app, "V2j");
@@ -571,7 +581,8 @@ fn a_hunk_header_is_not_commentable() {
 #[test]
 fn a_selection_across_a_hunk_header_is_not_commentable() {
     let mut app = load();
-    app.files[app.selected_file] = file_from(
+    open_patch(
+        &mut app,
         "@@ -1,2 +1,2 @@\n context\n+first hunk\n@@ -20,2 +20,2 @@\n more context\n+second hunk",
     );
     app.cursor = 1;

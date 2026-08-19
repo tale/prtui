@@ -8,6 +8,7 @@ use prtui::layout::Layout;
 use prtui::model::{self, ChangedFile, PullRequest};
 use prtui::renderer::{self, Segment, Theme, ThemeMode};
 use prtui::{gh, ui};
+use std::sync::Arc;
 use std::{future::poll_fn, pin::Pin, time::Duration};
 use termina::escape::csi::{
     Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode,
@@ -157,20 +158,16 @@ fn spawn_request(
 /// lands, tagged with the palette it was colored under: a straggler from
 /// before a theme switch has to be dropped rather than drawn.
 fn spawn_highlighting(
-    files: &[ChangedFile],
+    files: Arc<[ChangedFile]>,
     first: usize,
     mode: ThemeMode,
     tx: mpsc::UnboundedSender<Message>,
 ) {
-    let payload: Vec<(String, Vec<model::DiffLine>)> = files
-        .iter()
-        .map(|file| (file.path.clone(), file.lines.clone()))
-        .collect();
-
     std::thread::spawn(move || {
-        for index in highlight_order(payload.len(), first) {
-            let (path, lines) = &payload[index];
-            let styled = renderer::highlight_file(path, lines, mode);
+        for index in highlight_order(files.len(), first) {
+            let file = &files[index];
+            let styled =
+                renderer::highlight_file(&file.path, &file.lines, mode);
             if tx.send(Message::Highlight(mode, index, styled)).is_err() {
                 return;
             }
@@ -317,13 +314,13 @@ async fn event_loop(
                         true
                     }
                     Message::Files(files) => {
+                        app.set_files(files);
                         spawn_highlighting(
-                            &files,
+                            app.files.clone(),
                             app.selected_file,
                             app.theme().mode,
                             tx.clone(),
                         );
-                        app.set_files(files);
                         pending = pending.saturating_sub(1);
                         true
                     }
@@ -412,7 +409,7 @@ async fn event_loop(
                         };
                         if app.set_theme_mode(mode) {
                             spawn_highlighting(
-                                &app.files,
+                                app.files.clone(),
                                 app.selected_file,
                                 mode,
                                 tx.clone(),

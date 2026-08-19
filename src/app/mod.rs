@@ -18,6 +18,10 @@ use mode::{Mode, Selection};
 use review::{Failure, Request, Sent, Submission};
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
+
+/// Syntax colors for one file: the segments of each of its lines.
+pub type Highlight = Vec<Vec<Segment>>;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Pane {
@@ -72,7 +76,9 @@ enum FilesState {
 
 pub struct App {
     pub pr: Option<PullRequest>,
-    pub files: Vec<ChangedFile>,
+    /// Shared so the highlighting thread reads the same patches the diff is
+    /// drawn from rather than a copy of them.
+    pub files: Arc<[ChangedFile]>,
     pub threads_by_path: HashMap<String, Vec<ReviewThread>>,
     pub drafts: Vec<Draft>,
 
@@ -105,9 +111,8 @@ pub struct App {
 
     outbox: Vec<Request>,
     theme: Theme,
-    /// Syntax colors per file, in step with `files`. A slot stays empty until
-    /// the background pass reaches that file.
-    highlights: Vec<Vec<Vec<Segment>>>,
+    /// In step with `files`; `None` until the background pass reaches one.
+    highlights: Vec<Option<Highlight>>,
     filter_snapshot: Option<FileFilterSnapshot>,
     search_origin: Option<SearchOrigin>,
     files_state: FilesState,
@@ -127,7 +132,7 @@ impl App {
     pub fn with_theme(theme: Theme) -> Self {
         Self {
             pr: None,
-            files: Vec::new(),
+            files: Arc::from([]),
             threads_by_path: HashMap::new(),
             drafts: Vec::new(),
             mode: Mode::Normal,
@@ -173,8 +178,8 @@ impl App {
     /// File patches are the only data required to make the main review surface
     /// useful. PR metadata and review threads may arrive independently later.
     pub fn set_files(&mut self, files: Vec<ChangedFile>) {
-        self.highlights = vec![Vec::new(); files.len()];
-        self.files = files;
+        self.highlights = vec![None; files.len()];
+        self.files = files.into();
         self.files_state = FilesState::Loaded;
     }
 
@@ -182,7 +187,7 @@ impl App {
     /// endpoint the patches come from, so a failed diff still leaves a review
     /// surface worth showing — as long as it does not claim the PR is empty.
     pub fn fail_files(&mut self) {
-        self.files = Vec::new();
+        self.files = Arc::from([]);
         self.files_state = FilesState::Failed;
     }
 
@@ -208,7 +213,7 @@ impl App {
         }
 
         self.theme = Theme::for_mode(mode);
-        self.highlights = vec![Vec::new(); self.files.len()];
+        self.highlights = vec![None; self.files.len()];
         true
     }
 
@@ -247,17 +252,14 @@ impl App {
         self.current_file().map_or(0, |f| f.lines.len())
     }
 
-    pub fn set_highlight(&mut self, index: usize, styled: Vec<Vec<Segment>>) {
+    pub fn set_highlight(&mut self, index: usize, styled: Highlight) {
         if let Some(slot) = self.highlights.get_mut(index) {
-            *slot = styled;
+            *slot = Some(styled);
         }
     }
 
     pub fn highlighted(&self) -> Option<&[Vec<Segment>]> {
-        self.highlights
-            .get(self.selected_file)
-            .filter(|styled| !styled.is_empty())
-            .map(Vec::as_slice)
+        self.highlights.get(self.selected_file)?.as_deref()
     }
 
     pub fn apply(&mut self, action: &Action, layout: &Layout) {
