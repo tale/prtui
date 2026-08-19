@@ -7,6 +7,7 @@
 use crate::app::draft::Side;
 use crate::app::mode::Mode;
 use crate::app::review::ReviewEvent;
+use crate::app::search::Query;
 use crate::app::{App, Focus, OpenFile, Pane, Target, TreeRow};
 use crate::layout::Layout;
 use crate::layout::rows::{self, BodyRow, Connector, GUTTER, Row, ThreadState};
@@ -177,12 +178,13 @@ fn draw_files(frame: &mut Frame, app: &App, layout: &Layout) {
     let height = list_area.height as usize;
     let width = list_area.width as usize;
 
+    let query = app.tree_query();
     let mut list: Vec<Line> = layout
         .files
         .window(height)
         .iter()
         .filter_map(|&index| app.tree_row(index))
-        .map(|row| file_line(&row, width, theme))
+        .map(|row| file_line(&row, query, width, theme))
         .collect();
 
     if list.is_empty() && app.file_filter.is_some() {
@@ -195,7 +197,46 @@ fn draw_files(frame: &mut Frame, app: &App, layout: &Layout) {
     frame.render_widget(Paragraph::new(list), list_area);
 }
 
-fn file_line<'a>(row: &TreeRow<'a>, width: usize, theme: Theme) -> Line<'a> {
+/// Splits one run of text around the filter's hits, so a match reads in the
+/// path itself rather than being implied by the file still being listed.
+///
+/// The query ran against the whole path, but the tree elides what will not fit;
+/// matching the visible text again is what keeps the paint on the right bytes.
+fn matched_spans(
+    text: String,
+    query: Option<Query<'_>>,
+    base: Style,
+    hit: Style,
+) -> Vec<Span<'static>> {
+    let hits = query.map_or_else(Vec::new, |query| query.ranges(&text));
+    if hits.is_empty() {
+        return vec![Span::styled(text, base)];
+    }
+
+    let mut spans = Vec::new();
+    let mut at = 0;
+
+    for range in hits {
+        if at < range.start {
+            spans.push(Span::styled(text[at..range.start].to_string(), base));
+        }
+        spans.push(Span::styled(text[range.clone()].to_string(), hit));
+        at = range.end;
+    }
+
+    if at < text.len() {
+        spans.push(Span::styled(text[at..].to_string(), base));
+    }
+
+    spans
+}
+
+fn file_line<'a>(
+    row: &TreeRow<'a>,
+    query: Option<Query<'_>>,
+    width: usize,
+    theme: Theme,
+) -> Line<'a> {
     let TreeRow {
         file,
         is_selected,
@@ -235,18 +276,21 @@ fn file_line<'a>(row: &TreeRow<'a>, width: usize, theme: Theme) -> Line<'a> {
 
     let pad = name_width.saturating_sub(text_width(&dir) + text_width(&name));
 
-    Line::from(vec![
-        Span::styled(
-            if is_selected { " ▍" } else { "  " },
-            base.fg(theme.accent),
-        ),
-        Span::styled(dir, base.fg(theme.dim)),
-        Span::styled(name, base.fg(status_color)),
+    let hit = base.bg(theme.search);
+    let mut spans = vec![Span::styled(
+        if is_selected { " ▍" } else { "  " },
+        base.fg(theme.accent),
+    )];
+    spans.extend(matched_spans(dir, query, base.fg(theme.dim), hit));
+    spans.extend(matched_spans(name, query, base.fg(status_color), hit));
+    spans.extend([
         Span::styled(" ".repeat(pad), base),
         Span::styled(marker, base.fg(marker_color)),
         Span::styled(format!("{adds:>5}"), base.fg(theme.success)),
         Span::styled(format!(" {dels:>5}"), base.fg(theme.danger)),
-    ])
+    ]);
+
+    Line::from(spans)
 }
 
 fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {

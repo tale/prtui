@@ -986,7 +986,7 @@ impl App {
 
     /// The tree searches paths the same way the diff searches code, so a
     /// capital in either box means the same thing.
-    fn tree_query(&self) -> Option<Query<'_>> {
+    pub fn tree_query(&self) -> Option<Query<'_>> {
         self.file_filter
             .as_ref()
             .and_then(|editor| editor.lines().first())

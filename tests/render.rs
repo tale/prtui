@@ -1031,6 +1031,44 @@ fn the_file_tree_marks_files_whose_threads_are_all_resolved() {
     );
 }
 
+/// The tree filter and the diff search share a matcher, so the tree can show
+/// where the hit landed instead of only which files survived it.
+#[test]
+fn the_file_filter_paints_its_hit_in_the_path() {
+    use prtui::app::input::InputRouter;
+    use prtui::renderer::Theme;
+
+    let mut app = load();
+    app.is_files_visible = true;
+    app.pane = Pane::Files;
+
+    let mut input = InputRouter::default();
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+    );
+    paste(&mut input, &mut app, "check");
+    assert_eq!(app.filtered_file_indices().len(), 2);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| paint(frame, &app)).unwrap();
+
+    let theme = Theme::dark();
+    let painted: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .filter(|cell| cell.style().bg == Some(theme.search))
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+
+    // Only one of the two rows has room to show its hit: the other elides to
+    // `…heck_test.go`, and what is not on screen is not painted.
+    assert_eq!(painted, "check");
+}
+
 #[test]
 fn search_paints_only_the_matched_bytes_of_a_diff_line() {
     use prtui::app::input::InputRouter;
