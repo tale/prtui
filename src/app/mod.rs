@@ -9,7 +9,7 @@ pub mod search;
 
 use crate::layout::Layout;
 use crate::layout::rows;
-use crate::model::{ChangedFile, PullRequest, ReviewThread};
+use crate::model::{ChangedFile, Meta, PullRequest, ReviewThread};
 use crate::renderer::{Segment, Theme, ThemeMode};
 use action::{Action, Motion};
 use draft::{Anchor, Attachment, Draft};
@@ -219,17 +219,17 @@ impl App {
         true
     }
 
-    pub fn set_meta(&mut self, pr: PullRequest) {
+    /// Files the threads by path, which is the only way anything looks one up.
+    /// They move rather than copy: a review's whole comment history is the
+    /// heaviest thing the app holds and one owner is enough.
+    pub fn set_meta(&mut self, meta: Meta) {
         let mut by_path: HashMap<String, Vec<ReviewThread>> = HashMap::new();
-        for thread in &pr.threads {
-            by_path
-                .entry(thread.path.clone())
-                .or_default()
-                .push(thread.clone());
+        for thread in meta.threads {
+            by_path.entry(thread.path.clone()).or_default().push(thread);
         }
 
         self.threads_by_path = by_path;
-        self.pr = Some(pr);
+        self.pr = Some(meta.pr);
     }
 
     pub fn current_file(&self) -> Option<&ChangedFile> {

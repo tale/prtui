@@ -110,6 +110,15 @@ fn highlight(app: &mut App) {
     app.set_highlight(path, styled);
 }
 
+/// The fixture's threads in wire order. The app files them by path, so a test
+/// that wants one as a template reaches for the fixture rather than the app.
+fn fixture_threads() -> Vec<prtui::model::ReviewThread> {
+    let meta: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
+
+    parse_meta(&meta).unwrap().threads
+}
+
 fn load() -> App {
     let files: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
@@ -128,9 +137,10 @@ fn parses_files_and_threads() {
 
     assert_eq!(app.files.len(), 4);
     assert_eq!(app.pr.as_ref().unwrap().number, 9000);
-    assert_eq!(app.pr.as_ref().unwrap().threads.len(), 2);
+    assert_eq!(app.threads_by_path.values().flatten().count(), 2);
 
-    let thread = &app.pr.as_ref().unwrap().threads[0];
+    let threads = fixture_threads();
+    let thread = &threads[0];
     assert_eq!(thread.id, "PRRT_kwDODKw3uc48Rk4m");
     assert_eq!(thread.side, Side::Right);
     assert_eq!(thread.line, Some(130));
@@ -157,15 +167,10 @@ fn show_thread(app: &mut App, thread: &prtui::model::ReviewThread) {
 #[test]
 fn renders_unresolved_thread_summary_inline() {
     let mut app = load();
-    let mut thread = app
-        .pr
-        .as_ref()
-        .unwrap()
-        .threads
-        .iter()
+    let mut thread = fixture_threads()
+        .into_iter()
         .find(|thread| !thread.is_resolved)
-        .unwrap()
-        .clone();
+        .unwrap();
     let mut reply = thread.comments[0].clone();
     reply.id = "reply".into();
     reply.author = "andyfeller".into();
@@ -192,15 +197,10 @@ fn renders_unresolved_thread_summary_inline() {
 #[test]
 fn collapsed_thread_summary_uses_rendered_gfm_text() {
     let mut app = load();
-    let mut thread = app
-        .pr
-        .as_ref()
-        .unwrap()
-        .threads
-        .iter()
+    let mut thread = fixture_threads()
+        .into_iter()
         .find(|thread| !thread.is_resolved)
-        .unwrap()
-        .clone();
+        .unwrap();
     thread.comments[0].body =
         "_Minor_ and **important** with `inline code`".into();
     app.threads_by_path
@@ -225,15 +225,10 @@ fn collapsed_thread_summary_uses_rendered_gfm_text() {
 #[test]
 fn focused_thread_expands_into_its_full_conversation() {
     let mut app = load();
-    let mut thread = app
-        .pr
-        .as_ref()
-        .unwrap()
-        .threads
-        .iter()
+    let mut thread = fixture_threads()
+        .into_iter()
         .find(|thread| !thread.is_resolved)
-        .unwrap()
-        .clone();
+        .unwrap();
     let mut reply = thread.comments[0].clone();
     reply.id = "reply".into();
     reply.author = "andyfeller".into();
@@ -268,15 +263,10 @@ fn focused_thread_expands_into_its_full_conversation() {
 #[test]
 fn expanded_thread_can_scroll_to_its_complete_conversation() {
     let mut app = load();
-    let mut thread = app
-        .pr
-        .as_ref()
-        .unwrap()
-        .threads
-        .iter()
+    let mut thread = fixture_threads()
+        .into_iter()
         .find(|thread| !thread.is_resolved)
-        .unwrap()
-        .clone();
+        .unwrap();
     thread.comments[0].body =
         paragraphs(18, "Paragraph") + "TAIL CONTENT IS REACHABLE";
     app.threads_by_path
@@ -333,15 +323,10 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
 #[test]
 fn long_reply_keeps_its_identity_visible_while_scrolling() {
     let mut app = load();
-    let mut thread = app
-        .pr
-        .as_ref()
-        .unwrap()
-        .threads
-        .iter()
+    let mut thread = fixture_threads()
+        .into_iter()
         .find(|thread| !thread.is_resolved)
-        .unwrap()
-        .clone();
+        .unwrap();
     thread.comments[0].body = "Opening comment.".into();
     let mut reply = thread.comments[0].clone();
     reply.id = "long-reply".into();
@@ -378,15 +363,10 @@ fn long_reply_keeps_its_identity_visible_while_scrolling() {
 #[test]
 fn multiple_threads_on_one_line_render_as_one_group() {
     let mut app = load();
-    let base = app
-        .pr
-        .as_ref()
-        .unwrap()
-        .threads
-        .iter()
+    let base = fixture_threads()
+        .into_iter()
         .find(|thread| !thread.is_resolved)
-        .unwrap()
-        .clone();
+        .unwrap();
     let mut threads = Vec::new();
     for index in 1..=4 {
         let mut thread = base.clone();
@@ -425,15 +405,10 @@ fn multiple_threads_on_one_line_render_as_one_group() {
 #[test]
 fn resolved_threads_render_as_compact_rows() {
     let mut app = load();
-    let thread = app
-        .pr
-        .as_ref()
-        .unwrap()
-        .threads
-        .iter()
+    let thread = fixture_threads()
+        .into_iter()
         .find(|thread| thread.is_resolved)
-        .unwrap()
-        .clone();
+        .unwrap();
     show_thread(&mut app, &thread);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
@@ -468,7 +443,7 @@ fn left_side_threads_anchor_to_removed_lines() {
         })
         .unwrap();
     let path = app.files[file_index].path.clone();
-    let mut thread = app.pr.as_ref().unwrap().threads[1].clone();
+    let mut thread = fixture_threads().remove(1);
     thread.path = path.clone();
     thread.line = Some(old_line);
     thread.original_line = Some(old_line);
@@ -506,7 +481,7 @@ fn outdated_threads_render_compactly_after_the_diff() {
         .position(|file| !file.lines.is_empty())
         .unwrap();
     let path = app.files[file_index].path.clone();
-    let mut thread = app.pr.as_ref().unwrap().threads[1].clone();
+    let mut thread = fixture_threads().remove(1);
     thread.path = path.clone();
     thread.line = None;
     thread.original_line = Some(999_999);
@@ -604,7 +579,7 @@ fn renders_header_and_diff() {
 fn multi_digit_thread_badge_keeps_diff_counts_visible() {
     let mut app = load();
     let path = app.files[0].path.clone();
-    let thread = app.pr.as_ref().unwrap().threads[1].clone();
+    let thread = fixture_threads().remove(1);
     app.threads_by_path.insert(path, vec![thread; 10]);
 
     let mut terminal = Terminal::new(TestBackend::new(52, 12)).unwrap();
@@ -1003,15 +978,10 @@ fn a_saved_draft_marks_its_lines_in_the_gutter() {
 const IMAGE_URL: &str = "https://github.com/user-attachments/assets/shot.png";
 
 fn thread_with_image(app: &mut App) -> prtui::model::ReviewThread {
-    let mut thread = app
-        .pr
-        .as_ref()
-        .unwrap()
-        .threads
-        .iter()
+    let mut thread = fixture_threads()
+        .into_iter()
         .find(|thread| !thread.is_resolved)
-        .unwrap()
-        .clone();
+        .unwrap();
     thread.comments[0].body =
         format!("Before and after:\n\n![shot]({IMAGE_URL})");
     app.threads_by_path
@@ -1039,7 +1009,7 @@ fn an_attachment_renders_as_its_alt_text() {
 fn the_file_tree_marks_files_whose_threads_are_all_resolved() {
     let mut app = load();
     let path = app.files[0].path.clone();
-    let mut thread = app.pr.as_ref().unwrap().threads[1].clone();
+    let mut thread = fixture_threads().remove(1);
     thread.is_resolved = true;
     app.threads_by_path.insert(path, vec![thread; 2]);
 
@@ -1199,7 +1169,7 @@ fn a_rejected_review_shows_what_github_said_above_the_summary() {
 fn a_reply_composer_names_the_thread_it_answers() {
     let mut app = load();
     app.pane = Pane::Diff;
-    let thread = app.pr.as_ref().unwrap().threads[0].clone();
+    let thread = fixture_threads().remove(0);
     app.selected_file = app
         .files
         .iter()

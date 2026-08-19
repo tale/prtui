@@ -55,6 +55,15 @@ fn summary(app: &App) -> (usize, usize) {
     app.search_summary(&layout_of(app))
 }
 
+/// The fixture's threads in wire order. The app files them by path, so a test
+/// that wants one as a template reaches for the fixture rather than the app.
+fn fixture_threads() -> Vec<prtui::model::ReviewThread> {
+    let meta: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
+
+    parse_meta(&meta).unwrap().threads
+}
+
 fn load() -> App {
     let files: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
@@ -87,15 +96,10 @@ fn park_on_code(app: &mut App) {
 }
 
 fn park_on_unresolved_thread(app: &mut App) -> prtui::model::ReviewThread {
-    let thread = app
-        .pr
-        .as_ref()
-        .unwrap()
-        .threads
-        .iter()
+    let thread = fixture_threads()
+        .into_iter()
         .find(|thread| !thread.is_resolved)
-        .unwrap()
-        .clone();
+        .unwrap();
     app.selected_file = app
         .files
         .iter()
@@ -857,15 +861,10 @@ fn comment_jump_crosses_files_and_skips_resolved_threads() {
     app.cursor = 0;
     app.pane = Pane::Files;
 
-    let unresolved = app
-        .pr
-        .as_ref()
-        .unwrap()
-        .threads
-        .iter()
+    let unresolved = fixture_threads()
+        .into_iter()
         .find(|thread| !thread.is_resolved)
-        .unwrap()
-        .clone();
+        .unwrap();
 
     press(&mut app, "}");
 
@@ -906,7 +905,7 @@ fn comment_jump_steps_through_every_thread_in_a_file() {
         .take(3)
         .collect();
 
-    let template = app.pr.as_ref().unwrap().threads[0].clone();
+    let template = fixture_threads().remove(0);
     let threads: Vec<prtui::model::ReviewThread> = rows
         .iter()
         .enumerate()

@@ -118,6 +118,14 @@ pub struct PullRequest {
     pub base_ref: String,
     pub head_ref: String,
     pub body: String,
+}
+
+/// What one metadata fetch yields. The threads travel beside the pull request
+/// rather than inside it: the app files them by path and nothing reads them in
+/// the order they arrived.
+#[derive(Debug, Clone)]
+pub struct Meta {
+    pub pr: PullRequest,
     pub threads: Vec<ReviewThread>,
 }
 
@@ -232,7 +240,7 @@ fn rest_id(val: &serde_json::Value) -> Option<u64> {
     }
 }
 
-pub fn parse_meta(val: &serde_json::Value) -> Result<PullRequest> {
+pub fn parse_meta(val: &serde_json::Value) -> Result<Meta> {
     let pr = val
         .pointer("/data/repository/pullRequest")
         .context("PR not found in graphql response")?;
@@ -291,7 +299,7 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<PullRequest> {
         })
         .unwrap_or_default();
 
-    Ok(PullRequest {
+    let pull_request = PullRequest {
         number: pr
             .get("number")
             .and_then(serde_json::Value::as_u64)
@@ -306,6 +314,10 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<PullRequest> {
         base_ref: text_at(pr, "/baseRefName"),
         head_ref: text_at(pr, "/headRefName"),
         body: text_at(pr, "/body"),
+    };
+
+    Ok(Meta {
+        pr: pull_request,
         threads,
     })
 }

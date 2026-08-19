@@ -5,7 +5,7 @@ use prtui::app::input::InputRouter;
 use prtui::app::review::{Failure, Request, Sent};
 use prtui::app::{App, Highlight};
 use prtui::layout::Layout;
-use prtui::model::{self, ChangedFile, PullRequest};
+use prtui::model::{self, ChangedFile, Meta};
 use prtui::renderer::{self, Theme, ThemeMode};
 use prtui::{gh, ui};
 use std::sync::Arc;
@@ -59,7 +59,7 @@ impl ThemeChoice {
 }
 
 enum Message {
-    Meta(Box<PullRequest>),
+    Meta(Box<Meta>),
     Files(Vec<ChangedFile>),
     Highlight(ThemeMode, String, Highlight),
     MetaFailed(String),
@@ -80,7 +80,7 @@ fn spawn_meta_fetch(
     tokio::spawn(async move {
         let msg = match gh::fetch_meta(&repo, number).await {
             Ok(val) => match model::parse_meta(&val) {
-                Ok(pr) => Message::Meta(Box::new(pr)),
+                Ok(meta) => Message::Meta(Box::new(meta)),
                 Err(err) => Message::MetaFailed(err.to_string()),
             },
             Err(err) => Message::MetaFailed(err.to_string()),
@@ -310,8 +310,8 @@ async fn event_loop(
                         app.set_highlight(path, styled);
                         is_open
                     }
-                    Message::Meta(pr) => {
-                        app.set_meta(*pr);
+                    Message::Meta(meta) => {
+                        app.set_meta(*meta);
                         pending = pending.saturating_sub(1);
                         true
                     }
