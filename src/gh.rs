@@ -17,7 +17,7 @@ query($owner:String!, $repo:String!, $number:Int!) {
         nodes {
           id isResolved isOutdated viewerCanResolve path line originalLine diffSide
           comments(first:50) {
-            nodes { id fullDatabaseId author { login } body createdAt }
+            nodes { fullDatabaseId author { login } body createdAt }
           }
         }
       }

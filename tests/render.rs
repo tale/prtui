@@ -172,7 +172,6 @@ fn renders_unresolved_thread_summary_inline() {
         .find(|thread| !thread.is_resolved)
         .unwrap();
     let mut reply = thread.comments[0].clone();
-    reply.id = "reply".into();
     reply.author = "andyfeller".into();
     reply.body = "A reply inside the same review thread.".into();
     reply.created_at = "2024-04-29T15:01:00Z".into();
@@ -230,7 +229,6 @@ fn focused_thread_expands_into_its_full_conversation() {
         .find(|thread| !thread.is_resolved)
         .unwrap();
     let mut reply = thread.comments[0].clone();
-    reply.id = "reply".into();
     reply.author = "andyfeller".into();
     reply.body = "This is the full reply body.".into();
     thread.comments.push(reply);
@@ -329,7 +327,6 @@ fn long_reply_keeps_its_identity_visible_while_scrolling() {
         .unwrap();
     thread.comments[0].body = "Opening comment.".into();
     let mut reply = thread.comments[0].clone();
-    reply.id = "long-reply".into();
     reply.author = "andyfeller".into();
     reply.body = paragraphs(24, "Reply paragraph");
     thread.comments.push(reply);

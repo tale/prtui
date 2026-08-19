@@ -65,7 +65,6 @@ struct RawFile {
 
 #[derive(Debug, Clone)]
 pub struct Comment {
-    pub id: String,
     /// The REST id, which is what a reply has to be addressed to. GraphQL node
     /// ids are not interchangeable with it.
     pub rest_id: Option<u64>,
@@ -225,102 +224,227 @@ pub fn parse_files(val: &serde_json::Value) -> Result<Vec<ChangedFile>> {
     Ok(files)
 }
 
-fn text_at(val: &serde_json::Value, ptr: &str) -> String {
-    val.pointer(ptr)
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string()
+/// The GraphQL response, shaped exactly as GitHub sends it.
+///
+/// Everything below is `#[serde]` rather than hand-walked, so a field the API
+/// stops sending fails the parse instead of silently defaulting to zero or an
+/// empty string. Only what the schema declares nullable is `Option` here.
+#[derive(Deserialize)]
+struct Response {
+    data: ResponseData,
+}
+
+#[derive(Deserialize)]
+struct ResponseData {
+    repository: Option<WireRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireRepository {
+    pull_request: Option<WirePullRequest>,
+}
+
+/// A GraphQL connection, of which only the nodes are ever wanted.
+#[derive(Deserialize)]
+struct Nodes<T> {
+    nodes: Vec<T>,
+}
+
+#[derive(Deserialize)]
+struct WireAuthor {
+    login: String,
+}
+
+impl WireAuthor {
+    /// An account that has since been deleted comes back as a null author.
+    fn login(author: Option<Self>) -> String {
+        author.map(|author| author.login).unwrap_or_default()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WirePullRequest {
+    number: u32,
+    title: String,
+    state: String,
+    is_draft: bool,
+    author: Option<WireAuthor>,
+    base_ref_name: String,
+    head_ref_name: String,
+    body: String,
+    review_threads: Nodes<WireThread>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireThread {
+    id: String,
+    path: String,
+    line: Option<u32>,
+    original_line: Option<u32>,
+    diff_side: String,
+    is_resolved: bool,
+    is_outdated: bool,
+    viewer_can_resolve: bool,
+    comments: Nodes<WireComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireComment {
+    full_database_id: Option<RestId>,
+    author: Option<WireAuthor>,
+    body: String,
+    created_at: String,
 }
 
 /// `fullDatabaseId` is a `BigInt`, which GitHub serializes as a string; older
 /// deployments hand back a plain number for the same field.
-fn rest_id(val: &serde_json::Value) -> Option<u64> {
-    let raw = val.get("fullDatabaseId")?;
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RestId {
+    Text(String),
+    Number(u64),
+}
 
-    match raw {
-        serde_json::Value::String(text) => text.parse().ok(),
-        other => other.as_u64(),
+impl RestId {
+    fn value(self) -> Option<u64> {
+        match self {
+            Self::Text(text) => text.parse().ok(),
+            Self::Number(id) => Some(id),
+        }
+    }
+}
+
+impl From<WireComment> for Comment {
+    fn from(wire: WireComment) -> Self {
+        Self {
+            rest_id: wire.full_database_id.and_then(RestId::value),
+            author: WireAuthor::login(wire.author),
+            body: wire.body,
+            created_at: wire.created_at,
+        }
+    }
+}
+
+impl From<WireThread> for ReviewThread {
+    fn from(wire: WireThread) -> Self {
+        Self {
+            id: wire.id.into(),
+            path: wire.path.into(),
+            line: wire.line,
+            original_line: wire.original_line,
+            // A side the app does not recognize is treated as the new file,
+            // which is where all but deletions live.
+            side: Side::from_api(&wire.diff_side).unwrap_or(Side::Right),
+            is_resolved: wire.is_resolved,
+            is_outdated: wire.is_outdated,
+            can_resolve: wire.viewer_can_resolve,
+            comments: wire.comments.nodes.into_iter().map(Into::into).collect(),
+        }
     }
 }
 
 pub fn parse_meta(val: &serde_json::Value) -> Result<Meta> {
-    let pr = val
-        .pointer("/data/repository/pullRequest")
+    let response =
+        Response::deserialize(val).context("unexpected graphql response")?;
+    let pr = response
+        .data
+        .repository
+        .and_then(|repository| repository.pull_request)
         .context("PR not found in graphql response")?;
 
-    let threads = pr
-        .pointer("/reviewThreads/nodes")
-        .and_then(|v| v.as_array())
-        .map(|nodes| {
-            nodes
-                .iter()
-                .map(|t| ReviewThread {
-                    id: text_at(t, "/id").into(),
-                    path: text_at(t, "/path").into(),
-                    line: t
-                        .get("line")
-                        .and_then(serde_json::Value::as_u64)
-                        .map(|v| v as u32),
-                    original_line: t
-                        .get("originalLine")
-                        .and_then(serde_json::Value::as_u64)
-                        .map(|v| v as u32),
-                    side: t
-                        .get("diffSide")
-                        .and_then(|v| v.as_str())
-                        .and_then(Side::from_api)
-                        .unwrap_or(Side::Right),
-                    is_resolved: t
-                        .get("isResolved")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false),
-                    is_outdated: t
-                        .get("isOutdated")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false),
-                    can_resolve: t
-                        .get("viewerCanResolve")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false),
-                    comments: t
-                        .pointer("/comments/nodes")
-                        .and_then(|v| v.as_array())
-                        .map(|cs| {
-                            cs.iter()
-                                .map(|c| Comment {
-                                    id: text_at(c, "/id"),
-                                    rest_id: rest_id(c),
-                                    author: text_at(c, "/author/login"),
-                                    body: text_at(c, "/body"),
-                                    created_at: text_at(c, "/createdAt"),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let pull_request = PullRequest {
-        number: pr
-            .get("number")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0) as u32,
-        title: text_at(pr, "/title"),
-        state: text_at(pr, "/state"),
-        is_draft: pr
-            .get("isDraft")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        author: text_at(pr, "/author/login"),
-        base_ref: text_at(pr, "/baseRefName"),
-        head_ref: text_at(pr, "/headRefName"),
-        body: text_at(pr, "/body"),
-    };
-
     Ok(Meta {
-        pr: pull_request,
-        threads,
+        pr: PullRequest {
+            number: pr.number,
+            title: pr.title,
+            state: pr.state,
+            is_draft: pr.is_draft,
+            author: WireAuthor::login(pr.author),
+            base_ref: pr.base_ref_name,
+            head_ref: pr.head_ref_name,
+            body: pr.body,
+        },
+        threads: pr
+            .review_threads
+            .nodes
+            .into_iter()
+            .map(Into::into)
+            .collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn response(pull_request: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "data": { "repository": { "pullRequest": pull_request } }
+        })
+    }
+
+    fn pull_request(threads: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "number": 9000,
+            "title": "A change",
+            "state": "OPEN",
+            "isDraft": false,
+            "author": { "login": "tale" },
+            "baseRefName": "trunk",
+            "headRefName": "work",
+            "body": "",
+            "reviewThreads": { "nodes": threads },
+        })
+    }
+
+    /// The hand-walked parser defaulted every field it could not find, so a
+    /// renamed one showed up as an empty title rather than as an error.
+    #[test]
+    fn a_field_the_api_stops_sending_fails_the_parse() {
+        let mut pr = pull_request(&serde_json::json!([]));
+        pr.as_object_mut().unwrap().remove("state");
+
+        assert!(parse_meta(&response(&pr)).is_err());
+        assert!(parse_meta(&serde_json::json!({ "data": {} })).is_err());
+    }
+
+    #[test]
+    fn a_repository_that_is_not_there_says_so() {
+        let empty = serde_json::json!({ "data": { "repository": null } });
+        let error = parse_meta(&empty).unwrap_err().to_string();
+
+        assert!(error.contains("PR not found"), "{error}");
+    }
+
+    #[test]
+    fn what_the_schema_allows_to_be_null_still_parses() {
+        let threads = serde_json::json!([{
+            "id": "PRRT_1",
+            "path": "src/main.rs",
+            // An outdated thread loses its line, and a deleted account its login.
+            "line": null,
+            "originalLine": 12,
+            "diffSide": "LEFT",
+            "isResolved": false,
+            "isOutdated": true,
+            "viewerCanResolve": true,
+            "comments": { "nodes": [
+                { "fullDatabaseId": "1234", "author": null, "body": "hi", "createdAt": "now" },
+                { "fullDatabaseId": 5678, "author": { "login": "tale" }, "body": "ho", "createdAt": "now" },
+            ] },
+        }]);
+
+        let meta = parse_meta(&response(&pull_request(&threads))).unwrap();
+        let thread = &meta.threads[0];
+
+        assert_eq!(thread.side, Side::Left);
+        assert_eq!(thread.anchor_line(), Some(12));
+        assert_eq!(thread.comments[0].author, "");
+        // A BigInt arrives as a string, but older deployments send a number.
+        assert_eq!(thread.reply_target(), Some(1234));
+        assert_eq!(thread.comments[1].rest_id, Some(5678));
+    }
 }
