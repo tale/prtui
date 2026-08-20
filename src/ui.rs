@@ -70,31 +70,42 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
                 _ => (" open ", theme.success),
             };
 
+            // Each part takes what is left after the ones before it, so the row
+            // ends on an ellipsis rather than in the middle of a word. The
+            // title outranks the branches, which outrank the author.
+            let mut budget = area.width as usize;
+            let mut take = |text: String, style: Style| {
+                let clipped = truncate(&text, budget);
+                budget = budget.saturating_sub(text_width(&clipped));
+
+                Span::styled(clipped, style)
+            };
+
             vec![
-                Span::styled(
-                    label,
+                take(
+                    label.to_string(),
                     Style::default()
                         .bg(color)
                         .fg(theme.ink)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
+                take(
                     format!(" #{} ", pr.number),
                     Style::default()
                         .fg(theme.warning)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    truncate(&pr.title, area.width as usize / 2),
+                take(
+                    pr.title.clone(),
                     Style::default()
                         .fg(theme.heading)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
+                take(
                     format!("  {} → {}", pr.head_ref, pr.base_ref),
                     Style::default().fg(theme.muted),
                 ),
-                Span::styled(
+                take(
                     format!("  @{}", pr.author),
                     Style::default().fg(theme.dim),
                 ),
@@ -1089,8 +1100,6 @@ fn draw_composer(frame: &mut Frame, app: &App, layout: &Layout) {
             } else {
                 "comment"
             };
-            let side = |side: Side| side.as_api().to_lowercase();
-
             // A span that crosses sides counts in two files at once, so both
             // ends have to name the one they belong to.
             if anchor.start_side == anchor.side {
@@ -1100,14 +1109,19 @@ fn draw_composer(frame: &mut Frame, app: &App, layout: &Layout) {
                     format!("{}-{}", anchor.start_line, anchor.end_line)
                 };
 
-                format!(" {verb} · {name}:{span} · {} ", side(anchor.side))
+                // Commenting on the new file is the ordinary thing to be
+                // doing, so only the old side is worth naming.
+                match anchor.side {
+                    Side::Left => format!(" {verb} · {name}:{span} · old "),
+                    Side::Right => format!(" {verb} · {name}:{span} "),
+                }
             } else {
                 format!(
                     " {verb} · {name}:{} {} → {} {} ",
                     anchor.start_line,
-                    side(anchor.start_side),
+                    anchor.start_side.label(),
                     anchor.end_line,
-                    side(anchor.side)
+                    anchor.side.label()
                 )
             }
         }
@@ -1345,8 +1359,9 @@ fn draw_bottom_bar(
             layout.files.file_position(app.selected_file),
             layout.files.file_count()
         ),
+        // Two bare ratios said nothing about what they counted.
         (false, false, Some(file)) => format!(
-            "  {}/{} · {}/{}",
+            "  file {}/{} · line {}/{}",
             layout.files.file_position(app.selected_file),
             app.files.len(),
             (app.cursor + 1).min(file.lines.len().max(1)),
@@ -1383,8 +1398,9 @@ fn draw_bottom_bar(
     spans.push(Span::styled(position, bar.fg(theme.muted)));
 
     if let Some(selection) = app.selection {
+        let rows = selection.row_count();
         spans.push(Span::styled(
-            format!("   {} lines", selection.row_count()),
+            format!("   {rows} {}", if rows == 1 { "line" } else { "lines" }),
             bar.fg(theme.orange),
         ));
     }

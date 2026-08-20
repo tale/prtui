@@ -33,6 +33,16 @@ impl Side {
             Self::Right => "RIGHT",
         }
     }
+
+    /// What the side is called to a reader rather than to the API. A diff has
+    /// an old file and a new one; which way round `LEFT` and `RIGHT` go is
+    /// GitHub's business, not the reviewer's.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "old",
+            Self::Right => "new",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

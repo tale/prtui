@@ -1,4 +1,4 @@
-use prtui::app::action::Action;
+use prtui::app::action::{Action, Motion};
 use prtui::app::draft::Parent;
 use prtui::app::input::DispatchResult;
 use prtui::app::input::InputRouter;
@@ -944,6 +944,91 @@ fn the_composer_opens_over_the_diff_with_its_anchor_in_the_title() {
         rendered.contains("INSERT"),
         "status bar should show insert mode"
     );
+
+    // Commenting on the new file is the ordinary thing to be doing, so the
+    // title does not spend room saying so — and never in GitHub's wire word.
+    assert!(!rendered.contains("right"), "{rendered}");
+    assert!(!rendered.contains("· new"), "{rendered}");
+}
+
+/// The old side is the surprising one, so it is the one the title names.
+#[test]
+fn the_composer_names_the_old_side_and_only_that() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    app.selected_file = app
+        .files
+        .iter()
+        .position(|file| file.lines.iter().any(|l| l.kind == LineKind::Removed))
+        .expect("a file with a deletion");
+    app.cursor = app.files[app.selected_file]
+        .lines
+        .iter()
+        .position(|l| l.kind == LineKind::Removed)
+        .unwrap();
+
+    act(&mut app, &Action::StartComment);
+    let rendered = draw(&app);
+
+    assert!(rendered.contains("· old"), "{rendered}");
+    assert!(
+        !rendered.contains("left"),
+        "never the wire word:\n{rendered}"
+    );
+}
+
+/// One selected row used to read "1 lines".
+#[test]
+fn the_selection_counts_one_row_in_the_singular() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    app.cursor = app.files[app.selected_file]
+        .lines
+        .iter()
+        .position(|l| l.kind != LineKind::Hunk)
+        .unwrap();
+
+    act(&mut app, &Action::EnterVisual);
+    assert!(draw(&app).contains(" 1 line "), "{}", draw(&app));
+
+    act(&mut app, &Action::Move(Motion::Down(1)));
+    assert!(draw(&app).contains(" 2 lines "), "{}", draw(&app));
+}
+
+/// The bar used to read `1/4 · 1/8`, which counted two things and named
+/// neither.
+#[test]
+fn the_status_bar_says_what_its_ratios_count() {
+    let app = load();
+    let rendered = draw(&app);
+
+    assert!(rendered.contains("file 1/4"), "{rendered}");
+    assert!(rendered.contains("line 1/8"), "{rendered}");
+}
+
+/// The header used to clip mid-word at the pane edge: only the title was
+/// budgeted, so the branches and author ran off the end.
+#[test]
+fn the_header_ends_on_an_ellipsis_rather_than_mid_word() {
+    let app = load();
+
+    for width in [50u16, 70, 90, 120] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+        terminal.draw(|frame| paint(frame, &app)).unwrap();
+
+        let rendered = terminal.backend().to_string();
+        let header = rendered
+            .lines()
+            .next()
+            .unwrap()
+            .trim_start_matches('"')
+            .trim_end_matches('"');
+
+        assert!(
+            header.trim_end().ends_with('…'),
+            "at {width} columns: {header:?}"
+        );
+    }
 }
 
 /// Commits `body` as a draft on the first commentable line and reports it.
