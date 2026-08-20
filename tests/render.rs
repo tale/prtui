@@ -1246,6 +1246,44 @@ fn a_folded_directory_hides_its_files_and_says_how_many() {
     );
 }
 
+/// Folding a directory must not fold away the reason to open it: the mark its
+/// files would have carried rolls up onto the heading standing in for them.
+#[test]
+fn a_folded_directory_carries_its_files_conversation_mark() {
+    let mut app = load();
+    app.pane = Pane::Files;
+
+    // The fixture's open thread is on auth_check_test.go, under `cmdutil/`.
+    press(&mut app, "G");
+    let folded = app.tree_directory().map(str::to_string);
+    assert_eq!(folded.as_deref(), None, "G lands on the last file");
+
+    press(&mut app, "k");
+    press(&mut app, "k");
+    assert_eq!(app.tree_directory(), Some("pkg/cmdutil/"));
+
+    act(&mut app, &Action::Activate);
+    let rendered = draw(&app);
+
+    assert!(
+        !rendered.contains("auth_check_test"),
+        "the files are folded away:\n{rendered}"
+    );
+
+    // The diff pane's own title names the same path, so look only at the tree.
+    let heading = rendered
+        .lines()
+        .map(|line| line.trim_start_matches('"'))
+        .filter_map(|line| line.split(['│', '┐']).next())
+        .find(|column| column.contains("cmdutil/"))
+        .expect("the heading is still drawn");
+
+    assert!(
+        heading.starts_with('◆'),
+        "and it answers for their open threads: {heading:?}"
+    );
+}
+
 /// Folding is keyed on the directory, not on where the tree happened to draw
 /// it, so a fold outlives the refetch that rebuilds the rows.
 #[test]

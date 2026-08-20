@@ -463,6 +463,14 @@ impl App {
         self.tree_directory.as_deref()
     }
 
+    /// Conversations on a file that are still open, which is what the tree
+    /// marks and what a folded directory has to answer for.
+    pub fn unresolved_threads(&self, path: &str) -> usize {
+        self.threads_by_path.get(path).map_or(0, |threads| {
+            threads.iter().filter(|thread| !thread.is_resolved).count()
+        })
+    }
+
     pub fn tree_row(&self, index: usize) -> Option<TreeRow<'_>> {
         let file = self.files.get(index)?;
         let threads = self

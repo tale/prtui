@@ -203,6 +203,7 @@ fn draw_files(frame: &mut Frame, app: &App, layout: &Layout) {
                 label,
                 depth,
                 files,
+                unresolved,
                 is_collapsed,
                 ..
             } => directory_line(
@@ -210,6 +211,7 @@ fn draw_files(frame: &mut Frame, app: &App, layout: &Layout) {
                     label,
                     depth: *depth,
                     files: *files,
+                    unresolved: *unresolved,
                     is_collapsed: *is_collapsed,
                     is_selected: cursor == Some(&**path),
                 },
@@ -305,6 +307,7 @@ struct DirectoryRow<'a> {
     label: &'a str,
     depth: usize,
     files: usize,
+    unresolved: usize,
     is_collapsed: bool,
     is_selected: bool,
 }
@@ -336,7 +339,19 @@ fn directory_line(
     let budget =
         width.saturating_sub(indent + text_width(&fold) + MARKER_WIDTH);
 
-    let mut spans = vec![Span::styled(" ".repeat(MARKER_WIDTH + indent), base)];
+    // Folding a directory must not fold away the reason to open it, so a shut
+    // one carries the mark its files would have carried. An open one leaves the
+    // column to them.
+    let (marker, marker_color) = match (row.is_collapsed, row.unresolved) {
+        (true, 0) => ("◇", theme.muted),
+        (true, _) => ("◆", theme.purple),
+        (false, _) => (" ", theme.dim),
+    };
+
+    let mut spans = vec![
+        Span::styled(format!("{marker} "), base.fg(marker_color)),
+        Span::styled(" ".repeat(indent), base),
+    ];
     spans.extend(matched_spans(
         truncate(row.label, budget),
         query,
