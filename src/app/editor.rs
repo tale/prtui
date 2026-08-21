@@ -55,6 +55,19 @@ impl CommentEditor {
 
     /// Returns whether the buffer or cursor changed.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        // A terminal without the Kitty protocol reports shift+enter as plain
+        // enter, which the application binds to saving. These two survive it,
+        // so a multi-line comment is typeable anywhere.
+        let is_newline = matches!(
+            (key.code, key.modifiers),
+            (KeyCode::Enter, Modifiers::ALT)
+                | (KeyCode::Char('j'), Modifiers::CONTROL)
+        );
+        if is_newline {
+            self.insert_newline();
+            return true;
+        }
+
         let command_modifiers = Modifiers::CONTROL
             | Modifiers::ALT
             | Modifiers::SUPER
@@ -240,6 +253,22 @@ mod tests {
         editor.insert_text("one\r\n\ttwo");
         assert_eq!(editor.text(), "one\n    two");
         assert_eq!(editor.cursor(), (1, 7));
+    }
+
+    /// Shift+enter needs the Kitty protocol to be distinguishable from enter,
+    /// which the application binds to saving.
+    #[test]
+    fn a_newline_is_typeable_without_the_kitty_protocol() {
+        for key in [
+            KeyEvent::new(KeyCode::Char('j'), Modifiers::CONTROL),
+            KeyEvent::new(KeyCode::Enter, Modifiers::ALT),
+        ] {
+            let mut editor = CommentEditor::default();
+            editor.insert_text("one");
+            assert!(editor.handle_key(key));
+            editor.insert_text("two");
+            assert_eq!(editor.text(), "one\ntwo");
+        }
     }
 
     #[test]

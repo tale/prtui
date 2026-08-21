@@ -5,7 +5,7 @@ use prtui::app::keymap::{Keymap, Resolution};
 use prtui::app::mode::Mode;
 use prtui::app::review::{Failure, Request, ReviewEvent, Sent};
 use prtui::app::search::Match;
-use prtui::app::{App, Pane};
+use prtui::app::{App, Card, Pane};
 use prtui::layout::Layout;
 use prtui::model::{parse_files, parse_meta};
 use ratatui::layout::Rect;
@@ -276,19 +276,19 @@ fn normal_movement_visits_threads_between_source_lines() {
 
     press(&mut app, "j");
     assert_eq!(app.cursor, anchor);
-    assert_eq!(app.focused_thread.as_deref(), Some(&*first.id));
+    assert_eq!(app.focused_thread(), Some(&*first.id));
 
     press(&mut app, "j");
     assert_eq!(app.cursor, anchor);
-    assert_eq!(app.focused_thread.as_deref(), Some(&*second.id));
+    assert_eq!(app.focused_thread(), Some(&*second.id));
 
     press(&mut app, "j");
     assert_eq!(app.cursor, anchor + 1);
-    assert!(app.focused_thread.is_none());
+    assert!(app.focused_card.is_none());
 
     press(&mut app, "k");
     assert_eq!(app.cursor, anchor);
-    assert_eq!(app.focused_thread.as_deref(), Some(&*second.id));
+    assert_eq!(app.focused_thread(), Some(&*second.id));
 }
 
 #[test]
@@ -296,14 +296,20 @@ fn enter_toggles_the_focused_thread() {
     let mut app = load();
     let thread = park_on_unresolved_thread(&mut app);
     press(&mut app, "j");
-    assert_eq!(app.focused_thread.as_deref(), Some(&*thread.id));
+    assert_eq!(app.focused_thread(), Some(&*thread.id));
 
     let mut input = InputRouter::default();
     send(&mut input, &mut app, KeyCode::Enter.into());
-    assert_eq!(app.expanded_thread.as_deref(), Some(&*thread.id));
+    assert_eq!(
+        app.expanded_card
+            .as_ref()
+            .and_then(Card::thread)
+            .map(|id| &**id),
+        Some(&*thread.id)
+    );
 
     send(&mut input, &mut app, KeyCode::Enter.into());
-    assert!(app.expanded_thread.is_none());
+    assert!(app.expanded_card.is_none());
 }
 
 #[test]
@@ -324,13 +330,19 @@ fn expanded_thread_movement_scrolls_without_losing_focus() {
     press(&mut app, "j");
     let mut input = InputRouter::default();
     send(&mut input, &mut app, KeyCode::Enter.into());
-    assert!(app.expanded_thread.is_some());
+    assert!(app.expanded_card.is_some());
     assert!(layout_of(&app).rows.body_limit() > 4);
 
     press(&mut app, "j");
     assert_eq!(app.thread_scroll, 1);
-    assert_eq!(app.focused_thread.as_deref(), Some(&*thread.id));
-    assert_eq!(app.expanded_thread.as_deref(), Some(&*thread.id));
+    assert_eq!(app.focused_thread(), Some(&*thread.id));
+    assert_eq!(
+        app.expanded_card
+            .as_ref()
+            .and_then(Card::thread)
+            .map(|id| &**id),
+        Some(&*thread.id)
+    );
 
     press(&mut app, "k");
     assert_eq!(app.thread_scroll, 0);
@@ -349,7 +361,7 @@ fn escape_returns_from_a_thread_to_its_source_line() {
         DispatchResult::Applied(Action::LeaveThread)
     );
     assert_eq!(app.cursor, source_row);
-    assert!(app.focused_thread.is_none());
+    assert!(app.focused_card.is_none());
     assert!(!app.should_quit);
 }
 
@@ -362,7 +374,7 @@ fn visual_movement_remains_source_line_only() {
     press(&mut app, "Vj");
 
     assert_eq!(app.cursor, anchor + 1);
-    assert!(app.focused_thread.is_none());
+    assert!(app.focused_card.is_none());
 }
 
 #[test]
@@ -492,6 +504,8 @@ fn an_empty_comment_is_discarded() {
     assert_eq!(app.mode, Mode::Normal);
 }
 
+/// Work is not thrown away on one key: the first escape arms and says so, and
+/// the second is what discards.
 #[test]
 fn cancelling_keeps_the_buffer_out_of_the_drafts() {
     let mut app = load();
@@ -507,9 +521,60 @@ fn cancelling_keeps_the_buffer_out_of_the_drafts() {
         send(&mut input, &mut app, cancel),
         DispatchResult::Applied(Action::CancelComment)
     );
+    assert!(app.composer.is_some(), "the first escape only warns");
+    assert_eq!(app.status, "esc again to discard");
+    assert_eq!(app.mode, Mode::Insert);
+
+    send(&mut input, &mut app, cancel);
     assert!(app.composer.is_none());
     assert!(app.drafts.is_empty());
     assert_eq!(app.mode, Mode::Normal);
+}
+
+/// Anything but a second escape stands the composer back down, so a stray key
+/// cannot leave it one press from losing the body.
+#[test]
+fn typing_after_an_escape_disarms_the_discard() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("keep me");
+
+    let mut input = InputRouter::default();
+    let cancel = KeyEvent::new(KeyCode::Escape, Modifiers::NONE);
+    send(&mut input, &mut app, cancel);
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('x'), Modifiers::NONE),
+    );
+    assert!(!app.composer.as_ref().unwrap().is_discard_armed);
+
+    send(&mut input, &mut app, cancel);
+    assert!(app.composer.is_some(), "the count started over");
+}
+
+/// A reopened draft that was not touched closes on one key: there is nothing to
+/// lose.
+#[test]
+fn escaping_an_unchanged_composer_closes_it_at_once() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("saved");
+    act(&mut app, &Action::CommitComment);
+
+    press(&mut app, "e");
+    let mut input = InputRouter::default();
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
+    );
+
+    assert!(app.composer.is_none());
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.drafts.len(), 1, "the draft is untouched");
 }
 
 #[test]
@@ -670,6 +735,7 @@ fn escape_and_ctrl_bracket_both_cancel_the_composer() {
         assert_eq!(app.mode, Mode::Insert);
 
         let mut input = InputRouter::default();
+        send(&mut input, &mut app, key);
         send(&mut input, &mut app, key);
 
         assert_eq!(app.mode, Mode::Normal, "{key:?} should leave insert mode");
@@ -910,7 +976,7 @@ fn comment_jump_crosses_files_and_skips_resolved_threads() {
 
     assert_eq!(app.pane, Pane::Diff);
     assert_eq!(app.files[app.selected_file].path, unresolved.path);
-    assert_eq!(app.focused_thread.as_deref(), Some(&*unresolved.id));
+    assert_eq!(app.focused_thread(), Some(&*unresolved.id));
     assert!(
         unresolved.anchors_to(&app.files[app.selected_file].lines[app.cursor])
     );
@@ -962,19 +1028,19 @@ fn comment_jump_steps_through_every_thread_in_a_file() {
     app.threads_by_path.insert(file.path, threads);
 
     app.cursor = 0;
-    app.focused_thread = None;
+    app.focused_card = None;
 
     for &row in &rows {
         press(&mut app, "}");
         assert_eq!(app.cursor, row);
     }
-    assert_eq!(app.focused_thread.as_deref(), Some("thread-2"));
+    assert_eq!(app.focused_thread(), Some("thread-2"));
 
     for &row in rows.iter().rev().skip(1) {
         press(&mut app, "{");
         assert_eq!(app.cursor, row);
     }
-    assert_eq!(app.focused_thread.as_deref(), Some("thread-0"));
+    assert_eq!(app.focused_thread(), Some("thread-0"));
 }
 
 fn search_for(app: &mut App, query: &str) -> InputRouter {
@@ -1061,7 +1127,7 @@ fn search_matches_comment_bodies_and_focuses_the_thread() {
     let mut app = load();
     let thread = park_on_unresolved_thread(&mut app);
     app.cursor = 0;
-    app.focused_thread = None;
+    app.focused_card = None;
 
     let word = thread.comments[0]
         .body
@@ -1077,18 +1143,18 @@ fn search_matches_comment_bodies_and_focuses_the_thread() {
     assert!(
         matches
             .iter()
-            .any(|hit| hit.thread_id() == Some(thread.id.clone())),
+            .any(|hit| hit.card() == Some(Card::Thread(thread.id.clone()))),
         "the comment body should match"
     );
 
     for _ in 0..matches.len() {
-        if app.focused_thread.as_deref() == Some(&*thread.id) {
+        if app.focused_thread() == Some(&*thread.id) {
             break;
         }
         press(&mut app, "n");
     }
 
-    assert_eq!(app.focused_thread.as_deref(), Some(&*thread.id));
+    assert_eq!(app.focused_thread(), Some(&*thread.id));
     assert!(thread.anchors_to(&app.files[app.selected_file].lines[app.cursor]));
 }
 
@@ -1246,16 +1312,16 @@ fn brace_motions_find_the_nearest_comment_from_an_unanchored_row() {
     assert!(row > 0, "the fixture thread needs a line above it");
 
     app.cursor = row + 1;
-    app.focused_thread = None;
+    app.focused_card = None;
     press(&mut app, "{");
     assert_eq!(app.cursor, row, "{{ reaches back to the comment above");
-    assert_eq!(app.focused_thread.as_deref(), Some(&*thread.id));
+    assert_eq!(app.focused_thread(), Some(&*thread.id));
 
     app.cursor = row - 1;
-    app.focused_thread = None;
+    app.focused_card = None;
     press(&mut app, "}");
     assert_eq!(app.cursor, row, "}} reaches forward to the comment below");
-    assert_eq!(app.focused_thread.as_deref(), Some(&*thread.id));
+    assert_eq!(app.focused_thread(), Some(&*thread.id));
 }
 
 #[test]
@@ -1605,7 +1671,7 @@ fn commenting_on_a_focused_thread_replies_to_it() {
     let mut app = load();
     let thread = park_on_unresolved_thread(&mut app);
     press(&mut app, "j");
-    assert_eq!(app.focused_thread.as_deref(), Some(&*thread.id));
+    assert_eq!(app.focused_thread(), Some(&*thread.id));
 
     press(&mut app, "c");
     assert_eq!(app.mode, Mode::Insert);
@@ -1687,7 +1753,7 @@ fn e_reopens_the_draft_instead_of_stacking_another() {
     assert!(app.drafts.is_empty());
 
     press(&mut app, "e");
-    assert_eq!(app.status, "no draft on this line");
+    assert_eq!(app.status, "no draft here");
     assert!(app.composer.is_none());
 }
 
@@ -1731,7 +1797,7 @@ fn d_discards_only_the_draft_under_the_cursor() {
 
     app.cursor = first + 1;
     press(&mut app, "d");
-    assert_eq!(app.status, "no draft on this line");
+    assert_eq!(app.status, "no draft here");
     assert_eq!(app.drafts.len(), 1);
 }
 
@@ -1758,6 +1824,12 @@ fn the_submit_overlay_types_its_summary_and_tabs_the_verdict() {
         KeyEvent::new(KeyCode::Enter, Modifiers::SHIFT),
     );
     assert_eq!(app.submission.as_ref().unwrap().editor.text(), "ship it\n");
+
+    // A typed summary is no cheaper to retype than a comment, so the first
+    // escape only warns.
+    send(&mut input, &mut app, KeyEvent::from(KeyCode::Escape));
+    assert_eq!(app.mode, Mode::Submit);
+    assert_eq!(app.status, "esc again to discard");
 
     send(&mut input, &mut app, KeyEvent::from(KeyCode::Escape));
     assert_eq!(app.mode, Mode::Normal);
@@ -1955,6 +2027,73 @@ fn a_fetch_does_not_overwrite_a_draft_still_saving() {
     assert_eq!(app.drafts.len(), 1);
     assert_eq!(app.drafts[0].body, "revised");
     assert_eq!(app.drafts[0].sync, Sync::Updating);
+}
+
+/// A refetch lands after every write. It rebuilds the drafts from what GitHub
+/// reported, so a draft that keeps its comment has to keep the local id the
+/// focus and a reopened composer address it by.
+#[test]
+fn a_refetch_keeps_the_focus_on_the_same_draft() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("first");
+    act(&mut app, &Action::CommitComment);
+    settle(&mut app);
+
+    let comment = app.drafts[0].remote.clone().unwrap();
+    let focused = app.focused_card.clone();
+    assert_eq!(focused, Some(Card::Draft(app.drafts[0].id)));
+
+    app.set_meta(meta_with_pending(&comment, "first"));
+
+    assert_eq!(app.drafts.len(), 1);
+    assert_eq!(app.focused_card, focused, "the cursor stays on the card");
+    assert_eq!(app.focused_card, Some(Card::Draft(app.drafts[0].id)));
+}
+
+/// A draft is a card the cursor walks the same way it walks a conversation:
+/// down onto it from the line it hangs under, and back off the top of it.
+#[test]
+fn the_cursor_walks_drafts_like_any_other_card() {
+    let mut app = load();
+    park_on_code(&mut app);
+    let row = app.cursor;
+
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("a note");
+    act(&mut app, &Action::CommitComment);
+    settle(&mut app);
+
+    let card = app.focused_card.clone().unwrap();
+    press(&mut app, "k");
+    assert!(app.focused_card.is_none(), "k steps off the card");
+    assert_eq!(app.cursor, row);
+
+    press(&mut app, "j");
+    assert_eq!(app.focused_card, Some(card), "j steps back onto it");
+
+    act(&mut app, &Action::Activate);
+    assert_eq!(app.expanded_card, app.focused_card);
+}
+
+/// `}` walks what a review still owes an answer to, and an unsent note of the
+/// reader's own is the plainest example of one.
+#[test]
+fn jumping_between_comments_stops_on_drafts() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    app.composer.as_mut().unwrap().editor.set_text("a note");
+    act(&mut app, &Action::CommitComment);
+    settle(&mut app);
+
+    let card = app.focused_card.clone().unwrap();
+    app.cursor = 0;
+    act(&mut app, &Action::LeaveThread);
+
+    act(&mut app, &Action::NextComment);
+    assert_eq!(app.focused_card, Some(card));
 }
 
 /// The fixture's metadata with one pending thread bolted on, standing in for a

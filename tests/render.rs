@@ -2,8 +2,8 @@ use prtui::app::action::{Action, Motion};
 use prtui::app::draft::Parent;
 use prtui::app::input::DispatchResult;
 use prtui::app::input::InputRouter;
-use prtui::app::review::Failure;
-use prtui::app::{App, Pane};
+use prtui::app::review::{Failure, Request, Sent};
+use prtui::app::{App, Card, Pane};
 use prtui::layout::Layout;
 use prtui::layout::rows::{GUTTER, Row};
 use prtui::model::{LineKind, Side, parse_files, parse_meta};
@@ -75,6 +75,38 @@ fn press(app: &mut App, keys: &str) {
     for c in keys.chars() {
         send(input, app, KeyEvent::new(KeyCode::Char(c), Modifiers::NONE));
     }
+}
+
+/// Answers every draft request the way GitHub would, so a test can assert on
+/// the state a save or a discard actually settles into.
+fn settle(app: &mut App) {
+    for _ in 0..8 {
+        let requests = app.take_requests();
+        if requests.is_empty() {
+            return;
+        }
+
+        for request in requests {
+            match request {
+                Request::AddThread { draft, .. } => {
+                    app.finish(Ok(Sent::ThreadAdded {
+                        draft,
+                        review: "PRR_1".into(),
+                        comment: format!("PRRC_{draft}").into(),
+                    }));
+                }
+                Request::UpdateComment { draft, .. } => {
+                    app.finish(Ok(Sent::CommentUpdated(draft)));
+                }
+                Request::DeleteComment { draft, .. } => {
+                    app.finish(Ok(Sent::CommentDeleted(draft)));
+                }
+                other => panic!("unexpected request {other:?}"),
+            }
+        }
+    }
+
+    panic!("draft requests never settled");
 }
 
 /// Renders a frame at the size most tests use and returns it as text.
@@ -236,8 +268,8 @@ fn focused_thread_expands_into_its_full_conversation() {
     app.threads_by_path
         .insert(thread.path.clone(), vec![thread.clone()]);
     show_thread(&mut app, &thread);
-    app.focused_thread = Some(thread.id.clone());
-    app.expanded_thread = Some(thread.id.clone());
+    app.focused_card = Some(Card::Thread(thread.id.clone()));
+    app.expanded_card = Some(Card::Thread(thread.id.clone()));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
@@ -270,8 +302,8 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
     app.threads_by_path
         .insert(thread.path.clone(), vec![thread.clone()]);
     show_thread(&mut app, &thread);
-    app.focused_thread = Some(thread.id.clone());
-    app.expanded_thread = Some(thread.id.clone());
+    app.focused_card = Some(Card::Thread(thread.id.clone()));
+    app.expanded_card = Some(Card::Thread(thread.id.clone()));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
@@ -333,8 +365,8 @@ fn long_reply_keeps_its_identity_visible_while_scrolling() {
     app.threads_by_path
         .insert(thread.path.clone(), vec![thread.clone()]);
     show_thread(&mut app, &thread);
-    app.focused_thread = Some(thread.id.clone());
-    app.expanded_thread = Some(thread.id.clone());
+    app.focused_card = Some(Card::Thread(thread.id.clone()));
+    app.expanded_card = Some(Card::Thread(thread.id.clone()));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
@@ -386,8 +418,8 @@ fn multiple_threads_on_one_line_render_as_one_group() {
     assert!(rendered.contains("@williammartin  Discussion number 1"));
     assert!(rendered.contains("@williammartin  Discussion number 4"));
 
-    app.focused_thread = Some(threads[3].id.clone());
-    app.expanded_thread = Some(threads[3].id.clone());
+    app.focused_card = Some(Card::Thread(threads[3].id.clone()));
+    app.expanded_card = Some(Card::Thread(threads[3].id.clone()));
     terminal
         .draw(|frame| {
             paint(frame, &app);
@@ -1121,8 +1153,8 @@ fn an_attachment_renders_as_its_alt_text() {
     let mut app = load();
     let thread = thread_with_image(&mut app);
     show_thread(&mut app, &thread);
-    app.focused_thread = Some(thread.id.clone());
-    app.expanded_thread = Some(thread.id.clone());
+    app.focused_card = Some(Card::Thread(thread.id.clone()));
+    app.expanded_card = Some(Card::Thread(thread.id.clone()));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal.draw(|frame| paint(frame, &app)).unwrap();
@@ -1722,6 +1754,110 @@ fn a_file_note_is_revised_rather_than_stacked() {
 
     assert_eq!(app.drafts.len(), 1, "one note per file");
     assert_eq!(app.drafts[0].body, "first thought and a second");
+}
+
+/// The lines the note answers to keep a mark of their own while it is written.
+/// The composer docks below the diff, so without one nothing on screen says
+/// what the box in front of you is attached to.
+#[test]
+fn composing_paints_the_rows_the_comment_will_cover() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    app.selected_file = app
+        .files
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, f)| f.lines.len())
+        .map(|(i, _)| i)
+        .unwrap();
+    app.cursor = 4;
+
+    let background = |app: &App| -> Option<ratatui::style::Color> {
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                paint(frame, app);
+            })
+            .unwrap();
+        let row = Layout::compute(FRAME, app).rows.code_row(4) as u16;
+
+        terminal
+            .backend()
+            .buffer()
+            .cell((45, row + 2))
+            .unwrap()
+            .style()
+            .bg
+    };
+
+    let plain = background(&app);
+    press(&mut app, "c");
+    assert_ne!(
+        background(&app),
+        plain,
+        "the commented row is marked while the composer is open"
+    );
+
+    act(&mut app, &Action::CancelComment);
+    assert_eq!(background(&app), plain, "and released when it closes");
+}
+
+/// A note is a card like any other: the cursor lands on it, enter opens it, and
+/// the whole body reads back on the diff instead of one truncated line.
+#[test]
+fn a_draft_expands_into_its_whole_body() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+
+    press(&mut app, "C");
+    paste(
+        &mut InputRouter::default(),
+        &mut app,
+        "first line\n\nlast line",
+    );
+    act(&mut app, &Action::CommitComment);
+
+    // Committing leaves the focus on what was just written.
+    assert_eq!(app.focused_card, Some(Card::Draft(app.drafts[0].id)));
+
+    let collapsed = draw(&app);
+    assert!(collapsed.contains("first line"));
+    assert!(
+        !collapsed.contains("last line"),
+        "a collapsed card shows one line of the note"
+    );
+
+    act(&mut app, &Action::Activate);
+    let expanded = draw(&app);
+    assert!(expanded.contains("first line"));
+    assert!(expanded.contains("last line"));
+    assert!(expanded.contains("file note"));
+}
+
+/// The only way back to a note about the whole file: it hangs under no line, so
+/// the cursor cannot reach it and `e` had nothing to find.
+#[test]
+fn a_focused_file_note_takes_the_edit_and_discard_keys() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+
+    press(&mut app, "C");
+    paste(&mut InputRouter::default(), &mut app, "needs splitting");
+    act(&mut app, &Action::CommitComment);
+    settle(&mut app);
+
+    press(&mut app, "e");
+    assert_eq!(
+        app.composer.as_ref().map(|composer| composer.editor.text()),
+        Some("needs splitting".to_string())
+    );
+    act(&mut app, &Action::CancelComment);
+    act(&mut app, &Action::CancelComment);
+
+    press(&mut app, "d");
+    settle(&mut app);
+    assert!(app.drafts.is_empty(), "the note is discarded");
+    assert!(app.focused_card.is_none(), "the card it sat on is gone");
 }
 
 /// A file-level remark is a thread with `subjectType: FILE`, which is the only

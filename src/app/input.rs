@@ -37,14 +37,14 @@ impl InputRouter {
         let find_active = app.file_filter.is_some() || app.search.is_some();
         self.sync_mode(mode);
 
-        let leaves_thread = mode == Mode::Normal
-            && app.focused_thread.is_some()
+        let leaves_card = mode == Mode::Normal
+            && app.focused_card.is_some()
             && matches!(
                 (key.code, key.modifiers),
                 (KeyCode::Escape, Modifiers::NONE)
                     | (KeyCode::Char('['), Modifiers::CONTROL)
             );
-        if leaves_thread {
+        if leaves_card {
             let action = Action::LeaveThread;
             app.apply(&action, layout);
             return DispatchResult::Applied(action);
@@ -62,6 +62,7 @@ impl InputRouter {
                     return DispatchResult::Ignored;
                 };
 
+                composer.is_discard_armed = false;
                 composer.editor.handle_key(key);
                 DispatchResult::ForwardedToEditor
             }
@@ -70,6 +71,7 @@ impl InputRouter {
                     return DispatchResult::Ignored;
                 };
 
+                submission.is_discard_armed = false;
                 submission.editor.handle_key(key);
                 DispatchResult::ForwardedToEditor
             }
@@ -108,6 +110,7 @@ impl InputRouter {
                 let Some(composer) = app.composer.as_mut() else {
                     return DispatchResult::Ignored;
                 };
+                composer.is_discard_armed = false;
                 composer.editor.insert_text(text);
                 DispatchResult::ForwardedToEditor
             }
@@ -115,6 +118,7 @@ impl InputRouter {
                 let Some(submission) = app.submission.as_mut() else {
                     return DispatchResult::Ignored;
                 };
+                submission.is_discard_armed = false;
                 submission.editor.insert_text(text);
                 DispatchResult::ForwardedToEditor
             }

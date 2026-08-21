@@ -1,27 +1,27 @@
+use crate::app::Card;
 use std::ops::Range;
-use std::sync::Arc;
 
 /// One hit for the active query, identified the way the cursor addresses it:
-/// a diff row, plus the thread under that row when the hit is in a comment.
+/// a diff row, plus the card under that row when the hit is in a comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Match {
     Line(usize),
-    Thread { row: usize, id: Arc<str> },
+    Card { row: usize, card: Card },
 }
 
 impl Match {
     pub const fn row(&self) -> usize {
         match self {
-            Self::Line(row) | Self::Thread { row, .. } => *row,
+            Self::Line(row) | Self::Card { row, .. } => *row,
         }
     }
 
-    /// Cloning an id is a refcount bump, so a caller that has to outlive the
-    /// borrow takes one rather than copying the string.
-    pub fn thread_id(&self) -> Option<Arc<str>> {
+    /// Cloning a card is a refcount bump at worst, so a caller that has to
+    /// outlive the borrow takes one rather than copying the string.
+    pub fn card(&self) -> Option<Card> {
         match self {
             Self::Line(_) => None,
-            Self::Thread { id, .. } => Some(id.clone()),
+            Self::Card { card, .. } => Some(card.clone()),
         }
     }
 }

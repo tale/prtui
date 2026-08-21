@@ -12,6 +12,7 @@
 //! length depends on how its markdown wraps — that content is rendered here
 //! because its row count is a layout fact.
 
+use crate::app::Card;
 use crate::app::draft::Draft;
 use crate::model::{ChangedFile, DiffLine, LineKind, ReviewThread, Side};
 use crate::renderer::Theme;
@@ -93,8 +94,6 @@ pub enum Row {
     Code { source: usize, fragment: Fragment },
     /// A pending note of the reader's own, by index into [`View::drafts`].
     Draft { draft: usize },
-    /// The file-level draft, which answers to no line and leads the pane.
-    FileDraft,
     /// A pile's heading, drawn only when the pile holds more than one thread.
     Heading { state: ThreadState, count: usize },
     /// Stands in for the summaries the window left out: `… n earlier` above
@@ -122,19 +121,33 @@ pub struct BodyRow {
     pub spans: Vec<Span<'static>>,
 }
 
-/// A thread paired with the source line it hangs under, in the order the cursor
+/// A card paired with the source line it hangs under, in the order the cursor
 /// visits them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stop {
     pub source: usize,
-    pub thread: usize,
+    pub card: Card,
+}
+
+/// Where a card sits relative to the code, which is the order the pane draws
+/// them in and therefore the order the cursor walks them in.
+///
+/// Remarks about the whole file lead the pane, above the first line of the
+/// patch. Under a line, the reader's own notes come before the conversations
+/// GitHub holds, since an unsent one is what is still being worked on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Class {
+    FileDraft,
+    FileThread,
+    LineDraft,
+    LineThread,
 }
 
 /// What laying a file out needs from app state.
 #[derive(Clone, Copy)]
 pub struct View<'a> {
-    pub focused: Option<&'a str>,
-    pub expanded: Option<&'a str>,
+    pub focused: Option<&'a Card>,
+    pub expanded: Option<&'a Card>,
     /// How far into the expanded conversation the reader has scrolled.
     pub scroll: usize,
     pub width: usize,
@@ -153,40 +166,77 @@ pub fn is_file_level(thread: &ReviewThread) -> bool {
     !thread.is_outdated && thread.anchor_line().is_none()
 }
 
-/// Every thread in `file` paired with the line it hangs under, in visit order.
+/// Every card in `file` paired with the line it hangs under, in visit order.
 ///
 /// File-level threads belong to no line and lead the pane, so they pin to the
 /// first. Outdated ones have no live anchor and pin after the last, matching
 /// where each is drawn. A thread whose anchor is not in the patch at all is
 /// dropped: there is no row to reach it from.
-pub fn stops_for(file: &ChangedFile, threads: &[ReviewThread]) -> Vec<Stop> {
-    let last = file.lines.len().saturating_sub(1);
-    let anchored = resolve_anchors(file, threads);
+pub fn stops_for(
+    file: &ChangedFile,
+    threads: &[ReviewThread],
+    drafts: &[&Draft],
+) -> Vec<Stop> {
+    stops_from(file, threads, drafts, &resolve_anchors(file, threads))
+}
 
-    let mut stops: Vec<Stop> = threads
+/// `stops_for` once the anchors are already resolved, which is what keeps the
+/// row builder from walking the patch a second time for them.
+fn stops_from(
+    file: &ChangedFile,
+    threads: &[ReviewThread],
+    drafts: &[&Draft],
+    anchored: &[Option<usize>],
+) -> Vec<Stop> {
+    let last = file.lines.len().saturating_sub(1);
+
+    // Sorted on the same key the pane emits rows in, so the cursor and the
+    // drawing agree without either consulting the other.
+    let mut stops: Vec<(usize, Class, usize, Card)> = threads
         .iter()
         .enumerate()
         .filter_map(|(thread, review)| {
-            let source = if is_file_level(review) {
-                0
+            let (source, class) = if is_file_level(review) {
+                (0, Class::FileThread)
             } else if review.is_outdated {
-                last
+                (last, Class::LineThread)
             } else {
-                anchored[thread]?
+                (anchored[thread]?, Class::LineThread)
             };
-            Some(Stop { source, thread })
+
+            Some((
+                source,
+                class,
+                ThreadState::of(review).rank() as usize,
+                Card::Thread(review.id.clone()),
+            ))
         })
         .collect();
 
-    stops.sort_by_key(|stop| {
-        let review = &threads[stop.thread];
-        (
-            stop.source,
-            u8::from(!is_file_level(review)),
-            ThreadState::of(review).rank(),
-        )
+    stops.extend(drafts.iter().enumerate().filter_map(|(index, draft)| {
+        let Some(rows) = draft.rows() else {
+            return Some((0, Class::FileDraft, index, Card::Draft(draft.id)));
+        };
+
+        // A note whose span no longer exists in the patch is drawn nowhere, so
+        // there is no row for the cursor to reach it from.
+        let source = *rows.end();
+        (source < file.lines.len()).then_some((
+            source,
+            Class::LineDraft,
+            index,
+            Card::Draft(draft.id),
+        ))
+    }));
+
+    stops.sort_by(|left, right| {
+        (left.0, left.1, left.2).cmp(&(right.0, right.1, right.2))
     });
+
     stops
+        .into_iter()
+        .map(|(source, _, _, card)| Stop { source, card })
+        .collect()
 }
 
 /// Threads anchored to one side, sorted by the line number each waits for.
@@ -290,6 +340,9 @@ pub struct Rows {
     all: Vec<Row>,
     /// Virtual row of each source line, parallel to [`ChangedFile::lines`].
     code: Vec<usize>,
+    /// The row each card's own summary is drawn on, for the cursor to follow.
+    /// An elided one is absent, since it has no row this frame.
+    cards: Vec<(Card, usize)>,
     stops: Vec<Stop>,
     body: Vec<BodyRow>,
     body_limit: usize,
@@ -301,6 +354,7 @@ impl Rows {
         Self {
             all: Vec::new(),
             code: Vec::new(),
+            cards: Vec::new(),
             stops: Vec::new(),
             body: Vec::new(),
             body_limit: 0,
@@ -317,24 +371,23 @@ impl Rows {
             threads,
             rows: Vec::with_capacity(file.lines.len()),
             code: Vec::with_capacity(file.lines.len()),
+            cards: Vec::new(),
             body: Vec::new(),
             body_limit: 0,
         };
 
-        // Which line each thread hangs under is resolved once, here. The row
+        // Which line each card hangs under is resolved once, here. The row
         // list groups those stops by line and the cursor walks the same list,
         // so neither side re-derives where a conversation attaches.
-        let stops = stops_for(file, threads);
+        let anchored = resolve_anchors(file, threads);
+        let stops = stops_from(file, threads, view.drafts, &anchored);
 
         // Remarks about the file as a whole answer to no line, so they lead the
         // pane the way GitHub puts them above a file's diff.
-        if builder
-            .view
-            .drafts
-            .iter()
-            .any(|draft| draft.is_file_level())
-        {
-            builder.rows.push(Row::FileDraft);
+        for draft in 0..view.drafts.len() {
+            if view.drafts[draft].is_file_level() {
+                builder.emit_draft(draft);
+            }
         }
         builder.emit_piles(&select(threads, is_file_level));
 
@@ -348,16 +401,18 @@ impl Rows {
 
         let mut by_source: Vec<Vec<usize>> = vec![Vec::new(); file.lines.len()];
         let mut outdated: Vec<usize> = Vec::new();
-        for stop in &stops {
-            let review = &threads[stop.thread];
+        for (thread, review) in threads.iter().enumerate() {
             if is_file_level(review) {
                 continue;
             }
             if review.is_outdated {
-                outdated.push(stop.thread);
+                outdated.push(thread);
                 continue;
             }
-            by_source[stop.source].push(stop.thread);
+            let Some(source) = anchored[thread] else {
+                continue;
+            };
+            by_source[source].push(thread);
         }
 
         let placed = placed_drafts(view.drafts);
@@ -401,11 +456,12 @@ impl Rows {
         self.code.get(source).copied().unwrap_or(0)
     }
 
-    /// The row a thread's summary is drawn on, when it is not elided away.
-    pub fn summary_row(&self, thread: usize) -> Option<usize> {
-        self.all.iter().position(|row| {
-            matches!(row, Row::Summary { thread: found, .. } if *found == thread)
-        })
+    /// The row a card's own summary is drawn on, when it is not elided away.
+    pub fn card_row(&self, card: &Card) -> Option<usize> {
+        self.cards
+            .iter()
+            .find(|(held, _)| held == card)
+            .map(|(_, row)| *row)
     }
 
     pub fn body(&self, index: usize) -> Option<&BodyRow> {
@@ -436,6 +492,7 @@ struct Builder<'a> {
     threads: &'a [ReviewThread],
     rows: Vec<Row>,
     code: Vec<usize>,
+    cards: Vec<(Card, usize)>,
     body: Vec<BodyRow>,
     body_limit: usize,
 }
@@ -445,10 +502,18 @@ impl Builder<'_> {
         Rows {
             all: self.rows,
             code: self.code,
+            cards: self.cards,
             stops,
             body: self.body,
             body_limit: self.body_limit,
         }
+    }
+
+    /// Pushes a card's summary row and remembers where it landed, which is what
+    /// the cursor follows and what a scroll measures against.
+    fn push_card(&mut self, card: Card, row: Row) {
+        self.cards.push((card, self.rows.len()));
+        self.rows.push(row);
     }
 
     const fn indent(&self) -> usize {
@@ -465,11 +530,15 @@ impl Builder<'_> {
     }
 
     fn is_focused(&self, thread: usize) -> bool {
-        self.view.focused == Some(&*self.threads[thread].id)
+        self.view
+            .focused
+            .is_some_and(|card| card.is_thread(&self.threads[thread].id))
     }
 
     fn is_expanded(&self, thread: usize) -> bool {
-        self.view.expanded == Some(&*self.threads[thread].id)
+        self.view
+            .expanded
+            .is_some_and(|card| card.is_thread(&self.threads[thread].id))
     }
 
     /// A line wider than the pane folds onto further rows instead of being cut
@@ -500,8 +569,48 @@ impl Builder<'_> {
             if row != source {
                 break;
             }
-            self.rows.push(Row::Draft { draft });
+            self.emit_draft(draft);
         }
+    }
+
+    /// One pending note, plus its body when it is open. A draft expands the same
+    /// way a thread does: it is the reader's own comment and reads back as one.
+    fn emit_draft(&mut self, draft: usize) {
+        let view = self.view;
+        let Some(pending) = view.drafts.get(draft) else {
+            return;
+        };
+
+        self.push_card(Card::Draft(pending.id), Row::Draft { draft });
+
+        if !view.expanded.is_some_and(|card| card.is_draft(pending.id)) {
+            return;
+        }
+
+        let Some(body_width) = self.body_width() else {
+            return;
+        };
+
+        // No header: the card line right above already says what the note is
+        // and how far it has got, and a thread's header is there to name an
+        // author the reader does not have.
+        let mut content = Vec::new();
+        for block in
+            markdown::render_blocks(&pending.body, body_width, view.theme)
+        {
+            match block {
+                MarkdownBlock::Text(line) => content.push(ContentRow {
+                    spans: line.spans,
+                    comment_index: 0,
+                    is_header: false,
+                }),
+                MarkdownBlock::Image { url, alt } => {
+                    content.extend(self.image_rows(&url, &alt, 0, body_width));
+                }
+            }
+        }
+
+        self.emit_body(&content, &[]);
     }
 
     /// Threads sharing a line are drawn as one pile per state, open first.
@@ -524,13 +633,16 @@ impl Builder<'_> {
         }
 
         if let [only] = *pile {
-            self.rows.push(Row::Summary {
-                thread: only,
-                state,
-                connector: Connector::Only,
-                has_state_label: true,
-            });
-            self.emit_body(only);
+            self.push_card(
+                Card::Thread(self.threads[only].id.clone()),
+                Row::Summary {
+                    thread: only,
+                    state,
+                    connector: Connector::Only,
+                    has_state_label: true,
+                },
+            );
+            self.emit_thread_body(only);
             return;
         }
 
@@ -550,17 +662,20 @@ impl Builder<'_> {
 
         for (position, &thread) in pile.iter().enumerate().take(end).skip(start)
         {
-            self.rows.push(Row::Summary {
-                thread,
-                state,
-                connector: if position + 1 == count {
-                    Connector::Last
-                } else {
-                    Connector::Branch
+            self.push_card(
+                Card::Thread(self.threads[thread].id.clone()),
+                Row::Summary {
+                    thread,
+                    state,
+                    connector: if position + 1 == count {
+                        Connector::Last
+                    } else {
+                        Connector::Branch
+                    },
+                    has_state_label: false,
                 },
-                has_state_label: false,
-            });
-            self.emit_body(thread);
+            );
+            self.emit_thread_body(thread);
         }
 
         if end < count {
@@ -589,17 +704,48 @@ impl Builder<'_> {
             .min(pile.len().saturating_sub(MAX_VISIBLE_SUMMARIES))
     }
 
-    fn emit_body(&mut self, thread: usize) {
+    /// Rows an expanded body has to fit its text into, once the card's frame is
+    /// taken off. A pane too narrow for any of it has nothing to draw.
+    fn body_width(&self) -> Option<usize> {
+        let width = self.card_width().saturating_sub(3);
+
+        (width > 0).then_some(width)
+    }
+
+    fn emit_thread_body(&mut self, thread: usize) {
         if !self.is_expanded(thread) {
             return;
         }
 
-        let body_width = self.card_width().saturating_sub(3);
-        if body_width == 0 {
+        let Some(body_width) = self.body_width() else {
             return;
-        }
+        };
 
         let content = self.content(thread, body_width);
+        let continued: Vec<Vec<Span<'static>>> =
+            (0..self.threads[thread].comments.len())
+                .map(|index| {
+                    comment_header(
+                        &self.threads[thread],
+                        index,
+                        self.view.theme,
+                        true,
+                    )
+                })
+                .collect();
+
+        self.emit_body(&content, &continued);
+    }
+
+    /// Windows a rendered conversation into the rows the pane will draw.
+    ///
+    /// `continued` carries each comment's header in its continued form, since a
+    /// window that opens partway through one has to say whose words these are.
+    fn emit_body(
+        &mut self,
+        content: &[ContentRow],
+        continued: &[Vec<Span<'static>>],
+    ) {
         let window = self.view.window;
         let start = self.view.scroll.min(content.len().saturating_sub(window));
         let end = (start + window).min(content.len());
@@ -615,14 +761,10 @@ impl Builder<'_> {
             // whose it is, so it is reprinted as continued.
             if let Some(row) = content.get(start)
                 && !row.is_header
+                && let Some(header) = continued.get(row.comment_index)
             {
                 visible.push(BodyRow {
-                    spans: comment_header(
-                        &self.threads[thread],
-                        row.comment_index,
-                        theme,
-                        true,
-                    ),
+                    spans: header.clone(),
                 });
             }
         }
@@ -813,9 +955,9 @@ mod tests {
         }
     }
 
-    fn thread(side: Side, anchor: u32) -> ReviewThread {
+    fn thread(id: &str, side: Side, anchor: u32) -> ReviewThread {
         ReviewThread {
-            id: Arc::from("t"),
+            id: Arc::from(id),
             path: Arc::from("a.rs"),
             line: Some(anchor),
             original_line: Some(anchor),
@@ -830,6 +972,16 @@ mod tests {
         }
     }
 
+    fn stops(
+        file: &ChangedFile,
+        threads: &[ReviewThread],
+    ) -> Vec<(usize, Card)> {
+        stops_for(file, threads, &[])
+            .into_iter()
+            .map(|stop| (stop.source, stop.card))
+            .collect()
+    }
+
     #[test]
     fn an_anchor_resolves_against_its_own_side() {
         // A removed line carries only an old number, an added one only a new.
@@ -838,19 +990,16 @@ mod tests {
             line(LineKind::Removed, Some(10), None),
             line(LineKind::Added, None, Some(10)),
         ]);
-        let threads = vec![thread(Side::Left, 10), thread(Side::Right, 10)];
+        let threads = vec![
+            thread("old", Side::Left, 10),
+            thread("new", Side::Right, 10),
+        ];
 
         assert_eq!(
-            stops_for(&file, &threads),
+            stops(&file, &threads),
             [
-                Stop {
-                    source: 1,
-                    thread: 0
-                },
-                Stop {
-                    source: 2,
-                    thread: 1
-                }
+                (1, Card::Thread(Arc::from("old"))),
+                (2, Card::Thread(Arc::from("new"))),
             ]
         );
     }
@@ -865,25 +1014,19 @@ mod tests {
             line(LineKind::Context, Some(81), Some(81)),
         ]);
         let threads = vec![
-            thread(Side::Right, 81),
-            thread(Side::Right, 1),
-            thread(Side::Right, 40),
+            thread("late", Side::Right, 81),
+            thread("early", Side::Right, 1),
+            thread("absent", Side::Right, 40),
         ];
 
         // The walk leaves 81 behind while it is inside the first hunk, so the
         // second has to start over. An anchor no line carries is dropped:
         // there is no row to reach it from.
         assert_eq!(
-            stops_for(&file, &threads),
+            stops(&file, &threads),
             [
-                Stop {
-                    source: 1,
-                    thread: 1
-                },
-                Stop {
-                    source: 4,
-                    thread: 0
-                }
+                (1, Card::Thread(Arc::from("early"))),
+                (4, Card::Thread(Arc::from("late"))),
             ]
         );
     }
@@ -898,11 +1041,53 @@ mod tests {
         ]);
 
         assert_eq!(
-            stops_for(&file, &[thread(Side::Right, 5)]),
-            [Stop {
-                source: 1,
-                thread: 0
-            }]
+            stops(&file, &[thread("t", Side::Right, 5)]),
+            [(1, Card::Thread(Arc::from("t")))]
+        );
+    }
+
+    /// The reader's own notes lead the conversations on their line, and a
+    /// remark about the whole file leads the pane, which is where each is
+    /// drawn.
+    #[test]
+    fn drafts_are_stops_ahead_of_the_threads_they_share_a_line_with() {
+        let file = patch(vec![
+            line(LineKind::Hunk, None, None),
+            line(LineKind::Context, Some(1), Some(1)),
+        ]);
+        let threads = vec![thread("t", Side::Right, 1)];
+        let note = Draft {
+            id: 7,
+            path: Arc::from("a.rs"),
+            attachment: crate::app::draft::Attachment::File,
+            body: "about the file".into(),
+            remote: None,
+            sync: crate::app::draft::Sync::Synced,
+        };
+        let inline = Draft {
+            id: 9,
+            attachment: crate::app::draft::Attachment::Lines {
+                rows: 1..=1,
+                anchor: crate::app::draft::Anchor {
+                    start_line: 1,
+                    start_side: Side::Right,
+                    end_line: 1,
+                    side: Side::Right,
+                },
+            },
+            ..note.clone()
+        };
+
+        assert_eq!(
+            stops_for(&file, &threads, &[&note, &inline])
+                .into_iter()
+                .map(|stop| (stop.source, stop.card))
+                .collect::<Vec<_>>(),
+            [
+                (0, Card::Draft(7)),
+                (1, Card::Draft(9)),
+                (1, Card::Thread(Arc::from("t"))),
+            ]
         );
     }
 }

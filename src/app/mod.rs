@@ -46,14 +46,6 @@ impl<'a> OpenFile<'a> {
     pub fn segments(&self, index: usize) -> Option<&'a [Segment]> {
         self.highlight?.get(index).map(Vec::as_slice)
     }
-
-    /// The remark on the file as a whole, if one is pending.
-    pub fn file_draft(&self) -> Option<&'a str> {
-        self.drafts
-            .iter()
-            .find(|draft| draft.is_file_level())
-            .map(|draft| draft.body.as_str())
-    }
 }
 
 /// One row of the file tree, with the conversation counts it shows.
@@ -72,6 +64,41 @@ pub enum Pane {
 
 /// Where the reader is.
 ///
+/// A conversation the cursor can rest on.
+///
+/// A thread is named by the id GitHub gave it and a draft by the local id it
+/// was filed under, since an unsent one has no other name. Both take the focus,
+/// both expand, and both answer to the same keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Card {
+    Thread(Arc<str>),
+    Draft(u64),
+}
+
+impl Card {
+    pub fn is_thread(&self, id: &str) -> bool {
+        matches!(self, Self::Thread(held) if **held == *id)
+    }
+
+    pub const fn is_draft(&self, id: u64) -> bool {
+        matches!(self, Self::Draft(held) if *held == id)
+    }
+
+    pub const fn draft(&self) -> Option<u64> {
+        match self {
+            Self::Draft(id) => Some(*id),
+            Self::Thread(_) => None,
+        }
+    }
+
+    pub const fn thread(&self) -> Option<&Arc<str>> {
+        match self {
+            Self::Thread(id) => Some(id),
+            Self::Draft(_) => None,
+        }
+    }
+}
+
 /// This is what a diff row needs to know that is not a property of the row
 /// itself, gathered once so the renderers take a value instead of reaching
 /// into the app for whatever they like.
@@ -80,15 +107,15 @@ pub struct Focus<'a> {
     pub cursor: usize,
     pub selection: Option<Selection>,
     pub pane: Pane,
-    pub thread: Option<&'a str>,
-    pub expanded: Option<&'a str>,
+    pub card: Option<&'a Card>,
+    pub expanded: Option<&'a Card>,
     pub query: Option<Query<'a>>,
 }
 
 impl Focus<'_> {
-    /// The diff cursor gives way while a thread holds the focus.
+    /// The diff cursor gives way while a card holds the focus.
     pub fn is_cursor(&self, row: usize) -> bool {
-        self.pane == Pane::Diff && self.thread.is_none() && row == self.cursor
+        self.pane == Pane::Diff && self.card.is_none() && row == self.cursor
     }
 
     pub fn is_selected(&self, row: usize) -> bool {
@@ -97,11 +124,19 @@ impl Focus<'_> {
     }
 
     pub fn is_thread_focused(&self, id: &str) -> bool {
-        self.thread == Some(id)
+        self.card.is_some_and(|card| card.is_thread(id))
     }
 
     pub fn is_thread_expanded(&self, id: &str) -> bool {
-        self.expanded == Some(id)
+        self.expanded.is_some_and(|card| card.is_thread(id))
+    }
+
+    pub fn is_draft_focused(&self, id: u64) -> bool {
+        self.card.is_some_and(|card| card.is_draft(id))
+    }
+
+    pub fn is_draft_expanded(&self, id: u64) -> bool {
+        self.expanded.is_some_and(|card| card.is_draft(id))
     }
 
     /// Byte ranges of the active query within one line of the diff.
@@ -133,6 +168,29 @@ pub struct Composer {
     pub editor: CommentEditor,
     pub target: Target,
     pub path: Arc<str>,
+    /// The body the composer opened on. Escape compares against it rather than
+    /// against emptiness, so reopening a draft and changing nothing still
+    /// closes on one key.
+    original: String,
+    /// Set by an escape that had work to lose. The next escape discards; any
+    /// other key clears it.
+    pub is_discard_armed: bool,
+}
+
+impl Composer {
+    fn new(editor: CommentEditor, target: Target, path: Arc<str>) -> Self {
+        Self {
+            original: editor.text(),
+            editor,
+            target,
+            path,
+            is_discard_armed: false,
+        }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.editor.text() != self.original
+    }
 }
 
 struct FileFilterSnapshot {
@@ -145,7 +203,7 @@ struct FileFilterSnapshot {
 struct SearchOrigin {
     query: Option<String>,
     cursor: usize,
-    focused_thread: Option<Arc<str>>,
+    focused_card: Option<Card>,
     diff_scroll: usize,
 }
 
@@ -222,8 +280,11 @@ pub struct App {
     /// an optional thing above it that captures the keys.
     tree_directory: Option<Arc<str>>,
     pub cursor: usize,
-    pub focused_thread: Option<Arc<str>>,
-    pub expanded_thread: Option<Arc<str>>,
+    /// The conversation the cursor is resting on, if it is on one rather than
+    /// on the code. A draft of the reader's own counts: it is a card the same
+    /// as any thread.
+    pub focused_card: Option<Card>,
+    pub expanded_card: Option<Card>,
     pub thread_scroll: usize,
     /// First virtual row of the diff pane on screen. Rows are not source lines:
     /// a line's threads occupy rows of their own, so the offset addresses the
@@ -280,8 +341,8 @@ impl App {
             collapsed: HashSet::new(),
             tree_directory: None,
             cursor: 0,
-            focused_thread: None,
-            expanded_thread: None,
+            focused_card: None,
+            expanded_card: None,
             thread_scroll: 0,
             diff_scroll: 0,
             pane: Pane::Files,
@@ -403,7 +464,18 @@ impl App {
     /// A draft the server has not caught up with yet outranks its own stale
     /// copy: the screen is the newer of the two until the write lands, and
     /// dropping the local one would undo an edit in front of the user.
+    ///
+    /// A comment GitHub has already named keeps the local id it was drawn
+    /// under. That id is what the focus and a reopened composer address, and a
+    /// refetch lands after every write, so minting a new one each time would
+    /// pull the cursor off the card under it.
     fn reseed_drafts(&mut self) {
+        let known: HashMap<Arc<str>, u64> = self
+            .drafts
+            .iter()
+            .filter_map(|draft| Some((draft.remote.clone()?, draft.id)))
+            .collect();
+
         let files: HashMap<&str, &ChangedFile> =
             self.files.iter().map(|file| (&*file.path, file)).collect();
 
@@ -435,11 +507,29 @@ impl App {
             !in_flight.iter().any(|draft| draft.remote == seed.remote)
         });
         for draft in &mut seeded {
-            draft.id = self.take_draft_id();
+            draft.id = draft
+                .remote
+                .as_ref()
+                .and_then(|comment| known.get(comment).copied())
+                .unwrap_or_else(|| self.take_draft_id());
         }
 
         seeded.append(&mut in_flight);
         self.drafts = seeded;
+        self.prune_focus();
+    }
+
+    /// Drops a focus naming a draft that is no longer held. A card the cursor
+    /// rests on takes the cursor with it, so one that stopped existing would
+    /// leave nothing on screen marked at all.
+    fn prune_focus(&mut self) {
+        let Some(id) = self.focused_card.as_ref().and_then(Card::draft) else {
+            return;
+        };
+
+        if self.draft_by_id(id).is_none() {
+            self.set_focus(None);
+        }
     }
 
     const fn take_draft_id(&mut self) -> u64 {
@@ -491,8 +581,8 @@ impl App {
             cursor: self.cursor,
             selection: self.selection,
             pane: self.pane,
-            thread: self.focused_thread.as_deref(),
-            expanded: self.expanded_thread.as_deref(),
+            card: self.focused_card.as_ref(),
+            expanded: self.expanded_card.as_ref(),
             query: self.diff_query(),
         }
     }
@@ -506,11 +596,7 @@ impl App {
                 .threads_by_path
                 .get(&patch.path)
                 .map_or(&[], Vec::as_slice),
-            drafts: self
-                .drafts
-                .iter()
-                .filter(|draft| draft.path == patch.path)
-                .collect(),
+            drafts: self.drafts_for(&patch.path),
             highlight: self.highlights.get(&patch.path),
         })
     }
@@ -524,6 +610,19 @@ impl App {
     }
 
     pub fn apply(&mut self, action: &Action, layout: &Layout) {
+        // Only a second escape discards, so every other key stands the composer
+        // back down.
+        if !matches!(action, Action::CancelComment)
+            && let Some(composer) = self.composer.as_mut()
+        {
+            composer.is_discard_armed = false;
+        }
+        if !matches!(action, Action::CancelSubmit)
+            && let Some(submission) = self.submission.as_mut()
+        {
+            submission.is_discard_armed = false;
+        }
+
         match *action {
             Action::Quit => self.should_quit = true,
             Action::TogglePane => self.toggle_pane(),
@@ -536,7 +635,7 @@ impl App {
                 }
             }
             Action::Activate => self.activate(layout),
-            Action::LeaveThread => self.set_focused_thread(None),
+            Action::LeaveThread => self.set_focus(None),
             Action::FocusFiles => self.focus_files(),
             Action::FocusDiff => self.focus_diff(),
             Action::StartFind => self.start_find(),
@@ -555,7 +654,7 @@ impl App {
 
             Action::EnterVisual => {
                 if self.pane == Pane::Diff {
-                    self.set_focused_thread(None);
+                    self.set_focus(None);
                     self.mode = Mode::Visual;
                     self.selection = Some(Selection::at(self.cursor));
                 }
@@ -568,21 +667,14 @@ impl App {
             Action::StartComment => self.start_comment(layout),
             Action::StartFileComment => self.start_file_comment(layout),
             Action::CommitComment => self.commit_comment(),
-            Action::CancelComment => {
-                self.composer = None;
-                self.mode = Mode::Normal;
-                self.selection = None;
-            }
-            Action::EditDraft => self.edit_draft(),
+            Action::CancelComment => self.cancel_comment(),
+            Action::EditDraft => self.edit_draft(layout),
             Action::DeleteDraft => self.delete_draft(),
             Action::ToggleResolved => self.toggle_resolved(),
 
             Action::StartSubmit => self.start_submit(layout),
             Action::CommitSubmit => self.commit_submit(),
-            Action::CancelSubmit => {
-                self.submission = None;
-                self.mode = Mode::Normal;
-            }
+            Action::CancelSubmit => self.cancel_submit(),
             Action::CycleEvent(direction) => {
                 if let Some(submission) = self.submission.as_mut() {
                     submission.event = submission.event.step(direction);
@@ -592,13 +684,16 @@ impl App {
     }
 
     /// A focused thread takes a reply; anything else starts a fresh draft over
-    /// the cursor line or the visual selection.
+    /// the cursor line or the visual selection. A focused draft of the reader's
+    /// own is not one of those: `c` composes and `e` revises, so a drafted line
+    /// still takes a second comment.
     fn start_comment(&mut self, layout: &Layout) {
         if self.pane != Pane::Diff {
             return;
         }
 
-        if let Some(id) = self.focused_thread.clone() {
+        if let Some(id) = self.focused_card.as_ref().and_then(Card::thread) {
+            let id = id.clone();
             self.start_reply(&id, layout);
             return;
         }
@@ -611,27 +706,35 @@ impl App {
         let Some(file) = self.current_file() else {
             return;
         };
+        let path = file.path.clone();
         let Some(anchor) = draft::anchor_for(file, rows.clone()) else {
             self.status = "cannot comment on that line".into();
             return;
         };
 
-        self.composer = Some(Composer {
-            editor: CommentEditor::default(),
-            target: Target::Line {
+        // The rows the note will cover stay painted while it is written, so the
+        // composer never floats free of what it answers to.
+        self.selection = Some(Selection {
+            anchor: *rows.start(),
+            head: *rows.end(),
+        });
+        self.composer = Some(Composer::new(
+            CommentEditor::default(),
+            Target::Line {
                 anchor,
                 rows,
                 replacing: None,
             },
-            path: file.path.clone(),
-        });
+            path,
+        ));
         self.mode = Mode::Insert;
         self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
     /// A file takes a single remark, so `C` revises the existing one rather than
     /// stacking another. Available from the tree too: no line is involved, so
-    /// there is nothing the diff pane is needed for.
+    /// there is nothing the diff pane is needed for. The focus follows it over
+    /// to the diff, since that is where the typing is about to happen.
     fn start_file_comment(&mut self, layout: &Layout) {
         let Some(path) = self.current_file().map(|file| file.path.clone())
         else {
@@ -643,53 +746,71 @@ impl App {
             .drafts
             .iter()
             .find(|draft| draft.path == path && draft.is_file_level());
-        let replacing = existing.map(|draft| draft.id);
-        let mut editor = CommentEditor::default();
+
         if let Some(draft) = existing {
-            editor.set_text(&draft.body);
+            let id = draft.id;
+            self.reopen_draft(id, layout);
+            return;
         }
 
-        self.composer = Some(Composer {
-            editor,
-            target: Target::File { replacing },
+        self.pane = Pane::Diff;
+        self.composer = Some(Composer::new(
+            CommentEditor::default(),
+            Target::File { replacing: None },
             path,
-        });
+        ));
         self.mode = Mode::Insert;
         self.selection = None;
         self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
-    /// Reopens the draft under the cursor with its body and span intact, so
-    /// committing revises it instead of stacking a second comment.
-    fn edit_draft(&mut self) {
-        if self.pane != Pane::Diff {
+    /// Reopens the focused draft, or the one under the cursor, with its body
+    /// and its span intact, so committing revises it instead of stacking a
+    /// second comment.
+    fn edit_draft(&mut self, layout: &Layout) {
+        let Some(index) = self.editable_draft() else {
+            self.status = "no draft here".into();
             return;
-        }
+        };
 
-        let Some(index) = self.draft_at_cursor() else {
-            self.status = "no draft on this line".into();
+        let id = self.drafts[index].id;
+        self.reopen_draft(id, layout);
+    }
+
+    /// Puts an existing draft back in the composer, whatever it is attached to.
+    fn reopen_draft(&mut self, id: u64, layout: &Layout) {
+        let Some(index) = self.draft_by_id(id) else {
             return;
         };
 
         let draft = &self.drafts[index];
-        let Attachment::Lines { rows, anchor } = draft.attachment.clone()
-        else {
-            return;
+        let target = match draft.attachment.clone() {
+            Attachment::Lines { rows, anchor } => {
+                self.selection = Some(Selection {
+                    anchor: *rows.start(),
+                    head: *rows.end(),
+                });
+                Target::Line {
+                    anchor,
+                    rows,
+                    replacing: Some(id),
+                }
+            }
+            Attachment::File => {
+                self.selection = None;
+                Target::File {
+                    replacing: Some(id),
+                }
+            }
         };
+
         let mut editor = CommentEditor::default();
         editor.set_text(&draft.body);
 
-        self.composer = Some(Composer {
-            editor,
-            target: Target::Line {
-                anchor,
-                rows,
-                replacing: Some(draft.id),
-            },
-            path: draft.path.clone(),
-        });
+        self.pane = Pane::Diff;
+        self.composer = Some(Composer::new(editor, target, draft.path.clone()));
         self.mode = Mode::Insert;
-        self.selection = None;
+        self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
     fn start_reply(&mut self, id: &str, layout: &Layout) {
@@ -701,11 +822,11 @@ impl App {
             return;
         };
 
-        self.composer = Some(Composer {
-            editor: CommentEditor::default(),
-            target: Target::Reply { in_reply_to },
-            path: thread.path.clone(),
-        });
+        self.composer = Some(Composer::new(
+            CommentEditor::default(),
+            Target::Reply { in_reply_to },
+            thread.path.clone(),
+        ));
         self.mode = Mode::Insert;
         self.scroll_into_view(layout, layout.viewport_once_docked());
     }
@@ -732,17 +853,28 @@ impl App {
             .position(|draft| draft.covers(path, self.cursor))
     }
 
-    fn delete_draft(&mut self) {
+    /// The draft `e` and `d` act on: the focused one when a card holds the
+    /// focus, which is the only way to reach a file note, and otherwise the one
+    /// covering the cursor line.
+    fn editable_draft(&self) -> Option<usize> {
+        if self.focused_card.is_some() {
+            return self.focused_draft();
+        }
         if self.pane != Pane::Diff {
-            return;
+            return None;
         }
 
-        let Some(index) = self.draft_at_cursor() else {
-            self.status = "no draft on this line".into();
+        self.draft_at_cursor()
+    }
+
+    fn delete_draft(&mut self) {
+        let Some(index) = self.editable_draft() else {
+            self.status = "no draft here".into();
             return;
         };
 
         self.discard_draft(index);
+        self.prune_focus();
     }
 
     /// Discards a draft, which means asking GitHub to drop the comment holding
@@ -771,7 +903,9 @@ impl App {
     }
 
     fn toggle_resolved(&mut self) {
-        let Some(id) = self.focused_thread.clone() else {
+        let Some(id) =
+            self.focused_card.as_ref().and_then(Card::thread).cloned()
+        else {
             self.status = "no thread selected".into();
             return;
         };
@@ -813,6 +947,26 @@ impl App {
         self.sending
             .as_ref()
             .is_some_and(|held| held.error.is_none())
+    }
+
+    /// A summary is no cheaper to retype than a comment, so escape warns once
+    /// here too rather than throwing it away on the first key.
+    fn cancel_submit(&mut self) {
+        let Some(submission) = self.submission.as_mut() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+
+        let has_summary = !submission.editor.text().trim().is_empty();
+        if has_summary && !submission.is_discard_armed {
+            submission.is_discard_armed = true;
+            self.status = "esc again to discard".into();
+            return;
+        }
+
+        self.submission = None;
+        self.mode = Mode::Normal;
+        self.status.clear();
     }
 
     /// A refused submission leaves the overlay open, so a missing summary is
@@ -919,6 +1073,8 @@ impl App {
                 status
             }
         };
+
+        self.prune_focus();
     }
 
     /// GitHub has named the draft. Whatever was asked of it while it had no
@@ -1074,7 +1230,7 @@ impl App {
         self.search_origin = Some(SearchOrigin {
             query: self.search_query().map(str::to_string),
             cursor: self.cursor,
-            focused_thread: self.focused_thread.clone(),
+            focused_card: self.focused_card.clone(),
             diff_scroll: self.diff_scroll,
         });
         self.search = Some(CommentEditor::default());
@@ -1116,7 +1272,7 @@ impl App {
         });
         self.cursor = origin.cursor;
         self.diff_scroll = origin.diff_scroll;
-        self.set_focused_thread(origin.focused_thread);
+        self.set_focus(origin.focused_card);
     }
 
     /// Incremental search: every keystroke previews the first match from where
@@ -1139,7 +1295,7 @@ impl App {
             return;
         };
 
-        self.land_on(hit.row(), hit.thread_id(), layout);
+        self.land_on(hit.row(), hit.card(), layout);
     }
 
     /// What the diff is being searched for, with its case rule resolved.
@@ -1166,18 +1322,12 @@ impl App {
         };
 
         let threads = self.file_threads();
-        let hits: Vec<(usize, Arc<str>)> = layout
+        let hits: Vec<(usize, Card)> = layout
             .rows
             .stops()
             .iter()
-            .map(|stop| (stop.source, &threads[stop.thread]))
-            .filter(|(_, thread)| {
-                thread.comments.iter().any(|comment| {
-                    query.is_match(&comment.body)
-                        || query.is_match(&comment.author)
-                })
-            })
-            .map(|(row, thread)| (row, thread.id.clone()))
+            .filter(|stop| self.card_matches(&stop.card, threads, query))
+            .map(|stop| (stop.source, stop.card.clone()))
             .collect();
 
         let mut matches = Vec::new();
@@ -1187,14 +1337,38 @@ impl App {
             }
 
             matches.extend(hits.iter().filter(|(hit, _)| *hit == row).map(
-                |(_, id)| search::Match::Thread {
+                |(_, card)| search::Match::Card {
                     row,
-                    id: id.clone(),
+                    card: card.clone(),
                 },
             ));
         }
 
         matches
+    }
+
+    /// Whether a card's text answers the query. A draft is the reader's own
+    /// words, which is exactly what they are most likely to be looking for.
+    fn card_matches(
+        &self,
+        card: &Card,
+        threads: &[ReviewThread],
+        query: Query<'_>,
+    ) -> bool {
+        match card {
+            Card::Draft(id) => self
+                .draft_by_id(*id)
+                .is_some_and(|index| query.is_match(&self.drafts[index].body)),
+            Card::Thread(id) => threads
+                .iter()
+                .find(|thread| thread.id == *id)
+                .is_some_and(|thread| {
+                    thread.comments.iter().any(|comment| {
+                        query.is_match(&comment.body)
+                            || query.is_match(&comment.author)
+                    })
+                }),
+        }
     }
 
     /// One-based cursor position within the match list, plus the total. A zero
@@ -1210,7 +1384,7 @@ impl App {
     /// Byte ranges to paint on one diff row, for the renderer.
     fn match_position(&self, matches: &[search::Match]) -> Option<usize> {
         matches.iter().position(|hit| {
-            hit.row() == self.cursor && hit.thread_id() == self.focused_thread
+            hit.row() == self.cursor && hit.card() == self.focused_card
         })
     }
 
@@ -1243,7 +1417,7 @@ impl App {
         };
 
         let hit = matches[target].clone();
-        self.land_on(hit.row(), hit.thread_id(), layout);
+        self.land_on(hit.row(), hit.card(), layout);
     }
 
     pub fn filter_query(&self) -> Option<String> {
@@ -1283,6 +1457,26 @@ impl App {
         self.set_selected_file(matches[0], false);
     }
 
+    /// Escape leaves the composer, but work is not thrown away on one key: a
+    /// changed buffer arms first and says so, and the next escape discards it.
+    fn cancel_comment(&mut self) {
+        let Some(composer) = self.composer.as_mut() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+
+        if composer.is_dirty() && !composer.is_discard_armed {
+            composer.is_discard_armed = true;
+            self.status = "esc again to discard".into();
+            return;
+        }
+
+        self.composer = None;
+        self.mode = Mode::Normal;
+        self.selection = None;
+        self.status.clear();
+    }
+
     fn commit_comment(&mut self) {
         let Some(composer) = self.composer.take() else {
             return;
@@ -1294,7 +1488,7 @@ impl App {
         self.mode = Mode::Normal;
         self.selection = None;
 
-        match composer.target {
+        let saved = match composer.target {
             Target::Reply { in_reply_to } => {
                 if body.is_empty() {
                     self.status = "empty reply discarded".into();
@@ -1303,6 +1497,7 @@ impl App {
 
                 self.send(Request::Reply { in_reply_to, body });
                 self.status = "sending reply…".into();
+                None
             }
             Target::Line {
                 anchor,
@@ -1320,7 +1515,13 @@ impl App {
                 body,
                 replacing,
             ),
-        }
+        };
+
+        // The note that was just written takes the focus, so it can be read
+        // back, reopened, or thrown away without hunting for it. A file note
+        // has no line to leave the cursor on, which is what makes this the only
+        // way back to one.
+        self.set_focus(saved.map(Card::Draft));
     }
 
     /// Files a composed body as a draft, revising `replacing` when the composer
@@ -1328,18 +1529,19 @@ impl App {
     ///
     /// The draft is on screen before GitHub has been told about it, so writing
     /// one is two steps: the local copy, then the request that catches the
-    /// server up with it.
+    /// server up with it. Answers with the draft that now holds the body, or
+    /// nothing when there is no longer one.
     fn save_draft(
         &mut self,
         path: Arc<str>,
         attachment: Attachment,
         body: String,
         replacing: Option<u64>,
-    ) {
+    ) -> Option<u64> {
         let Some(index) = replacing.and_then(|id| self.draft_by_id(id)) else {
             if body.is_empty() {
                 self.status = "empty comment discarded".into();
-                return;
+                return None;
             }
 
             let id = self.take_draft_id();
@@ -1353,15 +1555,16 @@ impl App {
             });
             self.status = "saving draft…".into();
             self.create_drafts();
-            return;
+            return Some(id);
         };
 
         if body.is_empty() {
             self.discard_draft(index);
-            return;
+            return None;
         }
 
         let draft = &mut self.drafts[index];
+        let id = draft.id;
         draft.body = body;
 
         match draft.sync {
@@ -1375,6 +1578,8 @@ impl App {
             }
             _ => self.update_draft(index),
         }
+
+        Some(id)
     }
 
     /// Sends the body of an already-created draft. A draft with no comment id
@@ -1470,16 +1675,12 @@ impl App {
             return;
         }
 
-        let Some(id) = self.focused_thread.clone() else {
+        let Some(card) = self.focused_card.clone() else {
             return;
         };
-        self.expanded_thread =
-            (self.expanded_thread.as_deref() != Some(&id)).then_some(id);
+        self.expanded_card =
+            (self.expanded_card.as_ref() != Some(&card)).then_some(card);
         self.thread_scroll = 0;
-    }
-
-    pub fn is_thread_expanded(&self, id: &str) -> bool {
-        self.expanded_thread.as_deref() == Some(id)
     }
 
     fn focus_files(&mut self) {
@@ -1525,7 +1726,7 @@ impl App {
         self.selected_file = index.min(self.files.len() - 1);
         self.tree_directory = None;
         self.cursor = 0;
-        self.set_focused_thread(None);
+        self.set_focus(None);
         self.diff_scroll = 0;
         self.selection = None;
         if leave_transient_mode {
@@ -1544,7 +1745,7 @@ impl App {
         // An open conversation captures the cursor: motions scroll through it
         // rather than walking away from it. Visual mode overrides that, since a
         // selection is being extended over code.
-        if self.mode != Mode::Visual && self.expanded_thread.is_some() {
+        if self.mode != Mode::Visual && self.expanded_card.is_some() {
             let limit = layout.rows.body_limit();
             self.thread_scroll =
                 step(motion, self.thread_scroll, limit + 1, viewport);
@@ -1565,11 +1766,11 @@ impl App {
                 }
                 Motion::Top => {
                     self.cursor = 0;
-                    self.set_focused_thread(None);
+                    self.set_focus(None);
                 }
                 Motion::Bottom => {
                     self.cursor = self.diff_len().saturating_sub(1);
-                    self.set_focused_thread(None);
+                    self.set_focus(None);
                 }
             }
         }
@@ -1654,27 +1855,27 @@ impl App {
     }
 
     fn move_diff_stop(&mut self, direction: isize, layout: &Layout) -> bool {
-        let ids = self.thread_ids_at(self.cursor, layout);
+        let cards = Self::cards_at(layout, self.cursor);
 
         if direction > 0 {
-            if let Some(focused) = self.focused_thread.as_deref() {
+            if let Some(focused) = self.focused_card.as_ref() {
                 if let Some(position) =
-                    ids.iter().position(|id| **id == *focused)
-                    && let Some(next) = ids.get(position + 1)
+                    cards.iter().position(|card| card == focused)
+                    && let Some(next) = cards.get(position + 1)
                 {
-                    self.set_focused_thread(Some(next.clone()));
+                    self.set_focus(Some(next.clone()));
                     return true;
                 }
                 if self.cursor + 1 < self.diff_len() {
                     self.cursor += 1;
-                    self.set_focused_thread(None);
+                    self.set_focus(None);
                     return true;
                 }
                 return false;
             }
 
-            if let Some(first) = ids.first() {
-                self.set_focused_thread(Some(first.clone()));
+            if let Some(first) = cards.first() {
+                self.set_focus(Some(first.clone()));
                 return true;
             }
             if self.cursor + 1 < self.diff_len() {
@@ -1684,16 +1885,18 @@ impl App {
             return false;
         }
 
-        if let Some(focused) = self.focused_thread.as_deref() {
-            if let Some(position) = ids.iter().position(|id| **id == *focused) {
+        if let Some(focused) = self.focused_card.as_ref() {
+            if let Some(position) =
+                cards.iter().position(|card| card == focused)
+            {
                 if position > 0 {
-                    self.set_focused_thread(Some(ids[position - 1].clone()));
+                    self.set_focus(Some(cards[position - 1].clone()));
                 } else {
-                    self.set_focused_thread(None);
+                    self.set_focus(None);
                 }
                 return true;
             }
-            self.set_focused_thread(None);
+            self.set_focus(None);
             return true;
         }
 
@@ -1701,46 +1904,45 @@ impl App {
             return false;
         }
         self.cursor -= 1;
-        let previous = self.thread_ids_at(self.cursor, layout);
-        self.set_focused_thread(previous.last().cloned());
+        let previous = Self::cards_at(layout, self.cursor);
+        self.set_focus(previous.last().cloned());
         true
     }
 
     fn jump_comment(&mut self, direction: isize, layout: &Layout) {
-        if let Some((row, id)) = self.comment_stop_here(direction) {
-            self.land_on(row, Some(id), layout);
+        if let Some((row, card)) = self.comment_stop_here(direction) {
+            self.land_on(row, Some(card), layout);
             return;
         }
 
-        let Some((index, row, id)) = self.comment_stop_elsewhere(direction)
+        let Some((index, row, card)) = self.comment_stop_elsewhere(direction)
         else {
             self.status = "no more comments".into();
             return;
         };
 
         self.set_selected_file(index, false);
-        self.land_on(row, Some(id), layout);
+        self.land_on(row, Some(card), layout);
     }
 
-    /// Puts the cursor on a diff row, optionally focusing one of its threads,
+    /// Puts the cursor on a diff row, optionally focusing one of its cards,
     /// and scrolls the row into view.
-    fn land_on(
-        &mut self,
-        row: usize,
-        thread: Option<Arc<str>>,
-        layout: &Layout,
-    ) {
+    fn land_on(&mut self, row: usize, card: Option<Card>, layout: &Layout) {
         self.pane = Pane::Diff;
         self.selection = None;
         self.cursor = row;
-        self.set_focused_thread(thread);
+        self.set_focus(card);
         self.follow_cursor(layout);
         self.status.clear();
     }
 
-    /// The subset of threads that `}` and `{` stop at. Jumps cross files, so
+    /// The subset of cards that `}` and `{` stop at. Jumps cross files, so
     /// this anchors a file the layout has not laid out.
-    fn comment_stops(&self, index: usize) -> Vec<(usize, Arc<str>)> {
+    ///
+    /// A settled conversation is not what a review is being read for, so
+    /// resolved and outdated threads are skipped. Every draft is a stop: an
+    /// unsent remark is the one thing still waiting on the reader.
+    fn comment_stops(&self, index: usize) -> Vec<(usize, Card)> {
         let Some(file) = self.files.get(index) else {
             return Vec::new();
         };
@@ -1748,21 +1950,38 @@ impl App {
             .threads_by_path
             .get(&file.path)
             .map_or(&[][..], Vec::as_slice);
+        let drafts = self.drafts_for(&file.path);
 
-        rows::stops_for(file, threads)
+        rows::stops_for(file, threads, &drafts)
             .into_iter()
-            .map(|stop| (stop.source, &threads[stop.thread]))
-            .filter(|(_, thread)| !thread.is_resolved && !thread.is_outdated)
-            .map(|(row, thread)| (row, thread.id.clone()))
+            .filter(|stop| {
+                stop.card.thread().is_none_or(|id| {
+                    threads.iter().any(|thread| {
+                        thread.id == *id
+                            && !thread.is_resolved
+                            && !thread.is_outdated
+                    })
+                })
+            })
+            .map(|stop| (stop.source, stop.card))
             .collect()
     }
 
-    /// A focused thread that is not itself a stop (resolved or outdated) falls
+    /// The drafts filed against one file, in the order the row list indexes
+    /// them.
+    fn drafts_for(&self, path: &str) -> Vec<&Draft> {
+        self.drafts
+            .iter()
+            .filter(|draft| *draft.path == *path)
+            .collect()
+    }
+
+    /// A focused card that is not itself a stop (resolved or outdated) falls
     /// back to the cursor row, so the jump still moves in the right direction.
-    fn comment_stop_here(&self, direction: isize) -> Option<(usize, Arc<str>)> {
+    fn comment_stop_here(&self, direction: isize) -> Option<(usize, Card)> {
         let stops = self.comment_stops(self.selected_file);
-        let current = self.focused_thread.as_deref().and_then(|focused| {
-            stops.iter().position(|(_, id)| **id == *focused)
+        let current = self.focused_card.as_ref().and_then(|focused| {
+            stops.iter().position(|(_, card)| card == focused)
         });
 
         let target = match (current, direction > 0) {
@@ -1782,7 +2001,7 @@ impl App {
     fn comment_stop_elsewhere(
         &self,
         direction: isize,
-    ) -> Option<(usize, usize, Arc<str>)> {
+    ) -> Option<(usize, usize, Card)> {
         let visible = self.filtered_file_indices();
         let position = visible.iter().position(|&i| i == self.selected_file)?;
 
@@ -1804,34 +2023,41 @@ impl App {
         })
     }
 
-    fn set_focused_thread(&mut self, focused: Option<Arc<str>>) {
-        if self.focused_thread != focused {
-            self.expanded_thread = None;
+    fn set_focus(&mut self, focused: Option<Card>) {
+        if self.focused_card != focused {
+            self.expanded_card = None;
             self.thread_scroll = 0;
         }
-        self.focused_thread = focused;
+        self.focused_card = focused;
     }
 
-    /// The threads hanging under one source line, in the order `j` visits them.
-    fn thread_ids_at(&self, source: usize, layout: &Layout) -> Vec<Arc<str>> {
-        let threads = self.file_threads();
+    /// The focused thread, when the focus is on one rather than on a draft.
+    pub fn focused_thread(&self) -> Option<&str> {
+        self.focused_card.as_ref()?.thread().map(|id| &**id)
+    }
 
+    /// The focused draft, by the index the drafts are held at.
+    pub fn focused_draft(&self) -> Option<usize> {
+        self.draft_by_id(self.focused_card.as_ref()?.draft()?)
+    }
+
+    /// The cards hanging under one source line, in the order `j` visits them.
+    fn cards_at(layout: &Layout, source: usize) -> Vec<Card> {
         layout
             .rows
             .stops_at(source)
             .iter()
-            .map(|stop| threads[stop.thread].id.clone())
+            .map(|stop| stop.card.clone())
             .collect()
     }
 
     /// The row the cursor sits on: a focused thread's summary when one is
     /// focused, otherwise the source line itself.
     fn cursor_row(&self, layout: &Layout) -> usize {
-        let threads = self.file_threads();
-        let focused = self.focused_thread.as_deref().and_then(|id| {
-            let thread = threads.iter().position(|thread| *thread.id == *id)?;
-            layout.rows.summary_row(thread)
-        });
+        let focused = self
+            .focused_card
+            .as_ref()
+            .and_then(|card| layout.rows.card_row(card));
 
         focused.unwrap_or_else(|| layout.rows.code_row(self.cursor))
     }

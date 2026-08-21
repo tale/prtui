@@ -59,6 +59,9 @@ pub struct Submission {
     pub editor: CommentEditor,
     pub event: ReviewEvent,
     pub error: Option<String>,
+    /// Set by an escape that had a summary to lose. The next escape discards;
+    /// any other key clears it.
+    pub is_discard_armed: bool,
 }
 
 /// Work that has to leave the process. The app queues these rather than

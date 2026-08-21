@@ -187,8 +187,8 @@ fn build_rows(app: &App, diff: Rect) -> Rows {
         open.patch,
         open.threads,
         View {
-            focused: app.focused_thread.as_deref(),
-            expanded: app.expanded_thread.as_deref(),
+            focused: app.focused_card.as_ref(),
+            expanded: app.expanded_card.as_ref(),
             scroll: app.thread_scroll,
             width: diff.width as usize,
             window: rows::thread_window(diff.height as usize),

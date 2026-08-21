@@ -513,8 +513,9 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
             Row::Code { source, fragment } => {
                 code_line(&open, focus, *source, *fragment, width, theme)
             }
-            Row::Draft { draft } => draft_line(&open, *draft, width, theme),
-            Row::FileDraft => file_draft_line(&open, width, theme),
+            Row::Draft { draft } => {
+                draft_line(&open, focus, *draft, width, theme)
+            }
             Row::Heading { state, count } => {
                 heading_line(*state, *count, width, theme)
             }
@@ -781,12 +782,17 @@ const fn draft_tint(sync: &Sync, theme: Theme) -> Color {
     }
 }
 
-/// A pending remark of the reader's own, under the line it answers to, so a
-/// review can be read back before it ships rather than one draft at a time
+/// A pending remark of the reader's own, under the line it answers to — or, for
+/// one about the whole file, leading the pane the way GitHub draws them. A
+/// review can then be read back before it ships rather than one draft at a time
 /// through the editor. A refusal names its reason here: the gutter has room to
 /// say only that something went wrong.
+///
+/// It focuses and expands like any thread card, since it is a comment the same
+/// as any other. Expanded, it gives its one line up to the body underneath.
 fn draft_line(
     open: &OpenFile<'_>,
+    focus: Focus<'_>,
     index: usize,
     width: usize,
     theme: Theme,
@@ -796,74 +802,53 @@ fn draft_line(
     };
 
     let indent = card_indent(width);
-    let label = "draft";
+    let card_width = width.saturating_sub(indent);
+    let is_focused = focus.is_draft_focused(draft.id);
+    let is_expanded = focus.is_draft_expanded(draft.id);
+
+    let label = if draft.is_file_level() {
+        "file note"
+    } else {
+        "draft"
+    };
     let suffix = match &draft.sync {
         Sync::Synced => String::new(),
         Sync::Failed(error) => format!(" · {error}"),
         _ => " · saving".to_string(),
     };
-    let summary = comment_summary(&draft.body, theme);
+    let separator = if is_expanded { "" } else { "  " };
+    let summary = if is_expanded {
+        String::new()
+    } else {
+        comment_summary(&draft.body, theme)
+    };
+
     let tint = draft_tint(&draft.sync, theme);
-    let budget = width
-        .saturating_sub(indent)
-        .saturating_sub(text_width(label) + text_width(&suffix) + 4);
+    let marker = draft.sync.marker().trim();
+    let prefix = if is_expanded {
+        format!("{marker} ▾ ")
+    } else {
+        format!("{marker} ")
+    };
+
+    let fixed = text_width(&prefix)
+        + text_width(label)
+        + text_width(separator)
+        + text_width(&suffix);
+    let summary = truncate(&summary, card_width.saturating_sub(fixed));
 
     thread_card_line(
         indent,
         width,
         vec![
-            rows::card_span(
-                format!("{} ", draft.sync.marker().trim()),
-                tint,
-                Modifier::BOLD,
-                theme,
-            ),
+            rows::card_span(prefix, tint, Modifier::BOLD, theme),
             rows::card_span(label, theme.heading, Modifier::BOLD, theme),
-            rows::card_span("  ", theme.muted, Modifier::empty(), theme),
-            rows::card_span(
-                truncate(&summary, budget),
-                theme.code,
-                Modifier::empty(),
-                theme,
-            ),
+            rows::card_span(separator, theme.muted, Modifier::empty(), theme),
+            rows::card_span(summary, theme.code, Modifier::empty(), theme),
             rows::card_span(suffix, tint, Modifier::empty(), theme),
         ],
         theme,
-        false,
-    )
-}
-
-/// The pending remark about the file as a whole. It has no line to sit under, so
-/// it leads the pane and carries the draft marker the gutter uses elsewhere.
-fn file_draft_line(
-    open: &OpenFile<'_>,
-    width: usize,
-    theme: Theme,
-) -> Line<'static> {
-    let indent = card_indent(width);
-    let label = "file note";
-    let body = open.file_draft().unwrap_or_default();
-    let summary = comment_summary(body, theme);
-    let budget = width
-        .saturating_sub(indent)
-        .saturating_sub(text_width(label) + 4);
-
-    thread_card_line(
-        indent,
-        width,
-        vec![
-            rows::card_span("✎ ", theme.orange, Modifier::BOLD, theme),
-            rows::card_span(label, theme.heading, Modifier::BOLD, theme),
-            rows::card_span("  ", theme.muted, Modifier::empty(), theme),
-            rows::card_span(
-                truncate(&summary, budget),
-                theme.code,
-                Modifier::empty(),
-                theme,
-            ),
-        ],
-        theme,
-        false,
+        is_focused,
     )
 }
 
@@ -1127,7 +1112,21 @@ fn draw_composer(frame: &mut Frame, app: &App, layout: &Layout) {
         }
     };
 
-    let block = docked_block(title, theme.orange);
+    let (row, column) = composer.editor.cursor();
+    let position = format!(
+        " ln {} · col {} ",
+        row + 1,
+        composer.editor.lines()[row][..column].chars().count() + 1
+    );
+    let (footer, footer_color) = if composer.is_discard_armed {
+        (" esc again to discard ".to_string(), theme.danger)
+    } else {
+        (position, theme.dim)
+    };
+
+    let block = docked_block(title, theme.orange).title_bottom(
+        Line::styled(footer, Style::default().fg(footer_color)).right_aligned(),
+    );
     let inner = block.inner(rect);
 
     frame.render_widget(Clear, rect);
@@ -1153,6 +1152,10 @@ fn docked_block<'a>(title: String, color: Color) -> Block<'a> {
 
 /// Draws a multiline editor with its long lines folded rather than scrolled
 /// sideways, and parks the terminal cursor where the next character will land.
+///
+/// The row being typed on is painted across the full width as well. A blinking
+/// cell is easy to lose against a wall of text, and a docked editor sits under
+/// a diff that carries a cursor bar of its own.
 fn draw_editor_body(
     frame: &mut Frame,
     editor: &crate::app::editor::CommentEditor,
@@ -1178,28 +1181,59 @@ fn draw_editor_body(
         return;
     }
 
-    let wrapped = wrap::Wrapped::new(lines, area.width as usize);
+    let width = area.width as usize;
+    let wrapped = wrap::Wrapped::new(lines, width);
     let (line, byte) = editor.cursor();
     let (cursor_row, cursor_column) = wrapped.locate(line, byte);
 
     // Folding means the cursor can only ever leave the viewport vertically.
     let height = area.height as usize;
-    let first_row = cursor_row.saturating_sub(height.saturating_sub(1));
+    let first_row = editor_scroll(cursor_row, wrapped.rows().len(), height);
     let visible: Vec<Line> = wrapped
         .rows()
         .iter()
+        .enumerate()
         .skip(first_row)
         .take(height)
-        .map(|row| {
-            Line::styled(wrapped.text(*row), Style::default().fg(theme.code))
+        .map(|(index, row)| {
+            let text = wrapped.text(*row);
+            let style = if index == cursor_row {
+                Style::default().fg(theme.code).bg(theme.cursor)
+            } else {
+                Style::default().fg(theme.code)
+            };
+            let padding = width.saturating_sub(text_width(text));
+
+            Line::from(vec![
+                Span::styled(text.to_string(), style),
+                Span::styled(" ".repeat(padding), style),
+            ])
         })
         .collect();
 
     frame.render_widget(Paragraph::new(visible), area);
     frame.set_cursor_position((
-        area.x + cursor_column as u16,
+        area.x + cursor_column.min(width.saturating_sub(1)) as u16,
         area.y + (cursor_row - first_row) as u16,
     ));
+}
+
+/// First visual row of an editor whose text has outgrown its box.
+///
+/// The view holds no scroll of its own, so this is a function of where the
+/// cursor is. Keeping it near the middle rather than pinned to the last row
+/// leaves the lines below it readable while they are being written.
+const fn editor_scroll(cursor: usize, total: usize, height: usize) -> usize {
+    if total <= height || height == 0 {
+        return 0;
+    }
+
+    let centred = cursor.saturating_sub(height / 2);
+    if centred > total - height {
+        total - height
+    } else {
+        centred
+    }
 }
 
 /// The verdict reads as three chips because the review has to be sendable
@@ -1252,7 +1286,17 @@ fn draw_submit(frame: &mut Frame, app: &App, layout: &Layout) {
         count => format!(" submit review · {count} drafts "),
     };
 
-    let block = docked_block(title, theme.accent);
+    let block = if submission.is_discard_armed {
+        docked_block(title, theme.accent).title_bottom(
+            Line::styled(
+                " esc again to discard ",
+                Style::default().fg(theme.danger),
+            )
+            .right_aligned(),
+        )
+    } else {
+        docked_block(title, theme.accent)
+    };
     let inner = block.inner(rect);
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
@@ -1484,12 +1528,38 @@ fn draw_key_hints(
         (Mode::Search, _) => {
             &[("↑↓", "step"), ("↵", "accept"), ("esc", "cancel")]
         }
-        (Mode::Submit, _) => {
-            &[("⇥", "verdict"), ("↵", "send"), ("esc", "cancel")]
-        }
-        (Mode::Insert, _) => {
-            &[("↵", "save"), ("⇧↵", "newline"), ("esc", "cancel")]
-        }
+        (Mode::Submit, _) => &[
+            ("⇥", "verdict"),
+            ("↵", "send"),
+            (
+                "esc",
+                if app
+                    .submission
+                    .as_ref()
+                    .is_some_and(|submission| submission.is_discard_armed)
+                {
+                    "discard"
+                } else {
+                    "close"
+                },
+            ),
+        ],
+        (Mode::Insert, _) => &[
+            ("↵", "save"),
+            ("⇧↵", "newline"),
+            (
+                "esc",
+                if app
+                    .composer
+                    .as_ref()
+                    .is_some_and(|composer| composer.is_discard_armed)
+                {
+                    "discard"
+                } else {
+                    "close"
+                },
+            ),
+        ],
         (Mode::Visual, _) => {
             &[("j/k", "extend"), ("c", "comment"), ("esc", "cancel")]
         }
@@ -1503,10 +1573,10 @@ fn draw_key_hints(
                 ("/", "filter")
             },
         ],
-        (Mode::Normal, Pane::Diff) if app.focused_thread.is_some() => &[
+        (Mode::Normal, Pane::Diff) if app.focused_draft().is_some() => &[
             (
                 "j/k",
-                if app.expanded_thread.is_some() {
+                if app.expanded_card.is_some() {
                     "scroll"
                 } else {
                     "move"
@@ -1514,11 +1584,28 @@ fn draw_key_hints(
             ),
             (
                 "↵",
-                if app
-                    .focused_thread
-                    .as_deref()
-                    .is_some_and(|id| app.is_thread_expanded(id))
-                {
+                if app.expanded_card.is_some() {
+                    "collapse"
+                } else {
+                    "expand"
+                },
+            ),
+            ("e", "edit"),
+            ("d", "discard"),
+            ("esc", "code"),
+        ],
+        (Mode::Normal, Pane::Diff) if app.focused_card.is_some() => &[
+            (
+                "j/k",
+                if app.expanded_card.is_some() {
+                    "scroll"
+                } else {
+                    "move"
+                },
+            ),
+            (
+                "↵",
+                if app.expanded_card.is_some() {
                     "collapse"
                 } else {
                     "expand"
@@ -1535,6 +1622,7 @@ fn draw_key_hints(
         ],
         (Mode::Normal, Pane::Diff) if !app.drafts.is_empty() => &[
             ("c", "comment"),
+            ("C", "file note"),
             ("e", "edit"),
             ("d", "discard"),
             ("s", "submit"),
