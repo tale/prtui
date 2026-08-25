@@ -119,7 +119,8 @@ src/
     effect.rs       one Effect enum
     focus.rs        cursor, pane, focused/expanded thread
     find.rs         filter + search (one concept, two targets)
-    drafts.rs  review.rs  editor.rs  keymap.rs  input.rs  mode.rs
+    drafts.rs  review.rs  editor.rs  mode.rs
+    keys.rs    keymap.rs  command.rs  ex.rs  input.rs
   layout/
     mod.rs          Layout::compute -> rects, viewports, rows
     rows.rs         Row enum + build() -> Vec<Row>         <- the key abstraction

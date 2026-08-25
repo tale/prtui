@@ -1388,6 +1388,7 @@ fn draw_bottom_bar(
         Mode::Insert => theme.success,
         Mode::Filter => theme.purple,
         Mode::Search => theme.warning,
+        Mode::CommandLine => theme.muted,
         Mode::Submit => theme.heading,
     };
 
@@ -1437,17 +1438,28 @@ fn draw_bottom_bar(
         Span::styled(pane, bar.fg(theme.dim)),
     ];
 
-    let mut search_column = None;
-    if let Some(editor) = app.search.as_ref() {
+    // The `:` line and the search box are the same widget in the same place,
+    // so an open command line covers the query rather than sitting beside it.
+    let prompt = app.command_line.as_ref().map_or_else(
+        || {
+            app.search
+                .as_ref()
+                .map(|editor| ('/', editor, theme.warning))
+        },
+        |editor| Some((':', editor, theme.accent)),
+    );
+
+    let mut prompt_column = None;
+    if let Some((sigil, editor, color)) = prompt {
         let query = editor.lines()[0].clone();
         let (_, cursor_byte) = editor.cursor();
 
-        search_column = Some(
+        prompt_column = Some(
             Line::from(spans.clone()).width()
                 + 3
                 + text_width(&query[..cursor_byte]),
         );
-        spans.push(Span::styled("  /", bar.fg(theme.warning)));
+        spans.push(Span::styled(format!("  {sigil}"), bar.fg(color)));
         spans.push(Span::styled(query, bar.fg(theme.heading)));
     }
 
@@ -1515,9 +1527,9 @@ fn draw_bottom_bar(
     let left_width = left.width();
     frame.render_widget(Paragraph::new(left), area);
 
-    if app.mode == Mode::Search
+    if matches!(app.mode, Mode::Search | Mode::CommandLine)
         && let Some(column) =
-            search_column.filter(|column| *column < area.width as usize)
+            prompt_column.filter(|column| *column < area.width as usize)
     {
         frame.set_cursor_position((area.x + column as u16, area.y));
     }
@@ -1540,6 +1552,12 @@ fn draw_key_hints(
         (Mode::Search, _) => {
             &[("↑↓", "step"), ("↵", "accept"), ("esc", "cancel")]
         }
+        (Mode::CommandLine, _) => &[
+            (":42", "line"),
+            ("↑↓", "history"),
+            ("↵", "run"),
+            ("esc", "cancel"),
+        ],
         (Mode::Submit, _) => &[
             ("⇥", "verdict"),
             ("↵", "send"),

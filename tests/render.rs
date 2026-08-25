@@ -1355,6 +1355,17 @@ fn the_selection_counts_one_row_in_the_singular() {
 /// The bar used to read `1/4 · 1/8`, which counted two things and named
 /// neither.
 #[test]
+fn the_command_line_takes_the_bottom_bar_while_it_is_open() {
+    let mut app = load();
+    press(&mut app, ":42");
+
+    let rendered = draw(&app);
+    assert!(rendered.contains("COMMAND"), "{rendered}");
+    assert!(rendered.contains(":42"), "{rendered}");
+    assert!(rendered.contains("history"), "{rendered}");
+}
+
+#[test]
 fn the_status_bar_says_what_its_ratios_count() {
     let app = load();
     let rendered = draw(&app);

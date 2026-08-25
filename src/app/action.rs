@@ -9,6 +9,9 @@ pub enum Motion {
     HalfPageUp,
     Top,
     Bottom,
+    /// A line by the number the gutter shows, which is the new side of the
+    /// diff, or a row of the tree when the files pane has the cursor.
+    Line(usize),
 }
 
 /// The application's verb vocabulary.
@@ -19,12 +22,14 @@ pub enum Motion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Move(Motion),
-    NextFile,
-    PrevFile,
+    /// Counts say how many stops to take. Every command that repeats carries
+    /// one, so a count prefix means the same thing wherever it is typed.
+    NextFile(usize),
+    PrevFile(usize),
     /// Jump to the next/previous unresolved thread, crossing into the
     /// following file with comments once the current one runs out.
-    NextComment,
-    PrevComment,
+    NextComment(usize),
+    PrevComment(usize),
     TogglePane,
     ToggleTree,
     Activate,
@@ -36,12 +41,15 @@ pub enum Action {
     StartFind,
     /// Drops whichever find state is live, leaving the view where it is.
     ClearFind,
+    /// Back out of the innermost thing the reader is inside. Which one that is
+    /// is a fact about app state, so the app decides rather than the keymap.
+    Escape,
     AcceptFileFilter,
     CancelFileFilter,
     AcceptSearch,
     CancelSearch,
-    NextMatch,
-    PrevMatch,
+    NextMatch(usize),
+    PrevMatch(usize),
 
     EnterVisual,
     LeaveVisual,
@@ -71,6 +79,13 @@ pub enum Action {
     CancelSubmit,
     /// Step the verdict the review will carry.
     CycleEvent(isize),
+
+    /// Open the `:` line, run what was typed into it, or drop it.
+    StartCommandLine,
+    RunCommandLine,
+    CancelCommandLine,
+    /// Walk the command history back (-1) or forward (1).
+    WalkHistory(isize),
 
     Quit,
 }

@@ -1,8 +1,11 @@
 pub mod action;
+pub mod command;
 pub mod draft;
 pub mod editor;
+pub mod ex;
 pub mod input;
 pub mod keymap;
+pub mod keys;
 pub mod mode;
 pub mod review;
 pub mod search;
@@ -22,6 +25,7 @@ use search::Query;
 use std::collections::{HashMap, HashSet};
 use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
+use termina::event::KeyEvent;
 
 /// Syntax colors for one file: the segments of each of its lines.
 pub type Highlight = Vec<Vec<Segment>>;
@@ -302,6 +306,8 @@ pub struct App {
     sending: Option<Submission>,
     pub file_filter: Option<CommentEditor>,
     pub search: Option<CommentEditor>,
+    /// The `:` line, while one is open.
+    pub command_line: Option<CommentEditor>,
     pub selected_file: usize,
     /// Directories the reader has folded away, keyed by path with its trailing
     /// slash. Held here rather than in the tree so a fold survives a refetch.
@@ -349,6 +355,10 @@ pub struct App {
     recolor: Vec<Arc<str>>,
     filter_snapshot: Option<FileFilterSnapshot>,
     search_origin: Option<SearchOrigin>,
+    /// Every `:` line run this session, oldest first.
+    command_history: Vec<String>,
+    /// How far back through the history the open `:` line has been walked.
+    history_cursor: Option<usize>,
     files_state: FilesState,
 }
 
@@ -380,6 +390,7 @@ impl App {
             sending: None,
             file_filter: None,
             search: None,
+            command_line: None,
             selected_file: 0,
             collapsed: HashSet::new(),
             tree_directory: None,
@@ -403,6 +414,8 @@ impl App {
             recolor: Vec::new(),
             filter_snapshot: None,
             search_origin: None,
+            command_history: Vec::new(),
+            history_cursor: None,
             files_state: FilesState::Loading,
         }
     }
@@ -878,16 +891,21 @@ impl App {
             Action::FocusDiff => self.focus_diff(),
             Action::StartFind => self.start_find(),
             Action::ClearFind => self.clear_find(),
+            Action::Escape => self.escape(),
             Action::AcceptFileFilter => self.accept_file_filter(),
             Action::CancelFileFilter => self.cancel_file_filter(),
             Action::AcceptSearch => self.accept_search(layout),
             Action::CancelSearch => self.cancel_search(),
-            Action::NextMatch => self.jump_match(1, layout),
-            Action::PrevMatch => self.jump_match(-1, layout),
-            Action::NextFile => self.step_file(1, layout),
-            Action::PrevFile => self.step_file(-1, layout),
-            Action::NextComment => self.jump_comment(1, layout),
-            Action::PrevComment => self.jump_comment(-1, layout),
+            Action::NextMatch(count) => self.jump_match(1, count, layout),
+            Action::PrevMatch(count) => self.jump_match(-1, count, layout),
+            Action::NextFile(count) => self.step_file(1, count, layout),
+            Action::PrevFile(count) => self.step_file(-1, count, layout),
+            Action::NextComment(count) => {
+                self.jump_comment(1, count, layout);
+            }
+            Action::PrevComment(count) => {
+                self.jump_comment(-1, count, layout);
+            }
             Action::Move(motion) => self.travel(motion, layout),
 
             Action::EnterVisual => {
@@ -920,6 +938,11 @@ impl App {
                     submission.event = submission.event.step(direction);
                 }
             }
+
+            Action::StartCommandLine => self.start_command_line(),
+            Action::RunCommandLine => self.run_command_line(layout),
+            Action::CancelCommandLine => self.cancel_command_line(),
+            Action::WalkHistory(direction) => self.walk_history(direction),
         }
     }
 
@@ -1410,6 +1433,148 @@ impl App {
         }
     }
 
+    /// Backs out of the innermost thing the reader is inside: the conversation
+    /// holding the focus, then a live query, then the app itself.
+    fn escape(&mut self) {
+        if self.focused_card.is_some() {
+            self.set_focus(None);
+            return;
+        }
+
+        if self.file_filter.is_some() || self.search.is_some() {
+            self.clear_find();
+            return;
+        }
+
+        self.should_quit = true;
+    }
+
+    fn start_command_line(&mut self) {
+        self.command_line = Some(CommentEditor::default());
+        self.history_cursor = None;
+        self.status.clear();
+        self.mode = Mode::CommandLine;
+    }
+
+    fn cancel_command_line(&mut self) {
+        self.command_line = None;
+        self.history_cursor = None;
+        self.mode = Mode::Normal;
+    }
+
+    /// Runs the line and hands the action straight back to `apply`, so a `:`
+    /// command and the key bound to the same name take the same path.
+    fn run_command_line(&mut self, layout: &Layout) {
+        let Some(editor) = self.command_line.take() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+
+        self.history_cursor = None;
+        self.mode = Mode::Normal;
+        let line = editor.text();
+        if self.command_history.last() != Some(&line) && !line.trim().is_empty()
+        {
+            self.command_history.push(line.clone());
+        }
+
+        match ex::parse(&line) {
+            Ok(Some(action)) => self.apply(&action, layout),
+            Ok(None) => {}
+            Err(message) => self.status = message,
+        }
+    }
+
+    /// Walks the `:` line back through what has been run before. Walking past
+    /// the newest entry leaves an empty line, the way Vim does.
+    fn walk_history(&mut self, direction: isize) {
+        if self.command_history.is_empty() {
+            return;
+        }
+
+        let last = self.command_history.len() - 1;
+        let target = match (self.history_cursor, direction) {
+            (None, -1) => Some(last),
+            (None, _) => None,
+            (Some(0), -1) => Some(0),
+            (Some(index), -1) => Some(index - 1),
+            (Some(index), _) if index == last => None,
+            (Some(index), _) => Some(index + 1),
+        };
+
+        let text = target.map_or("", |index| &self.command_history[index]);
+        let mut editor = CommentEditor::default();
+        editor.set_text(text);
+        self.command_line = Some(editor);
+        self.history_cursor = target;
+    }
+
+    /// Feeds a key to whichever line the mode is editing. One route for the
+    /// five of them, so the router stays a router.
+    pub fn type_key(&mut self, key: KeyEvent, layout: &Layout) -> bool {
+        self.edit_prompt(layout, |editor| {
+            editor.handle_key(key);
+        })
+    }
+
+    pub fn type_text(&mut self, text: &str, layout: &Layout) -> bool {
+        // Every prompt but the composer holds a single line.
+        let body = if self.mode == Mode::Insert {
+            text.to_owned()
+        } else {
+            text.replace(['\r', '\n'], "")
+        };
+
+        self.edit_prompt(layout, |editor| editor.insert_text(&body))
+    }
+
+    fn edit_prompt(
+        &mut self,
+        layout: &Layout,
+        edit: impl FnOnce(&mut CommentEditor),
+    ) -> bool {
+        match self.mode {
+            Mode::Insert => {
+                let Some(composer) = self.composer.as_mut() else {
+                    return false;
+                };
+                composer.is_discard_armed = false;
+                edit(&mut composer.editor);
+            }
+            Mode::Submit => {
+                let Some(submission) = self.submission.as_mut() else {
+                    return false;
+                };
+                submission.is_discard_armed = false;
+                edit(&mut submission.editor);
+            }
+            Mode::Filter => {
+                let Some(filter) = self.file_filter.as_mut() else {
+                    return false;
+                };
+                edit(filter);
+                self.sync_file_filter();
+            }
+            Mode::Search => {
+                let Some(search) = self.search.as_mut() else {
+                    return false;
+                };
+                edit(search);
+                self.sync_search(layout);
+            }
+            Mode::CommandLine => {
+                let Some(line) = self.command_line.as_mut() else {
+                    return false;
+                };
+                edit(line);
+                self.history_cursor = None;
+            }
+            Mode::Normal | Mode::Visual => return false,
+        }
+
+        true
+    }
+
     fn clear_find(&mut self) {
         if self.pane == Pane::Diff && self.search.is_some() {
             self.search = None;
@@ -1633,7 +1798,7 @@ impl App {
         })
     }
 
-    fn jump_match(&mut self, direction: isize, layout: &Layout) {
+    fn jump_match(&mut self, direction: isize, count: usize, layout: &Layout) {
         let Some(query) = self.search_query().filter(|query| !query.is_empty())
         else {
             self.status = "no search pattern".into();
@@ -1646,23 +1811,25 @@ impl App {
             return;
         }
 
-        // Searching is file-local, so both ends wrap rather than spilling into
-        // the next file the way comment jumps do.
-        let target = match self.match_position(&matches) {
-            Some(index) if direction > 0 => (index + 1) % matches.len(),
-            Some(index) => (index + matches.len() - 1) % matches.len(),
-            None if direction > 0 => matches
-                .iter()
-                .position(|hit| hit.row() >= self.cursor)
-                .unwrap_or(0),
-            None => matches
-                .iter()
-                .rposition(|hit| hit.row() <= self.cursor)
-                .unwrap_or(matches.len() - 1),
-        };
+        for _ in 0..count {
+            // Searching is file-local, so both ends wrap rather than spilling
+            // into the next file the way comment jumps do.
+            let target = match self.match_position(&matches) {
+                Some(index) if direction > 0 => (index + 1) % matches.len(),
+                Some(index) => (index + matches.len() - 1) % matches.len(),
+                None if direction > 0 => matches
+                    .iter()
+                    .position(|hit| hit.row() >= self.cursor)
+                    .unwrap_or(0),
+                None => matches
+                    .iter()
+                    .rposition(|hit| hit.row() <= self.cursor)
+                    .unwrap_or(matches.len() - 1),
+            };
 
-        let hit = matches[target].clone();
-        self.land_on(hit.row(), hit.card(), layout);
+            let hit = matches[target].clone();
+            self.land_on(hit.row(), hit.card(), layout);
+        }
     }
 
     pub fn filter_query(&self) -> Option<String> {
@@ -1949,7 +2116,7 @@ impl App {
 
     /// `]` and `[` walk files only, skipping the headings `j` stops on, and in
     /// the order the tree lists them rather than the order GitHub sent them.
-    fn step_file(&mut self, direction: isize, layout: &Layout) {
+    fn step_file(&mut self, direction: isize, count: usize, layout: &Layout) {
         let files: Vec<usize> = layout.files.files().collect();
         let Some(position) =
             files.iter().position(|&index| index == self.selected_file)
@@ -1957,8 +2124,10 @@ impl App {
             return;
         };
 
+        let steps =
+            direction.saturating_mul(count.min(files.len()).cast_signed());
         let target = position
-            .saturating_add_signed(direction)
+            .saturating_add_signed(steps)
             .min(files.len().saturating_sub(1));
         self.select_file(files[target]);
     }
@@ -1991,8 +2160,12 @@ impl App {
         // to scroll. Once it runs out the motion carries on into the diff, so
         // the pane reads as one list and a short conversation never swallows a
         // keypress. Visual mode overrides all of it, since a selection is being
-        // extended over code.
-        if self.mode != Mode::Visual && self.expanded_card.is_some() {
+        // extended over code. A line number is not a scroll offset either, so
+        // it addresses the file however the cursor is parked.
+        if self.mode != Mode::Visual
+            && self.expanded_card.is_some()
+            && !matches!(motion, Motion::Line(_))
+        {
             let limit = layout.rows.body_limit();
             let target = step(motion, self.thread_scroll, limit + 1, viewport);
 
@@ -2007,7 +2180,10 @@ impl App {
         }
 
         if self.mode == Mode::Visual {
-            self.cursor = step(motion, self.cursor, self.diff_len(), viewport);
+            self.cursor = match motion {
+                Motion::Line(number) => self.row_of_line(number),
+                _ => step(motion, self.cursor, self.diff_len(), viewport),
+            };
         } else {
             match motion {
                 Motion::Down(n) => self.move_diff_stops(1, n, layout),
@@ -2024,6 +2200,10 @@ impl App {
                 }
                 Motion::Bottom => {
                     self.cursor = self.diff_len().saturating_sub(1);
+                    self.set_focus(None);
+                }
+                Motion::Line(number) => {
+                    self.cursor = self.row_of_line(number);
                     self.set_focus(None);
                 }
             }
@@ -2057,6 +2237,36 @@ impl App {
             }
             None => {}
         }
+    }
+
+    /// The diff row a line number names, counted the way the gutter shows it.
+    ///
+    /// The new side is what a reviewer reads off the screen, so it is tried
+    /// first; a line only the old side has still resolves, and a number the
+    /// patch never shows lands on the nearest row below it.
+    fn row_of_line(&self, number: usize) -> usize {
+        let Some(file) = self.current_file() else {
+            return 0;
+        };
+        let wanted = u32::try_from(number).unwrap_or(u32::MAX);
+        let last = file.lines.len().saturating_sub(1);
+
+        let found = file
+            .lines
+            .iter()
+            .position(|line| line.new_line == Some(wanted))
+            .or_else(|| {
+                file.lines
+                    .iter()
+                    .position(|line| line.old_line == Some(wanted))
+            })
+            .or_else(|| {
+                file.lines.iter().position(|line| {
+                    line.new_line.is_some_and(|shown| shown > wanted)
+                })
+            });
+
+        found.unwrap_or(last)
     }
 
     /// Which row the tree cursor is on: the heading it rests on, or the row of
@@ -2163,20 +2373,35 @@ impl App {
         true
     }
 
-    fn jump_comment(&mut self, direction: isize, layout: &Layout) {
+    fn jump_comment(
+        &mut self,
+        direction: isize,
+        count: usize,
+        layout: &Layout,
+    ) {
+        for _ in 0..count {
+            if !self.jump_comment_once(direction, layout) {
+                return;
+            }
+        }
+    }
+
+    /// Returns whether there was a conversation left to land on.
+    fn jump_comment_once(&mut self, direction: isize, layout: &Layout) -> bool {
         if let Some((row, card)) = self.comment_stop_here(direction) {
             self.land_on(row, Some(card), layout);
-            return;
+            return true;
         }
 
         let Some((index, row, card)) = self.comment_stop_elsewhere(direction)
         else {
             self.status = "no more comments".into();
-            return;
+            return false;
         };
 
         self.set_selected_file(index, false);
         self.land_on(row, Some(card), layout);
+        true
     }
 
     /// Puts the cursor on a diff row, optionally focusing one of its cards,
@@ -2356,5 +2581,6 @@ fn step(motion: Motion, current: usize, len: usize, viewport: usize) -> usize {
         Motion::HalfPageUp => current.saturating_sub(viewport / 2),
         Motion::Top => 0,
         Motion::Bottom => last,
+        Motion::Line(number) => number.saturating_sub(1).min(last),
     }
 }

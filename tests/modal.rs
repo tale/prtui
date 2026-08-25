@@ -208,6 +208,150 @@ fn count_prefix_multiplies_a_motion() {
     assert_eq!(app.cursor, app.diff_len() - 1);
 }
 
+/// Types a `:` line and runs it, the way a reader would.
+fn ex(app: &mut App, line: &str) {
+    let input = &mut InputRouter::default();
+    send(
+        input,
+        app,
+        KeyEvent::new(KeyCode::Char(':'), Modifiers::NONE),
+    );
+    for c in line.chars() {
+        send(input, app, KeyEvent::new(KeyCode::Char(c), Modifiers::NONE));
+    }
+    send(input, app, KeyEvent::new(KeyCode::Enter, Modifiers::NONE));
+}
+
+/// A count belongs to the keymap rather than to `j` and `k`, so every command
+/// that repeats answers to one.
+#[test]
+fn a_count_repeats_the_command_it_precedes() {
+    for (stepwise, counted) in [("]]", "2]"), ("}}", "2}")] {
+        let mut one = load();
+        let mut many = load();
+        one.selected_file = 0;
+        many.selected_file = 0;
+
+        press(&mut one, stepwise);
+        press(&mut many, counted);
+
+        assert_eq!(one.selected_file, many.selected_file, "{counted}");
+        assert_eq!(one.cursor, many.cursor, "{counted}");
+        assert_eq!(one.focused_card, many.focused_card, "{counted}");
+    }
+}
+
+/// `{n}G`, `{n}gg` and `:{n}` all name the line the gutter shows, which is the
+/// new side of the diff rather than the row the renderer happens to put it on.
+#[test]
+fn a_line_number_lands_on_the_line_the_gutter_shows() {
+    let mut app = load();
+    let file = app.current_file().unwrap();
+    let (row, number) = file
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(row, line)| Some((row, line.new_line?)))
+        .nth(6)
+        .expect("the fixture has numbered lines");
+
+    ex(&mut app, &number.to_string());
+    assert_eq!(app.cursor, row);
+
+    app.cursor = 0;
+    press(&mut app, &format!("{number}G"));
+    assert_eq!(app.cursor, row);
+
+    app.cursor = 0;
+    press(&mut app, &format!("{number}gg"));
+    assert_eq!(app.cursor, row);
+
+    // Without a count both keys still mean the ends of the file.
+    press(&mut app, "G");
+    assert_eq!(app.cursor, app.diff_len() - 1);
+    press(&mut app, "gg");
+    assert_eq!(app.cursor, 0);
+}
+
+/// A line past the end of the patch has to land somewhere sane rather than
+/// being refused.
+#[test]
+fn a_line_number_past_the_file_lands_on_its_last_row() {
+    let mut app = load();
+
+    ex(&mut app, "99999");
+    assert_eq!(app.cursor, app.diff_len() - 1);
+}
+
+/// The command line and the keys share one vocabulary, so `:` reaches every
+/// command whether or not a key carries it.
+#[test]
+fn the_command_line_runs_the_commands_the_keys_are_bound_to() {
+    let mut app = load();
+    ex(&mut app, "submit");
+    assert_eq!(app.mode, Mode::Submit);
+    act(&mut app, &Action::CancelSubmit);
+
+    let mut app = load();
+    ex(&mut app, "w");
+    assert!(app.submission.is_some());
+
+    let mut app = load();
+    ex(&mut app, "q");
+    assert!(app.should_quit);
+
+    let mut app = load();
+    ex(&mut app, "nope");
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.status, "not a command: nope");
+    assert!(!app.should_quit);
+}
+
+#[test]
+fn the_command_line_can_be_left_without_running_anything() {
+    let mut app = load();
+    let mut input = InputRouter::default();
+
+    press(&mut app, ":q");
+    assert_eq!(app.mode, Mode::CommandLine);
+
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
+    );
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.command_line.is_none());
+    assert!(!app.should_quit);
+}
+
+/// What was run before is one key away, since a `:` line is usually retyped
+/// rather than composed.
+#[test]
+fn the_command_line_remembers_what_was_run() {
+    let mut app = load();
+    ex(&mut app, "12");
+    ex(&mut app, "nope");
+
+    let mut input = InputRouter::default();
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Char(':'), Modifiers::NONE),
+    );
+    let up = KeyEvent::new(KeyCode::Up, Modifiers::NONE);
+    let down = KeyEvent::new(KeyCode::Down, Modifiers::NONE);
+
+    send(&mut input, &mut app, up);
+    assert_eq!(app.command_line.as_ref().unwrap().text(), "nope");
+    send(&mut input, &mut app, up);
+    assert_eq!(app.command_line.as_ref().unwrap().text(), "12");
+    send(&mut input, &mut app, down);
+    assert_eq!(app.command_line.as_ref().unwrap().text(), "nope");
+    send(&mut input, &mut app, down);
+    assert_eq!(app.command_line.as_ref().unwrap().text(), "");
+}
+
 #[test]
 fn gg_needs_both_keys() {
     let mut app = load();
@@ -238,7 +382,6 @@ fn z_opens_hidden_lines_the_way_it_opens_folds() {
         for c in keys.chars() {
             last = keymap.resolve(
                 Mode::Normal,
-                false,
                 KeyEvent::new(KeyCode::Char(c), Modifiers::NONE),
             );
         }
@@ -272,7 +415,6 @@ fn z_opens_hidden_lines_the_way_it_opens_folds() {
     assert_eq!(
         keymap.resolve(
             Mode::Normal,
-            false,
             KeyEvent::new(KeyCode::Char('z'), Modifiers::NONE)
         ),
         Resolution::Pending
@@ -289,10 +431,7 @@ fn z_is_not_bound_outside_normal_mode() {
     let mut keymap = Keymap::default();
     let key = KeyEvent::new(KeyCode::Char('z'), Modifiers::NONE);
 
-    assert_eq!(
-        keymap.resolve(Mode::Visual, false, key),
-        Resolution::Unbound
-    );
+    assert_eq!(keymap.resolve(Mode::Visual, key), Resolution::Unbound);
 }
 
 #[test]
@@ -302,10 +441,7 @@ fn leading_zero_is_unbound_and_does_not_start_a_count() {
     let key = KeyEvent::new(KeyCode::Char('0'), Modifiers::NONE);
 
     // Leading zero must not start a count that swallows the next motion.
-    assert_eq!(
-        keymap.resolve(Mode::Normal, false, key),
-        Resolution::Unbound
-    );
+    assert_eq!(keymap.resolve(Mode::Normal, key), Resolution::Unbound);
     press(&mut app, "j");
     assert_eq!(app.cursor, 1);
 }
@@ -425,7 +561,7 @@ fn escape_returns_from_a_thread_to_its_source_line() {
     let mut input = InputRouter::default();
     assert_eq!(
         send(&mut input, &mut app, KeyCode::Escape.into()),
-        DispatchResult::Applied(Action::LeaveThread)
+        DispatchResult::Applied(Action::Escape)
     );
     assert_eq!(app.cursor, source_row);
     assert!(app.focused_card.is_none());
@@ -821,6 +957,7 @@ fn ctrl_c_quits_from_every_mode() {
         Mode::Insert,
         Mode::Filter,
         Mode::Search,
+        Mode::CommandLine,
         Mode::Submit,
     ] {
         let mut app = load();
@@ -836,6 +973,7 @@ fn ctrl_c_quits_from_every_mode() {
                 press(&mut app, "/");
             }
             Mode::Search => press(&mut app, "/"),
+            Mode::CommandLine => press(&mut app, ":"),
             Mode::Submit => press(&mut app, "s"),
         }
         assert_eq!(app.mode, mode);
@@ -859,7 +997,7 @@ fn escape_and_ctrl_bracket_quit_from_normal_mode() {
         let mut input = InputRouter::default();
         assert_eq!(
             send(&mut input, &mut app, key),
-            DispatchResult::Applied(Action::Quit)
+            DispatchResult::Applied(Action::Escape)
         );
         assert!(app.should_quit);
     }
@@ -1012,17 +1150,16 @@ fn escape_clears_a_committed_filter_before_quitting() {
         paste(&mut input, &mut app, "auth_check");
         send(&mut input, &mut app, KeyCode::Enter.into());
 
+        // One key, one action: which of the three it did is a fact about the
+        // app, so the state is what says so.
         assert_eq!(
             send(&mut input, &mut app, clear),
-            DispatchResult::Applied(Action::ClearFind)
+            DispatchResult::Applied(Action::Escape)
         );
         assert!(app.file_filter.is_none());
         assert!(!app.should_quit);
 
-        assert_eq!(
-            send(&mut input, &mut app, clear),
-            DispatchResult::Applied(Action::Quit)
-        );
+        send(&mut input, &mut app, clear);
         assert!(app.should_quit);
     }
 }
@@ -2159,7 +2296,7 @@ fn jumping_between_comments_stops_on_drafts() {
     app.cursor = 0;
     act(&mut app, &Action::LeaveThread);
 
-    act(&mut app, &Action::NextComment);
+    act(&mut app, &Action::NextComment(1));
     assert_eq!(app.focused_card, Some(card));
 }
 
