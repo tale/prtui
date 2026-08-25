@@ -1,4 +1,5 @@
 pub mod app;
+pub mod expand;
 pub mod gh;
 pub mod layout;
 pub mod model;

@@ -4,6 +4,7 @@ use prtui::app::input::DispatchResult;
 use prtui::app::input::InputRouter;
 use prtui::app::review::{Failure, Request, Sent};
 use prtui::app::{App, Card, Pane};
+use prtui::expand::{Place, Reveal, STEP};
 use prtui::layout::Layout;
 use prtui::layout::rows::{GUTTER, Row};
 use prtui::model::{LineKind, Side, parse_files, parse_meta};
@@ -14,6 +15,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use std::fmt::Write;
+use std::sync::Arc;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 /// The frame every test renders at. Layout has to be computed from the same
@@ -162,6 +164,146 @@ fn load() -> App {
     app.set_files(parse_files(&files).unwrap());
     app.set_meta(parse_meta(&meta).unwrap());
     app
+}
+
+/// The file at head, long enough for any gap in the fixture to open into it.
+/// The text is not the real file's, which nothing here depends on: a reveal is
+/// addressed by line number.
+fn head_of(app: &App) -> Arc<[String]> {
+    let file = &app.files[app.selected_file];
+    let longest = file
+        .lines
+        .iter()
+        .filter_map(|line| line.new_line)
+        .max()
+        .unwrap_or(0) as usize;
+
+    (1..=longest + 40)
+        .map(|line| format!("head line {line}"))
+        .collect()
+}
+
+/// Expanding a gap costs one round trip for the file, and the reveal that
+/// asked for it is replayed the moment the file lands.
+#[test]
+fn opening_a_gap_fetches_the_file_and_then_reveals_it() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    let path = app.files[app.selected_file].path.clone();
+    let before = app.files[app.selected_file].lines.len();
+
+    // The fixture's first patch starts at line 127, so everything above it is
+    // hidden and the leading gap is the one to open.
+    let gaps = app.gaps();
+    assert_eq!(gaps[0].place, Place::Leading);
+    assert_eq!(gaps[0].len, Some(126));
+
+    act(
+        &mut app,
+        &Action::Expand {
+            gap: 0,
+            reveal: Reveal::Up(STEP),
+        },
+    );
+
+    match app.take_requests().as_slice() {
+        [
+            Request::Blob {
+                path: asked,
+                commit,
+            },
+        ] => {
+            assert_eq!(asked, &path);
+            assert_eq!(&**commit, "cc36d32a212a2b8b6611fb73549fe6d04fb6ec38");
+        }
+        other => panic!("expected one blob request, got {other:?}"),
+    }
+
+    // Nothing is revealed until the file is in hand.
+    assert_eq!(app.files[app.selected_file].lines.len(), before);
+
+    app.finish(Ok(Sent::Blob {
+        path: path.clone(),
+        lines: head_of(&app),
+    }));
+
+    assert_eq!(app.files[app.selected_file].lines.len(), before + 20);
+    assert_eq!(app.status, "expanded 20 lines");
+    assert!(draw(&app).contains("head line 107"));
+
+    // The patch grew, so the colors held for it no longer describe it.
+    assert_eq!(app.take_recolor(), [path]);
+
+    // The file is kept, so the next gap opens without another round trip.
+    act(
+        &mut app,
+        &Action::Expand {
+            gap: 1,
+            reveal: Reveal::Down(4),
+        },
+    );
+    assert!(app.take_requests().is_empty());
+    assert_eq!(app.files[app.selected_file].lines.len(), before + 24);
+}
+
+/// A reveal above the cursor moves every line under it, and the cursor has to
+/// travel with the line it was resting on rather than stay on a row number.
+#[test]
+fn a_reveal_carries_the_cursor_with_its_line() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    app.cursor = 4;
+    let path = app.files[app.selected_file].path.clone();
+    let resting = app.files[app.selected_file].lines[4].text.clone();
+
+    act(
+        &mut app,
+        &Action::Expand {
+            gap: 0,
+            reveal: Reveal::Up(STEP),
+        },
+    );
+    app.take_requests();
+    app.finish(Ok(Sent::Blob {
+        path,
+        lines: head_of(&app),
+    }));
+
+    assert_eq!(app.cursor, 24);
+    assert_eq!(app.files[app.selected_file].lines[24].text, resting);
+}
+
+/// A deleted file is not at head to be read, and its patch already carries
+/// every line it ever had.
+#[test]
+fn a_deleted_file_has_nothing_to_expand_into() {
+    let mut app = load();
+    let mut files = app.files.to_vec();
+    files[0].status = "removed".into();
+    app.files = files.into();
+    app.selected_file = 0;
+
+    act(
+        &mut app,
+        &Action::Expand {
+            gap: 0,
+            reveal: Reveal::Up(STEP),
+        },
+    );
+
+    assert!(app.take_requests().is_empty());
+    assert_eq!(app.status, "no file at head to expand");
+}
+
+/// The header stands for the run hidden above it, so it says how much that run
+/// holds rather than only where it stops.
+#[test]
+fn a_hunk_header_says_how_much_it_hides() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    app.is_files_visible = false;
+
+    assert!(draw(&app).contains("⋯ 126 hidden"));
 }
 
 #[test]

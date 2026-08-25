@@ -1,3 +1,5 @@
+use crate::expand::Reveal;
+
 /// Cursor movements, expressed independently of which pane owns the cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Motion {
@@ -58,6 +60,12 @@ pub enum Action {
     DeleteDraft,
     /// Resolve the focused thread, or reopen it if it is already resolved.
     ToggleResolved,
+    /// Pull part of a run the patch left out into the diff. `gap` indexes the
+    /// open file's gaps, in the order they read.
+    Expand {
+        gap: usize,
+        reveal: Reveal,
+    },
 
     /// Open the overlay that ships every draft as one review.
     StartSubmit,

@@ -7,6 +7,7 @@ pub mod mode;
 pub mod review;
 pub mod search;
 
+use crate::expand::{self, Gap, Reveal};
 use crate::layout::Layout;
 use crate::layout::rows;
 use crate::layout::tree::Row as TreeNode;
@@ -304,6 +305,18 @@ pub struct App {
     /// Keyed by path, which is what a file is. A position would only mean
     /// anything for as long as the list it indexes stays put.
     highlights: HashMap<Arc<str>, Highlight>,
+    /// The file at head, split into lines, for the paths whose gaps have been
+    /// opened. Kept so a second expansion in the same file costs nothing.
+    blobs: HashMap<Arc<str>, Arc<[String]>>,
+    /// Paths whose contents are on the way, so a gap opened while the first is
+    /// in flight waits on the same answer rather than asking twice.
+    fetching: HashSet<Arc<str>>,
+    /// The expansion waiting on a file's contents. One at a time: a gap is
+    /// named by where it sits in the patch, and revealing one moves the rest.
+    deferred: Option<(Arc<str>, usize, Reveal)>,
+    /// Paths whose patch has grown since it was colored. Drained by the event
+    /// loop, which owns the syntax pass.
+    recolor: Vec<Arc<str>>,
     filter_snapshot: Option<FileFilterSnapshot>,
     search_origin: Option<SearchOrigin>,
     files_state: FilesState,
@@ -354,6 +367,10 @@ impl App {
             outbox: Vec::new(),
             theme,
             highlights: HashMap::new(),
+            blobs: HashMap::new(),
+            fetching: HashSet::new(),
+            deferred: None,
+            recolor: Vec::new(),
             filter_snapshot: None,
             search_origin: None,
             files_state: FilesState::Loading,
@@ -609,6 +626,145 @@ impl App {
         self.highlights.insert(path, styled);
     }
 
+    /// The runs of the open file its patch left out, in the order they read.
+    pub fn gaps(&self) -> Vec<Gap> {
+        self.current_file().map_or_else(Vec::new, expand::gaps)
+    }
+
+    /// Pulls part of one of those runs into the diff.
+    ///
+    /// `gap` indexes [`Self::gaps`]. The file's contents are fetched the first
+    /// time a gap in it is opened, and the reveal is replayed once they land;
+    /// after that every further gap in the same file opens immediately.
+    pub fn expand(&mut self, gap: usize, reveal: Reveal) {
+        let Some(file) = self.current_file() else {
+            return;
+        };
+        let path = file.path.clone();
+
+        // A deleted file is not at head to be read, and the patch already
+        // carries every line it had.
+        if file.status == "removed" {
+            self.status = "no file at head to expand".into();
+            return;
+        }
+
+        if let Some(content) = self.blobs.get(&path).cloned() {
+            self.status = self.reveal(&path, gap, reveal, &content);
+            return;
+        }
+
+        // The commit to read the file at comes with the metadata, which is a
+        // separate fetch and may not have landed yet.
+        let Some(commit) = self.pr.as_ref().map(|pr| pr.head_oid.clone())
+        else {
+            self.status = "still loading the pull request".into();
+            return;
+        };
+
+        self.deferred = Some((path.clone(), gap, reveal));
+        if self.fetching.insert(path.clone()) {
+            self.send(Request::Blob { path, commit });
+            self.status = "loading the file…".into();
+        }
+    }
+
+    /// Drained by the event loop, which owns the syntax pass. A patch that has
+    /// grown has to be colored again: the colors are held one list per line.
+    pub fn take_recolor(&mut self) -> Vec<Arc<str>> {
+        std::mem::take(&mut self.recolor)
+    }
+
+    fn blob_loaded(
+        &mut self,
+        path: &Arc<str>,
+        lines: &Arc<[String]>,
+    ) -> String {
+        self.fetching.remove(path);
+        self.blobs.insert(path.clone(), lines.clone());
+
+        match self.deferred.take() {
+            Some((waiting, gap, reveal)) if waiting == *path => {
+                self.reveal(path, gap, reveal, lines)
+            }
+            deferred => {
+                self.deferred = deferred;
+                String::new()
+            }
+        }
+    }
+
+    /// Splices a run of the file into the open patch and puts everything
+    /// addressed by line back where it now belongs.
+    fn reveal(
+        &mut self,
+        path: &Arc<str>,
+        gap: usize,
+        reveal: Reveal,
+        content: &[String],
+    ) -> String {
+        let Some(index) = self.files.iter().position(|file| file.path == *path)
+        else {
+            return String::new();
+        };
+
+        // The patches are shared with the highlighting pass, so a reveal
+        // publishes a new list rather than writing through the one on screen.
+        let mut files = self.files.to_vec();
+        let Some(gap) = expand::gaps(&files[index]).get(gap).copied() else {
+            return String::new();
+        };
+
+        let before = files[index].lines.len();
+        let Some(revealed) =
+            expand::reveal(&mut files[index], &gap, reveal, content)
+        else {
+            return "nothing left to expand".into();
+        };
+
+        let shift =
+            files[index].lines.len().cast_signed() - before.cast_signed();
+        self.files = files.into();
+
+        // Colors are held per line and drafts are anchored by line number, so
+        // both are stale from the reveal downward.
+        self.highlights.remove(path);
+        self.recolor.push(path.clone());
+        self.reanchor_drafts();
+
+        // Everything below the reveal moved by the same amount, which keeps the
+        // line under the cursor under it. The scroll offset counts rows rather
+        // than lines, so it only holds the view roughly still until the next
+        // motion follows the cursor properly.
+        if revealed.at <= self.cursor {
+            self.cursor = self.cursor.saturating_add_signed(shift);
+            self.diff_scroll = self.diff_scroll.saturating_add_signed(shift);
+        }
+
+        format!("expanded {} lines", revealed.count)
+    }
+
+    /// Recomputes the rows each draft covers. A draft names its lines by
+    /// number, so a reveal leaves the rows it was drawn on pointing elsewhere.
+    fn reanchor_drafts(&mut self) {
+        let files = &self.files;
+
+        for draft in &mut self.drafts {
+            let Some(anchor) = draft.anchor().copied() else {
+                continue;
+            };
+            let Some(file) = files.iter().find(|file| file.path == draft.path)
+            else {
+                continue;
+            };
+            let Some(rows) = draft::rows_for(file, &anchor) else {
+                continue;
+            };
+
+            draft.attachment = Attachment::Lines { rows, anchor };
+        }
+    }
+
     pub fn apply(&mut self, action: &Action, layout: &Layout) {
         // Only a second escape discards, so every other key stands the composer
         // back down.
@@ -671,6 +827,7 @@ impl App {
             Action::EditDraft => self.edit_draft(layout),
             Action::DeleteDraft => self.delete_draft(),
             Action::ToggleResolved => self.toggle_resolved(),
+            Action::Expand { gap, reveal } => self.expand(gap, reveal),
 
             Action::StartSubmit => self.start_submit(layout),
             Action::CommitSubmit => self.commit_submit(),
@@ -1060,12 +1217,17 @@ impl App {
             Ok(Sent::Reply) => "reply posted".into(),
             Ok(Sent::Resolution(true)) => "thread resolved".into(),
             Ok(Sent::Resolution(false)) => "thread unresolved".into(),
+            Ok(Sent::Blob { path, lines }) => self.blob_loaded(&path, &lines),
             Err(failure) => {
                 let status = format!("error: {}", failure.message());
                 match failure {
                     Failure::Review(error) => self.reject_review(error),
                     Failure::Draft(draft, error) => {
                         self.reject_draft(draft, error);
+                    }
+                    Failure::Blob(path, _) => {
+                        self.fetching.remove(&path);
+                        self.deferred = None;
                     }
                     Failure::Other(_) => {}
                 }

@@ -181,9 +181,37 @@ fn spawn_request(
                 .await
                 .map(|()| Sent::Resolution(is_resolved))
                 .map_err(|err| Failure::Other(err.to_string())),
+            Request::Blob { path, commit } => {
+                match gh::fetch_blob(&repo, &path, &commit).await {
+                    Ok(text) => Ok(Sent::Blob {
+                        path,
+                        lines: text.lines().map(str::to_string).collect(),
+                    }),
+                    Err(err) => Err(Failure::Blob(path, err.to_string())),
+                }
+            }
         };
 
         let _ = tx.send(Message::Sent(outcome));
+    });
+}
+
+/// Colors one file again after its patch grew. Colors are held one list per
+/// line, so a reveal strands every line below it.
+fn spawn_recolor(
+    files: &[ChangedFile],
+    path: &Arc<str>,
+    mode: ThemeMode,
+    tx: mpsc::UnboundedSender<Message>,
+) {
+    let Some(file) = files.iter().find(|file| file.path == *path) else {
+        return;
+    };
+    let (path, lines) = (file.path.clone(), file.lines.clone());
+
+    std::thread::spawn(move || {
+        let styled = renderer::highlight_file(&path, &lines, mode);
+        let _ = tx.send(Message::Highlight(mode, path, styled));
     });
 }
 
@@ -320,6 +348,10 @@ async fn event_loop(
             );
         }
 
+        for path in app.take_recolor() {
+            spawn_recolor(&app.files, &path, app.theme().mode, tx.clone());
+        }
+
         if is_dirty {
             layout = present_frame(terminal, &app, &input.pending_hint())?;
             is_dirty = false;
@@ -393,9 +425,10 @@ async fn event_loop(
                     // A write only shows up in the diff once the threads are
                     // read back, so a success pulls metadata again.
                     Message::Sent(outcome) => {
-                        let is_sent = outcome.is_ok();
+                        let is_written =
+                            outcome.as_ref().is_ok_and(Sent::is_write);
                         app.finish(outcome);
-                        if is_sent {
+                        if is_written {
                             spawn_meta_fetch(
                                 session.repo.clone(),
                                 session.number,

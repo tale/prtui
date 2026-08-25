@@ -99,6 +99,12 @@ pub enum Request {
         thread_id: Arc<str>,
         is_resolved: bool,
     },
+    /// One file as it stands at head, which is what a diff expands into the
+    /// runs of it the patch left out.
+    Blob {
+        path: Arc<str>,
+        commit: Arc<str>,
+    },
 }
 
 /// What a completed request retires, so the app knows which local state the
@@ -115,6 +121,18 @@ pub enum Sent {
     Review,
     Reply,
     Resolution(bool),
+    Blob {
+        path: Arc<str>,
+        lines: Arc<[String]>,
+    },
+}
+
+impl Sent {
+    /// Whether the review at GitHub changed, which is what a refetch reads
+    /// back. Reading a file changes nothing there.
+    pub const fn is_write(&self) -> bool {
+        !matches!(self, Self::Blob { .. })
+    }
 }
 
 /// Why a request came back empty-handed.
@@ -126,6 +144,9 @@ pub enum Sent {
 pub enum Failure {
     Draft(u64, String),
     Review(String),
+    /// A file whose contents never arrived, named so the expansion waiting on
+    /// them stops waiting.
+    Blob(Arc<str>, String),
     Other(String),
 }
 
@@ -133,6 +154,7 @@ impl Failure {
     pub fn message(&self) -> &str {
         let (Self::Draft(_, message)
         | Self::Review(message)
+        | Self::Blob(_, message)
         | Self::Other(message)) = self;
 
         message

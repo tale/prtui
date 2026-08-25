@@ -154,6 +154,9 @@ pub struct PullRequest {
     pub author: String,
     pub base_ref: String,
     pub head_ref: String,
+    /// The commit the head branch points at, which is the file contents a
+    /// reader expands a diff against.
+    pub head_oid: Arc<str>,
     pub body: String,
 }
 
@@ -170,7 +173,7 @@ pub struct Meta {
 }
 
 /// `@@ -old,count +new,count @@` — captures the two start line numbers.
-fn parse_hunk_header(header: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_hunk_header(header: &str) -> Option<(u32, u32)> {
     let inner = header.strip_prefix("@@ ")?.split(" @@").next()?;
     let (old, new) = inner.split_once(' ')?;
 
@@ -312,6 +315,7 @@ struct WirePullRequest {
     author: Option<WireAuthor>,
     base_ref_name: String,
     head_ref_name: String,
+    head_ref_oid: String,
     body: String,
     pending_review: Nodes<WireReview>,
     review_threads: Nodes<WireThread>,
@@ -430,6 +434,7 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<Meta> {
             author: WireAuthor::login(pr.author),
             base_ref: pr.base_ref_name,
             head_ref: pr.head_ref_name,
+            head_oid: pr.head_ref_oid.into(),
             body: pr.body,
         },
         threads: pr
@@ -516,6 +521,7 @@ mod tests {
             "author": { "login": "tale" },
             "baseRefName": "trunk",
             "headRefName": "work",
+            "headRefOid": "cafe1234",
             "body": "",
             "pendingReview": { "nodes": [] },
             "reviewThreads": { "nodes": threads },

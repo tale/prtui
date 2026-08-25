@@ -2,6 +2,7 @@ pub mod rows;
 pub mod tree;
 
 use crate::app::App;
+use crate::expand::Gap;
 use ratatui::layout::{Constraint, Direction, Rect};
 use rows::{Rows, View};
 use tree::Tree;
@@ -31,6 +32,9 @@ pub struct Layout {
     pub submit: Option<Rect>,
     pub rows: Rows,
     pub files: Tree,
+    /// The runs of the open file its patch left out, which the hunk headers
+    /// standing for them are drawn from.
+    pub gaps: Vec<Gap>,
 }
 
 impl Layout {
@@ -90,6 +94,7 @@ impl Layout {
             composer,
             submit,
             rows: build_rows(app, diff),
+            gaps: app.gaps(),
             files: build_tree(
                 app,
                 files_list.map_or(0, |list| list.height as usize),

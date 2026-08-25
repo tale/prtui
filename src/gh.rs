@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use std::fmt::Write as _;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::process::Command;
@@ -12,7 +13,7 @@ query($owner:String!, $repo:String!, $number:Int!) {
     pullRequest(number:$number) {
       id number title state isDraft additions deletions changedFiles
       author { login }
-      baseRefName headRefName body
+      baseRefName headRefName headRefOid body
       pendingReview: reviews(first:1, states:[PENDING]) { nodes { id } }
       reviewThreads(first:100) {
         nodes {
@@ -96,6 +97,13 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(400);
 const RETRY_CEILING: Duration = Duration::from_secs(8);
 
 const JSON_ACCEPT: &str = "application/vnd.github+json";
+
+/// Serves a blob as itself rather than as base64 inside a JSON envelope.
+const RAW_ACCEPT: &str = "application/vnd.github.raw";
+
+/// A file big enough to exceed this is not one anybody expands into a terminal
+/// pane, and holding it would cost more than the diff it decorates.
+const BLOB_LIMIT: u64 = 8 * 1024 * 1024;
 
 const STATUS_URL: &str = "https://www.githubstatus.com/api/v2/components.json";
 
@@ -471,6 +479,56 @@ pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<serde_json::Value> {
     })
     .await
     .context("metadata fetch panicked")?
+}
+
+/// One file at one commit, which is what fills a gap the patch left out.
+///
+/// The contents endpoint serves the blob directly under the raw media type, so
+/// nothing has to be pulled back out of a JSON envelope on the way in.
+pub async fn fetch_blob(
+    repo: &Repo,
+    path: &str,
+    commit: &str,
+) -> Result<String> {
+    let token = token().await;
+    let url = repo.rest_url(&format!(
+        "/repos/{}/{}/contents/{}?ref={commit}",
+        repo.owner,
+        repo.name,
+        escape_path(path)
+    ));
+
+    tokio::task::spawn_blocking(move || {
+        let mut response = get(&url, RAW_ACCEPT, token.as_deref())?;
+        check(&mut response, "fetching file contents")?;
+
+        response
+            .body_mut()
+            .with_config()
+            .limit(BLOB_LIMIT)
+            .read_to_string()
+            .context("failed to read file contents")
+    })
+    .await
+    .context("file fetch panicked")?
+}
+
+/// Percent-encodes what a path may not carry into a URL. The separators stay:
+/// the contents endpoint takes the path as written, not as one segment.
+fn escape_path(path: &str) -> String {
+    const KEEP: &[u8] = b"/-._~";
+
+    let mut escaped = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || KEEP.contains(&byte) {
+            escaped.push(byte as char);
+            continue;
+        }
+
+        let _ = write!(escaped, "%{byte:02X}");
+    }
+
+    escaped
 }
 
 /// A mutation that is not safe to send twice. A timeout or a 502 says the
