@@ -90,6 +90,10 @@ pub enum Row {
     /// Drawn where those lines belong: above the hunk that follows them, or at
     /// the foot of the pane for the run below the last hunk.
     Gap { gap: usize },
+    /// The seam between two cards stacked under one line. Without it the gap
+    /// between two threads reads as weaker than the gap between two comments
+    /// inside one of them.
+    Divider,
     /// A thread's one-line summary, by index into the file's thread slice.
     Summary {
         thread: usize,
@@ -367,6 +371,7 @@ impl Rows {
         let mut builder = Builder {
             view,
             threads,
+            is_stacked: false,
             rows: Vec::with_capacity(file.lines.len()),
             code: Vec::with_capacity(file.lines.len()),
             cards: Vec::new(),
@@ -499,6 +504,9 @@ impl Rows {
 struct Builder<'a> {
     view: View<'a>,
     threads: &'a [ReviewThread],
+    /// Whether a card has already been drawn under the line being laid out, so
+    /// the next one knows to rule itself off from it.
+    is_stacked: bool,
     rows: Vec<Row>,
     code: Vec<usize>,
     cards: Vec<(Card, usize)>,
@@ -520,7 +528,16 @@ impl Builder<'_> {
 
     /// Pushes a card's summary row and remembers where it landed, which is what
     /// the cursor follows and what a scroll measures against.
+    ///
+    /// Cards stacked under one line are ruled off from each other. The divider
+    /// goes in before the row is recorded, so a card still points at its own
+    /// summary rather than at the seam above it.
     fn push_card(&mut self, card: Card, row: Row) {
+        if self.is_stacked {
+            self.rows.push(Row::Divider);
+        }
+        self.is_stacked = true;
+
         self.cards.push((card, self.rows.len()));
         self.rows.push(row);
     }
@@ -557,6 +574,8 @@ impl Builder<'_> {
     /// A line wider than the pane folds onto further rows instead of being cut
     /// off at the edge, where the rest of it could not be read at all.
     fn emit_code(&mut self, line: &DiffLine, source: usize) {
+        self.is_stacked = false;
+
         // Hunk headers are structural and short, and folding one would only
         // break up the rule it draws across the pane.
         if line.kind == LineKind::Hunk {
@@ -762,10 +781,19 @@ impl Builder<'_> {
         for (comment_index, comment) in review.comments.iter().enumerate() {
             // Replies run straight into the comment above them otherwise, and a
             // long exchange reads as one block of text rather than a back and
-            // forth.
+            // forth. A blank row is not enough on its own: beside the card's
+            // own background it reads as nothing at all.
+            //
+            // The seam is inset behind the rail and drawn back, so it stays
+            // plainly weaker than the rule between two whole threads.
             if comment_index > 0 {
                 content.push(ContentRow {
-                    spans: Vec::new(),
+                    spans: vec![card_span(
+                        "┄".repeat(body_width),
+                        theme.dim,
+                        Modifier::empty(),
+                        theme,
+                    )],
                     comment_index,
                     is_header: true,
                 });

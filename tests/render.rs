@@ -627,6 +627,81 @@ fn motion_leaves_a_conversation_that_cannot_scroll() {
     assert_eq!(app.cursor, line + 1);
 }
 
+/// The seams have to rank: a break between two conversations reads as bigger
+/// than a break between two comments inside one of them. Both used to be
+/// nothing, and when only the inner one existed the hierarchy ran backwards.
+#[test]
+fn a_thread_seam_outranks_a_comment_seam() {
+    let mut app = load();
+    let base = fixture_threads()
+        .into_iter()
+        .find(|thread| !thread.is_resolved)
+        .unwrap();
+
+    let mut first = base.clone();
+    first.id = "thread-1".into();
+    first.comments[0].body = "Opening question.".into();
+    let mut reply = first.comments[0].clone();
+    reply.author = "andyfeller".into();
+    reply.body = "Answer to it.".into();
+    first.comments.push(reply);
+
+    let mut second = base.clone();
+    second.id = "thread-2".into();
+    second.comments[0].body =
+        "A separate conversation on the same line.".into();
+
+    app.threads_by_path
+        .insert(base.path, vec![first.clone(), second.clone()]);
+    show_thread(&mut app, &first);
+    app.focused_card = Some(Card::Thread(first.id.clone()));
+    app.expanded_card = Some(Card::Thread(first.id.clone()));
+
+    let rendered = draw(&app);
+    // The backend prints each row quoted, which is not part of the frame.
+    let rows: Vec<&str> = rendered
+        .lines()
+        .map(|row| row.trim_start_matches('"'))
+        .collect();
+    let indent = " ".repeat(GUTTER);
+
+    // The thread seam starts at the card's own edge; the comment seam is inset
+    // behind the rail and dashed, so the two never read as the same mark.
+    let thread_seam = rows
+        .iter()
+        .position(|row| row.starts_with(&format!("{indent}─")))
+        .expect("two stacked threads should be ruled off from each other");
+    let comment_seam = rows
+        .iter()
+        .position(|row| row.contains('┄'))
+        .expect("two comments in one thread should be ruled off");
+
+    assert!(
+        rows[comment_seam].starts_with(&format!("{indent}  │")),
+        "the comment seam should sit behind the thread's rail"
+    );
+
+    // Order on screen: opening comment, its seam, the reply, then the seam that
+    // ends the whole thread, then the next thread.
+    let opening = rows
+        .iter()
+        .position(|row| row.contains("Opening question."))
+        .unwrap();
+    let answer = rows
+        .iter()
+        .position(|row| row.contains("Answer to it."))
+        .unwrap();
+    let next = rows
+        .iter()
+        .position(|row| row.contains("A separate conversation"))
+        .unwrap();
+
+    assert!(opening < comment_seam);
+    assert!(comment_seam < answer);
+    assert!(answer < thread_seam);
+    assert!(thread_seam < next);
+}
+
 #[test]
 fn multiple_threads_on_one_line_render_as_one_group() {
     let mut app = load();

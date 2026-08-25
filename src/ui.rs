@@ -518,6 +518,7 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
             Row::Draft { draft } => {
                 draft_line(&open, focus, *draft, width, theme)
             }
+            Row::Divider => divider_line(width, theme),
             Row::Summary {
                 thread,
                 state,
@@ -863,6 +864,25 @@ fn draft_line(
         ],
         theme,
         is_focused,
+    )
+}
+
+/// The seam between two cards stacked under one line. It spans the card rather
+/// than the pane: what it divides is the block of conversations, not the diff.
+fn divider_line(width: usize, theme: Theme) -> Line<'static> {
+    let indent = card_indent(width);
+
+    thread_card_line(
+        indent,
+        width,
+        vec![rows::card_span(
+            "─".repeat(width.saturating_sub(indent)),
+            theme.muted,
+            Modifier::empty(),
+            theme,
+        )],
+        theme,
+        false,
     )
 }
 
