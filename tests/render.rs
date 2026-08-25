@@ -365,7 +365,7 @@ fn renders_unresolved_thread_summary_inline() {
 
     assert!(rendered.contains("Lol not suspicious of coupling at all."));
     assert!(rendered.contains("@williammartin"));
-    assert!(rendered.contains("1 reply · open"));
+    assert!(rendered.contains("1 reply"));
 }
 
 #[test]
@@ -425,7 +425,7 @@ fn focused_thread_expands_into_its_full_conversation() {
         .find(|line| line.contains("2 comments"))
         .expect("expanded thread summary should be visible");
 
-    assert!(focused_row.contains("◆ ▾ 2 comments · open"));
+    assert!(focused_row.contains("◆ ▾ 2 comments"));
     assert!(rendered.contains("Lol not suspicious of coupling at all."));
     assert!(rendered.contains("This is the full reply body."));
     assert!(rendered.contains("↳ @andyfeller"));
@@ -588,9 +588,17 @@ fn multiple_threads_on_one_line_render_as_one_group() {
         .unwrap();
     let rendered = terminal.backend().to_string();
 
-    assert!(rendered.contains("◆ 4 open threads"));
-    assert!(rendered.contains("@williammartin  Discussion number 1"));
-    assert!(rendered.contains("@williammartin  Discussion number 4"));
+    // Every thread is its own card. No heading counts them, no branch glyph
+    // makes them look like children of one, and none of them is elided away.
+    for index in 1..=4 {
+        assert!(
+            rendered.contains(&format!(
+                "◆ @williammartin  Discussion number {index}"
+            )),
+            "thread {index} should have its own card"
+        );
+    }
+    assert!(!rendered.contains("open threads"));
 
     app.focused_card = Some(Card::Thread(threads[3].id.clone()));
     app.expanded_card = Some(Card::Thread(threads[3].id.clone()));
@@ -601,8 +609,11 @@ fn multiple_threads_on_one_line_render_as_one_group() {
         .unwrap();
     let expanded = terminal.backend().to_string();
 
-    assert!(expanded.contains("… 3 earlier"));
+    // Expanding the last one does not push the three above it out of sight,
+    // which is what the elision window used to do.
+    assert!(expanded.contains("Discussion number 1"));
     assert!(expanded.contains("Discussion number 4"));
+    assert!(!expanded.contains("earlier"));
 }
 
 #[test]
@@ -624,7 +635,7 @@ fn resolved_threads_render_as_compact_rows() {
 
     assert!(rendered.contains("◇ @williammartin"));
     assert!(rendered.contains("Could I interest you in the following tests:"));
-    assert!(rendered.contains("· resolved"));
+    assert!(rendered.contains("resolved"));
 }
 
 #[test]
@@ -708,7 +719,7 @@ fn outdated_threads_render_compactly_after_the_diff() {
 
     assert!(rendered.contains("◇ @williammartin"));
     assert!(rendered.contains("Discussion from an earlier diff."));
-    assert!(rendered.contains("· outdated"));
+    assert!(rendered.contains("outdated"));
 }
 
 #[test]

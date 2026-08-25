@@ -11,7 +11,7 @@ use crate::app::search::Query;
 use crate::app::{App, Focus, OpenFile, Pane, Target, TreeRow};
 use crate::expand::Gap;
 use crate::layout::Layout;
-use crate::layout::rows::{self, BodyRow, Connector, GUTTER, Row, ThreadState};
+use crate::layout::rows::{self, BodyRow, GUTTER, Row, ThreadState};
 use crate::layout::tree::{self, Row as TreeNode};
 use crate::model::{LineKind, ReviewThread};
 use crate::renderer::{Theme, ThemeMode, markdown};
@@ -523,25 +523,15 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
             Row::Draft { draft } => {
                 draft_line(&open, focus, *draft, width, theme)
             }
-            Row::Heading { state, count } => {
-                heading_line(*state, *count, width, theme)
-            }
-            Row::Hidden {
-                state,
-                count,
-                is_tail,
-            } => hidden_line(*state, *count, *is_tail, width, theme),
             Row::Summary {
                 thread,
                 state,
-                connector,
-                has_state_label,
+                author_width,
             } => summary_line(
                 focus,
                 &open.threads[*thread],
                 *state,
-                *connector,
-                *has_state_label,
+                *author_width,
                 width,
                 theme,
             ),
@@ -871,66 +861,11 @@ fn draft_line(
     )
 }
 
-fn heading_line(
-    state: ThreadState,
-    count: usize,
-    width: usize,
-    theme: Theme,
-) -> Line<'static> {
-    let indent = card_indent(width);
-    let heading =
-        format!("{} {count} {} threads", state.marker(), state.label());
-
-    thread_card_line(
-        indent,
-        width,
-        vec![rows::card_span(
-            truncate(&heading, width.saturating_sub(indent)),
-            state_color(state, theme),
-            Modifier::BOLD,
-            theme,
-        )],
-        theme,
-        false,
-    )
-}
-
-fn hidden_line(
-    state: ThreadState,
-    count: usize,
-    is_tail: bool,
-    width: usize,
-    theme: Theme,
-) -> Line<'static> {
-    let (connector, label) = if is_tail {
-        ("└ ", format!("… {count} more"))
-    } else {
-        ("├ ", format!("… {count} earlier"))
-    };
-
-    thread_card_line(
-        card_indent(width),
-        width,
-        vec![
-            rows::card_span(
-                connector,
-                state_color(state, theme),
-                Modifier::BOLD,
-                theme,
-            ),
-            rows::card_span(label, theme.muted, Modifier::empty(), theme),
-        ],
-        theme,
-        false,
-    )
-}
-
 fn summary_line(
     focus: Focus<'_>,
     thread: &ReviewThread,
     state: ThreadState,
-    connector: Connector,
-    has_state_label: bool,
+    author_width: usize,
     width: usize,
     theme: Theme,
 ) -> Line<'static> {
@@ -939,17 +874,32 @@ fn summary_line(
     let is_focused = focus.is_thread_focused(&thread.id);
     let is_expanded = focus.is_thread_expanded(&thread.id);
 
-    // An expanded card gives its one line to the conversation's shape instead of
-    // repeating the first comment, which is about to be printed underneath.
+    // Settled threads are history beside the open ones stacked with them, so
+    // they read back rather than competing for the eye. The marker keeps its
+    // colour: which kind of settled still has to be legible.
+    let (author_color, summary_color) = if state.is_settled() {
+        (theme.muted, theme.muted)
+    } else {
+        (theme.heading, theme.code)
+    };
+
+    // An expanded card gives its one line to the conversation's shape instead
+    // of repeating the first comment, which is about to be printed underneath.
+    let prefix = if is_expanded {
+        format!("{} ▾ ", state.marker())
+    } else {
+        format!("{} ", state.marker())
+    };
     let author = if is_expanded {
         String::new()
     } else {
-        thread.comments.first().map_or_else(
-            || "review thread".into(),
-            |comment| format!("@{}", comment.author),
-        )
+        truncate(&rows::author_of(thread), author_width)
     };
-    let separator = if is_expanded { "" } else { "  " };
+    // The author column and the gap after it, held even by a short name so the
+    // summaries down a stack start together.
+    let author_column = if is_expanded { 0 } else { author_width + 2 };
+    let pad = author_column.saturating_sub(text_width(&author));
+
     let summary = if is_expanded {
         comment_count(thread.comments.len())
     } else {
@@ -959,33 +909,18 @@ fn summary_line(
         )
     };
 
-    let replies = thread.comments.len().saturating_sub(1);
-    let mut suffix = match (is_expanded, replies) {
-        (true, _) | (_, 0) => String::new(),
-        (false, 1) => " · 1 reply".into(),
-        (false, count) => format!(" · {count} replies"),
-    };
-    if has_state_label {
-        suffix.push_str(" · ");
-        suffix.push_str(state.label());
-    }
-
-    let prefix = match connector {
-        Connector::Only => format!("{} ", state.marker()),
-        Connector::Branch => "├ ".to_string(),
-        Connector::Last => "└ ".to_string(),
-    };
-    let prefix = if is_expanded {
-        format!("{prefix}▾ ")
+    let tail = summary_tail(thread, state, is_expanded);
+    let head = text_width(&prefix) + text_width(&author) + pad;
+    let reserved = if tail.is_empty() {
+        0
     } else {
-        prefix
+        text_width(&tail) + 2
     };
 
-    let fixed = text_width(&prefix)
-        + text_width(&author)
-        + text_width(separator)
-        + text_width(&suffix);
-    let summary = truncate(&summary, card_width.saturating_sub(fixed));
+    let summary =
+        truncate(&summary, card_width.saturating_sub(head + reserved));
+    let filler = card_width
+        .saturating_sub(head + text_width(&summary) + text_width(&tail));
 
     thread_card_line(
         indent,
@@ -997,14 +932,50 @@ fn summary_line(
                 Modifier::BOLD,
                 theme,
             ),
-            rows::card_span(author, theme.heading, Modifier::BOLD, theme),
-            rows::card_span(separator, theme.muted, Modifier::empty(), theme),
-            rows::card_span(summary, theme.code, Modifier::empty(), theme),
-            rows::card_span(suffix, theme.muted, Modifier::empty(), theme),
+            rows::card_span(author, author_color, Modifier::BOLD, theme),
+            rows::card_span(
+                " ".repeat(pad),
+                theme.muted,
+                Modifier::empty(),
+                theme,
+            ),
+            rows::card_span(summary, summary_color, Modifier::empty(), theme),
+            rows::card_span(
+                " ".repeat(filler),
+                theme.muted,
+                Modifier::empty(),
+                theme,
+            ),
+            rows::card_span(tail, theme.muted, Modifier::empty(), theme),
         ],
         theme,
         is_focused,
     )
+}
+
+/// What a summary carries at the card's right edge: how much conversation is
+/// folded away, and whether the thread is still live. Sitting flush right keeps
+/// it in one column down a stack of threads rather than trailing each summary.
+fn summary_tail(
+    thread: &ReviewThread,
+    state: ThreadState,
+    is_expanded: bool,
+) -> String {
+    let replies = thread.comments.len().saturating_sub(1);
+    let mut tail = match (is_expanded, replies) {
+        (true, _) | (_, 0) => String::new(),
+        (false, 1) => "1 reply".to_string(),
+        (false, count) => format!("{count} replies"),
+    };
+
+    if state.is_settled() {
+        if !tail.is_empty() {
+            tail.push_str("  ");
+        }
+        tail.push_str(state.label());
+    }
+
+    tail
 }
 
 fn body_row(

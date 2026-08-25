@@ -17,6 +17,7 @@ use crate::app::draft::Draft;
 use crate::model::{ChangedFile, DiffLine, LineKind, ReviewThread, Side};
 use crate::renderer::Theme;
 use crate::renderer::markdown::{self, Block as MarkdownBlock};
+use crate::text::measure::text_width;
 use crate::text::wrap::{self, Fragment};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
@@ -27,12 +28,11 @@ use std::borrow::Cow;
 /// numbers, the draft or thread mark, and the sigil.
 pub const GUTTER: usize = 12;
 
-/// Summaries shown at once when several threads share a line; the rest elide.
-const MAX_VISIBLE_SUMMARIES: usize = 4;
-
-/// Columns an expanded body gives up to the rail beside it. The rail sits two
-/// columns in from the card's own marker so it never lines up with the branch
-/// glyphs a pile of threads draws in that column.
+/// Columns an expanded body gives up to the rail beside it.
+///
+/// The rail sits two columns in from the card's own marker so it nests under
+/// the summary rather than lining up with the markers of the threads stacked
+/// around it.
 pub const BODY_INDENT: usize = 4;
 
 /// Which pile a thread sits in. Open threads are what review is about, so they
@@ -45,8 +45,6 @@ pub enum ThreadState {
 }
 
 impl ThreadState {
-    pub const ALL: [Self; 3] = [Self::Open, Self::Resolved, Self::Outdated];
-
     pub const fn of(thread: &ReviewThread) -> Self {
         if thread.is_outdated {
             Self::Outdated
@@ -72,22 +70,11 @@ impl ThreadState {
         }
     }
 
-    const fn rank(self) -> u8 {
-        match self {
-            Self::Open => 0,
-            Self::Resolved => 1,
-            Self::Outdated => 2,
-        }
+    /// A settled thread is history rather than work, so it is drawn back and
+    /// says which kind of settled it is. An open one needs neither.
+    pub const fn is_settled(self) -> bool {
+        !matches!(self, Self::Open)
     }
-}
-
-/// How a summary attaches to the group above it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Connector {
-    /// The only thread in its pile, so it carries the pile's own marker.
-    Only,
-    Branch,
-    Last,
 }
 
 /// One row of the diff pane.
@@ -98,22 +85,13 @@ pub enum Row {
     Code { source: usize, fragment: Fragment },
     /// A pending note of the reader's own, by index into [`View::drafts`].
     Draft { draft: usize },
-    /// A pile's heading, drawn only when the pile holds more than one thread.
-    Heading { state: ThreadState, count: usize },
-    /// Stands in for the summaries the window left out: `… n earlier` above
-    /// the visible ones, `… n more` below them.
-    Hidden {
-        state: ThreadState,
-        count: usize,
-        is_tail: bool,
-    },
     /// A thread's one-line summary, by index into the file's thread slice.
     Summary {
         thread: usize,
         state: ThreadState,
-        connector: Connector,
-        /// A lone thread names its own state; a pile's heading already did.
-        has_state_label: bool,
+        /// Width the author column is padded to across every thread stacked
+        /// under this line, so their summaries start together.
+        author_width: usize,
     },
     /// One line of the expanded conversation, by index into [`Rows::body`].
     Body { index: usize },
@@ -198,7 +176,7 @@ fn stops_from(
 
     // Sorted on the same key the pane emits rows in, so the cursor and the
     // drawing agree without either consulting the other.
-    let mut stops: Vec<(usize, Class, usize, Card)> = threads
+    let mut stops: Vec<(usize, Class, (bool, usize), Card)> = threads
         .iter()
         .enumerate()
         .filter_map(|(thread, review)| {
@@ -210,10 +188,12 @@ fn stops_from(
                 (anchored[thread]?, Class::LineThread)
             };
 
+            // Outdated threads are drawn after the live ones sharing their
+            // pinned line; otherwise a thread keeps the place GitHub gave it.
             Some((
                 source,
                 class,
-                ThreadState::of(review).rank() as usize,
+                (review.is_outdated, thread),
                 Card::Thread(review.id.clone()),
             ))
         })
@@ -221,7 +201,12 @@ fn stops_from(
 
     stops.extend(drafts.iter().enumerate().filter_map(|(index, draft)| {
         let Some(rows) = draft.rows() else {
-            return Some((0, Class::FileDraft, index, Card::Draft(draft.id)));
+            return Some((
+                0,
+                Class::FileDraft,
+                (false, index),
+                Card::Draft(draft.id),
+            ));
         };
 
         // A note whose span no longer exists in the patch is drawn nowhere, so
@@ -230,7 +215,7 @@ fn stops_from(
         (source < file.lines.len()).then_some((
             source,
             Class::LineDraft,
-            index,
+            (false, index),
             Card::Draft(draft.id),
         ))
     }));
@@ -395,13 +380,14 @@ impl Rows {
                 builder.emit_draft(draft);
             }
         }
-        builder.emit_piles(&select(threads, is_file_level));
+        builder.emit_threads(&select(threads, is_file_level));
 
         // A patch with no lines is still worth opening for its conversations,
         // since there is nothing for any of them to anchor to.
         if file.lines.is_empty() {
-            builder
-                .emit_piles(&select(threads, |review| !is_file_level(review)));
+            builder.emit_threads(&select(threads, |review| {
+                !is_file_level(review)
+            }));
             return builder.finish(stops);
         }
 
@@ -427,10 +413,15 @@ impl Rows {
             builder.code.push(builder.rows.len());
             builder.emit_code(&file.lines[source], source);
             builder.emit_drafts(&placed, source);
-            builder.emit_piles(anchored);
-
-            if source == last {
-                builder.emit_piles(&outdated);
+            // Outdated threads have no live anchor, so they pin after the
+            // last line. They stack with whatever is already there and share
+            // its author column rather than forming a second, narrower one.
+            if source == last && !outdated.is_empty() {
+                let stack: Vec<usize> =
+                    anchored.iter().chain(&outdated).copied().collect();
+                builder.emit_threads(&stack);
+            } else {
+                builder.emit_threads(anchored);
             }
         }
 
@@ -535,12 +526,6 @@ impl Builder<'_> {
         self.view.width.saturating_sub(self.indent())
     }
 
-    fn is_focused(&self, thread: usize) -> bool {
-        self.view
-            .focused
-            .is_some_and(|card| card.is_thread(&self.threads[thread].id))
-    }
-
     fn is_expanded(&self, thread: usize) -> bool {
         self.view
             .expanded
@@ -620,94 +605,43 @@ impl Builder<'_> {
     }
 
     /// Threads sharing a line are drawn as one pile per state, open first.
-    fn emit_piles(&mut self, group: &[usize]) {
-        for state in ThreadState::ALL {
-            let pile: Vec<usize> = group
-                .iter()
-                .copied()
-                .filter(|&thread| {
-                    ThreadState::of(&self.threads[thread]) == state
-                })
-                .collect();
-            self.emit_pile(state, &pile);
-        }
-    }
-
-    fn emit_pile(&mut self, state: ThreadState, pile: &[usize]) {
-        if pile.is_empty() || self.card_width() < 4 {
+    /// Every thread hanging under one line, each its own card, in the order
+    /// GitHub holds them.
+    ///
+    /// A settled thread keeps its place rather than sinking below the open
+    /// ones: on a single line a resolved question is often the reason the open
+    /// thread under it exists, and re-ranking them breaks that reading.
+    fn emit_threads(&mut self, group: &[usize]) {
+        if group.is_empty() || self.card_width() < 4 {
             return;
         }
 
-        if let [only] = *pile {
-            self.push_card(
-                Card::Thread(self.threads[only].id.clone()),
-                Row::Summary {
-                    thread: only,
-                    state,
-                    connector: Connector::Only,
-                    has_state_label: true,
-                },
-            );
-            self.emit_thread_body(only);
-            return;
-        }
+        let author_width = self.author_width(group);
 
-        let count = pile.len();
-        self.rows.push(Row::Heading { state, count });
-
-        let start = self.window_start(pile);
-        let end = (start + MAX_VISIBLE_SUMMARIES).min(count);
-
-        if start > 0 {
-            self.rows.push(Row::Hidden {
-                state,
-                count: start,
-                is_tail: false,
-            });
-        }
-
-        for (position, &thread) in pile.iter().enumerate().take(end).skip(start)
-        {
+        for &thread in group {
             self.push_card(
                 Card::Thread(self.threads[thread].id.clone()),
                 Row::Summary {
                     thread,
-                    state,
-                    connector: if position + 1 == count {
-                        Connector::Last
-                    } else {
-                        Connector::Branch
-                    },
-                    has_state_label: false,
+                    state: ThreadState::of(&self.threads[thread]),
+                    author_width,
                 },
             );
             self.emit_thread_body(thread);
         }
-
-        if end < count {
-            self.rows.push(Row::Hidden {
-                state,
-                count: count - end,
-                is_tail: true,
-            });
-        }
     }
 
-    /// An expanded thread has to be on screen; otherwise the window follows the
-    /// focused summary, keeping it at the bottom as the cursor walks down.
-    fn window_start(&self, pile: &[usize]) -> usize {
-        if let Some(position) =
-            pile.iter().position(|&thread| self.is_expanded(thread))
-        {
-            return position;
-        }
+    /// The column every author name in one line's stack is padded to. A single
+    /// long name is clipped rather than pushing every summary beside it off the
+    /// pane.
+    fn author_width(&self, group: &[usize]) -> usize {
+        let widest = group
+            .iter()
+            .map(|&thread| text_width(&author_of(&self.threads[thread])))
+            .max()
+            .unwrap_or(0);
 
-        pile.iter()
-            .position(|&thread| self.is_focused(thread))
-            .map_or(0, |position| {
-                position.saturating_sub(MAX_VISIBLE_SUMMARIES - 1)
-            })
-            .min(pile.len().saturating_sub(MAX_VISIBLE_SUMMARIES))
+        widest.min(self.card_width() / 3)
     }
 
     /// Rows an expanded body has to fit its text into, once the card's frame is
@@ -937,6 +871,14 @@ fn mark_thumb(
     }
 }
 
+/// How a thread names itself in a summary: whoever opened it.
+pub fn author_of(thread: &ReviewThread) -> String {
+    thread.comments.first().map_or_else(
+        || "review thread".to_string(),
+        |comment| format!("@{}", comment.author),
+    )
+}
+
 fn comment_header(
     thread: &ReviewThread,
     comment_index: usize,
@@ -1146,6 +1088,84 @@ mod tests {
                 (1, Card::Thread(Arc::from("early"))),
                 (4, Card::Thread(Arc::from("late"))),
             ]
+        );
+    }
+
+    fn settled(mut review: ReviewThread, state: ThreadState) -> ReviewThread {
+        review.is_resolved = state == ThreadState::Resolved;
+        review.is_outdated = state == ThreadState::Outdated;
+        review
+    }
+
+    /// Threads sharing a line keep the order GitHub holds them in. Ranking the
+    /// open ones to the top reads the exchange out of sequence, since a settled
+    /// thread is often why the open one under it exists.
+    #[test]
+    fn threads_on_one_line_keep_the_order_github_gave_them() {
+        let file = patch(vec![
+            line(LineKind::Hunk, None, None),
+            line(LineKind::Context, Some(1), Some(1)),
+        ]);
+        let threads = vec![
+            thread("first", Side::Right, 1),
+            settled(thread("second", Side::Right, 1), ThreadState::Resolved),
+            thread("third", Side::Right, 1),
+        ];
+
+        assert_eq!(
+            stops(&file, &threads),
+            [
+                (1, Card::Thread(Arc::from("first"))),
+                (1, Card::Thread(Arc::from("second"))),
+                (1, Card::Thread(Arc::from("third"))),
+            ]
+        );
+    }
+
+    /// The cursor walks cards in the order the pane draws them. Both orders are
+    /// derived separately, so nothing but a test keeps them from drifting apart
+    /// and leaving `j` jumping backwards up the pane.
+    #[test]
+    fn the_cursor_walks_cards_in_the_order_the_pane_draws_them() {
+        let file = patch(vec![
+            line(LineKind::Hunk, None, None),
+            line(LineKind::Context, Some(1), Some(1)),
+            line(LineKind::Context, Some(2), Some(2)),
+        ]);
+        let threads = vec![
+            thread("live-b", Side::Right, 2),
+            settled(thread("stale", Side::Right, 2), ThreadState::Outdated),
+            settled(thread("done", Side::Right, 1), ThreadState::Resolved),
+            thread("live-a", Side::Right, 1),
+        ];
+
+        let rows = Rows::build(
+            &file,
+            &threads,
+            View {
+                focused: None,
+                expanded: None,
+                scroll: 0,
+                width: 80,
+                window: 8,
+                theme: Theme::dark(),
+                drafts: &[],
+            },
+        );
+
+        let drawn: Vec<usize> = rows
+            .stops()
+            .iter()
+            .map(|stop| {
+                rows.card_row(&stop.card)
+                    .expect("every stop has a row to reach it from")
+            })
+            .collect();
+
+        assert_eq!(drawn.len(), threads.len());
+        assert!(
+            drawn.windows(2).all(|pair| pair[0] < pair[1]),
+            "stops {drawn:?} are not in drawing order"
         );
     }
 
