@@ -286,7 +286,7 @@ fn focused_thread_expands_into_its_full_conversation() {
     assert!(focused_row.contains("◆ ▾ 2 comments · open"));
     assert!(rendered.contains("Lol not suspicious of coupling at all."));
     assert!(rendered.contains("This is the full reply body."));
-    assert!(rendered.contains("reply 1/1"));
+    assert!(rendered.contains("↳ @andyfeller"));
     assert!(rendered.contains("collapse"));
 }
 
@@ -315,8 +315,9 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
 
     let small_viewport_limit = thread_limit(&app, 100, 24);
     assert!(small_viewport_limit > 0);
-    assert!(first_page.contains("↓"));
-    assert!(first_page.contains("more"));
+    // The rail doubles as the scrollbar, so an overflowing conversation shows
+    // a thumb rather than stealing rows for a marker.
+    assert!(first_page.contains("┃"));
 
     app.thread_scroll = small_viewport_limit;
     terminal
@@ -326,10 +327,8 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
         .unwrap();
     let last_page = terminal.backend().to_string();
 
-    assert!(last_page.contains("↑"));
-    assert!(last_page.contains("earlier"));
     assert!(last_page.contains("TAIL CONTENT IS REACHABLE"));
-    assert!(last_page.contains("j/k scroll"));
+    assert_eq!(rail_rows(&first_page), rail_rows(&last_page));
 
     app.thread_scroll = 0;
     let mut large_terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
@@ -385,8 +384,41 @@ fn long_reply_keeps_its_identity_visible_while_scrolling() {
     let rendered = terminal.backend().to_string();
 
     assert!(rendered.contains("↳ @andyfeller"));
-    assert!(rendered.contains("reply 1/1 · continued"));
-    assert!(rendered.contains("↑ 5 earlier"));
+    assert!(rendered.contains("· continued"));
+}
+
+/// How many rows the open conversation occupies, which must not change as it
+/// scrolls: a card that grows or shrinks under the cursor shifts the diff below
+/// it on every keystroke.
+fn rail_rows(rendered: &str) -> usize {
+    rendered
+        .lines()
+        .filter(|line| line.contains("│") || line.contains("┃"))
+        .count()
+}
+
+/// A conversation gives the cursor back once it has nothing left to scroll,
+/// so one motion walks code, cards and comments without a detour through esc.
+#[test]
+fn motion_leaves_a_conversation_that_cannot_scroll() {
+    let mut app = load();
+    let mut thread = fixture_threads()
+        .into_iter()
+        .find(|thread| !thread.is_resolved)
+        .unwrap();
+    thread.comments[0].body = "Short enough to need no scrolling.".into();
+    app.threads_by_path
+        .insert(thread.path.clone(), vec![thread.clone()]);
+    show_thread(&mut app, &thread);
+    app.focused_card = Some(Card::Thread(thread.id.clone()));
+    app.expanded_card = Some(Card::Thread(thread.id.clone()));
+
+    let line = app.cursor;
+    press(&mut app, "j");
+
+    assert_eq!(app.expanded_card, None);
+    assert_eq!(app.focused_card, None);
+    assert_eq!(app.cursor, line + 1);
 }
 
 #[test]

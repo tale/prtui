@@ -538,8 +538,8 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
                 width,
                 theme,
             ),
-            Row::Body { index, is_last } => {
-                body_row(layout.rows.body(*index), *is_last, width, theme)
+            Row::Body { index } => {
+                body_row(layout.rows.body(*index), width, theme)
             }
         })
         .collect();
@@ -990,7 +990,6 @@ fn summary_line(
 
 fn body_row(
     body: Option<&BodyRow>,
-    is_last: bool,
     width: usize,
     theme: Theme,
 ) -> Line<'static> {
@@ -998,16 +997,14 @@ fn body_row(
         return Line::default();
     };
 
+    let (rail, color) = if body.is_thumb {
+        ("  ┃ ", theme.purple)
+    } else {
+        ("  │ ", theme.dim)
+    };
+
     let mut spans = body.spans.clone();
-    spans.insert(
-        0,
-        rows::card_span(
-            if is_last { "└  " } else { "│  " },
-            theme.purple,
-            Modifier::empty(),
-            theme,
-        ),
-    );
+    spans.insert(0, rows::card_span(rail, color, Modifier::empty(), theme));
 
     thread_card_line(card_indent(width), width, spans, theme, false)
 }
@@ -1574,14 +1571,7 @@ fn draw_key_hints(
             },
         ],
         (Mode::Normal, Pane::Diff) if app.focused_draft().is_some() => &[
-            (
-                "j/k",
-                if app.expanded_card.is_some() {
-                    "scroll"
-                } else {
-                    "move"
-                },
-            ),
+            ("j/k", "move"),
             (
                 "↵",
                 if app.expanded_card.is_some() {
@@ -1595,14 +1585,7 @@ fn draw_key_hints(
             ("esc", "code"),
         ],
         (Mode::Normal, Pane::Diff) if app.focused_card.is_some() => &[
-            (
-                "j/k",
-                if app.expanded_card.is_some() {
-                    "scroll"
-                } else {
-                    "move"
-                },
-            ),
+            ("j/k", "move"),
             (
                 "↵",
                 if app.expanded_card.is_some() {

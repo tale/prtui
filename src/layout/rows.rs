@@ -21,7 +21,6 @@ use crate::text::wrap::{self, Fragment};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use std::borrow::Cow;
-use std::fmt::Write;
 
 /// Columns the line-number gutter occupies, which is also how far a thread card
 /// is indented so it hangs under the code rather than beside it: two line
@@ -30,6 +29,11 @@ pub const GUTTER: usize = 12;
 
 /// Summaries shown at once when several threads share a line; the rest elide.
 const MAX_VISIBLE_SUMMARIES: usize = 4;
+
+/// Columns an expanded body gives up to the rail beside it. The rail sits two
+/// columns in from the card's own marker so it never lines up with the branch
+/// glyphs a pile of threads draws in that column.
+pub const BODY_INDENT: usize = 4;
 
 /// Which pile a thread sits in. Open threads are what review is about, so they
 /// sort and render ahead of the settled ones.
@@ -112,13 +116,15 @@ pub enum Row {
         has_state_label: bool,
     },
     /// One line of the expanded conversation, by index into [`Rows::body`].
-    Body { index: usize, is_last: bool },
+    Body { index: usize },
 }
 
-/// A rendered line of an expanded conversation.
+/// A rendered line of an expanded conversation. The rail beside it doubles as
+/// a scrollbar, so each row knows whether the thumb covers it.
 #[derive(Debug, Clone)]
 pub struct BodyRow {
     pub spans: Vec<Span<'static>>,
+    pub is_thumb: bool,
 }
 
 /// A card paired with the source line it hangs under, in the order the cursor
@@ -707,7 +713,7 @@ impl Builder<'_> {
     /// Rows an expanded body has to fit its text into, once the card's frame is
     /// taken off. A pane too narrow for any of it has nothing to draw.
     fn body_width(&self) -> Option<usize> {
-        let width = self.card_width().saturating_sub(3);
+        let width = self.card_width().saturating_sub(BODY_INDENT);
 
         (width > 0).then_some(width)
     }
@@ -741,50 +747,51 @@ impl Builder<'_> {
     ///
     /// `continued` carries each comment's header in its continued form, since a
     /// window that opens partway through one has to say whose words these are.
+    /// That header costs one row wherever the window opens, which is what keeps
+    /// the card the same height at every scroll position: text then moves by
+    /// exactly the number of rows the reader asked for, and the diff underneath
+    /// holds still.
     fn emit_body(
         &mut self,
         content: &[ContentRow],
         continued: &[Vec<Span<'static>>],
     ) {
         let window = self.view.window;
-        let start = self.view.scroll.min(content.len().saturating_sub(window));
-        let end = (start + window).min(content.len());
-        self.body_limit = content.len().saturating_sub(window);
+        let limit = scroll_limit(content, continued, window);
+        let start = self.view.scroll.min(limit);
+        self.body_limit = limit;
 
-        let theme = self.view.theme;
-        let mut visible: Vec<BodyRow> = Vec::new();
+        let mut visible: Vec<BodyRow> = Vec::with_capacity(window);
+        let mut cursor = start;
 
         if start > 0 {
-            visible.push(note(format!("↑ {start} earlier"), theme));
-
-            // Scrolling into the middle of a comment loses the header that says
-            // whose it is, so it is reprinted as continued.
-            if let Some(row) = content.get(start)
-                && !row.is_header
-                && let Some(header) = continued.get(row.comment_index)
-            {
+            let row = &content[start];
+            if row.is_header {
+                visible.push(BodyRow {
+                    spans: row.spans.clone(),
+                    is_thumb: false,
+                });
+                cursor += 1;
+            } else if let Some(header) = continued.get(row.comment_index) {
                 visible.push(BodyRow {
                     spans: header.clone(),
+                    is_thumb: false,
                 });
             }
         }
 
-        visible.extend(content[start..end].iter().map(|row| BodyRow {
+        let end = (cursor + window - visible.len()).min(content.len());
+        visible.extend(content[cursor..end].iter().map(|row| BodyRow {
             spans: row.spans.clone(),
+            is_thumb: false,
         }));
 
-        if end < content.len() {
-            visible
-                .push(note(format!("↓ {} more", content.len() - end), theme));
-        }
+        mark_thumb(&mut visible, start, limit, content.len());
 
         let base = self.body.len();
-        let last = visible.len().saturating_sub(1);
-
         for offset in 0..visible.len() {
             self.rows.push(Row::Body {
                 index: base + offset,
-                is_last: offset == last,
             });
         }
         self.body.extend(visible);
@@ -797,6 +804,17 @@ impl Builder<'_> {
         let mut content = Vec::new();
 
         for (comment_index, comment) in review.comments.iter().enumerate() {
+            // Replies run straight into the comment above them otherwise, and a
+            // long exchange reads as one block of text rather than a back and
+            // forth.
+            if comment_index > 0 {
+                content.push(ContentRow {
+                    spans: Vec::new(),
+                    comment_index,
+                    is_header: true,
+                });
+            }
+
             content.push(ContentRow {
                 spans: comment_header(review, comment_index, theme, false),
                 comment_index,
@@ -876,9 +894,46 @@ pub fn thread_window(height: usize) -> usize {
         .min(height.saturating_sub(6).max(1))
 }
 
-fn note(text: String, theme: Theme) -> BodyRow {
-    BodyRow {
-        spans: vec![card_span(text, theme.muted, Modifier::empty(), theme)],
+/// The furthest the window may start and still reach the conversation's last
+/// line. A window that has to reprint a header gives up one row of text for it,
+/// so the plain arithmetic falls one short.
+fn scroll_limit(
+    content: &[ContentRow],
+    continued: &[Vec<Span<'static>>],
+    window: usize,
+) -> usize {
+    let plain = content.len().saturating_sub(window);
+    if plain == 0 {
+        return 0;
+    }
+
+    let row = &content[plain];
+    if row.is_header || continued.get(row.comment_index).is_none() {
+        return plain;
+    }
+
+    plain + 1
+}
+
+/// Marks the run of rows the scrollbar thumb covers. A conversation that fits
+/// its window has nothing to mark, which is what makes the bright run mean
+/// "there is more of this".
+fn mark_thumb(
+    visible: &mut [BodyRow],
+    start: usize,
+    limit: usize,
+    total: usize,
+) {
+    if limit == 0 || visible.is_empty() {
+        return;
+    }
+
+    let height = visible.len();
+    let thumb = (height * height / total).clamp(1, height);
+    let top = start * (height - thumb) / limit;
+
+    for row in &mut visible[top..(top + thumb).min(height)] {
+        row.is_thumb = true;
     }
 }
 
@@ -902,10 +957,6 @@ fn comment_header(
     if !date.is_empty() {
         header.push_str(" · ");
         header.push_str(date);
-    }
-    if comment_index > 0 {
-        let replies = thread.comments.len().saturating_sub(1);
-        let _ = write!(header, " · reply {comment_index}/{replies}");
     }
     if continued {
         header.push_str(" · continued");
@@ -980,6 +1031,73 @@ mod tests {
             .into_iter()
             .map(|stop| (stop.source, stop.card))
             .collect()
+    }
+
+    fn comment(author: &str, body: &str) -> crate::model::Comment {
+        crate::model::Comment {
+            id: Arc::from("C_1"),
+            rest_id: None,
+            author: author.into(),
+            body: body.into(),
+            created_at: "2024-04-29T14:06:54Z".into(),
+            is_pending: false,
+        }
+    }
+
+    /// A card that grows or shrinks as the reader scrolls shifts the diff under
+    /// it on every keystroke, and the text it holds moves by something other
+    /// than what was asked for.
+    #[test]
+    fn an_open_conversation_keeps_its_height_at_every_scroll_position() {
+        let file = patch(vec![
+            line(LineKind::Hunk, None, None),
+            line(LineKind::Context, Some(1), Some(1)),
+        ]);
+        let mut review = thread("t", Side::Right, 1);
+        review.comments = (0..6)
+            .map(|index| {
+                comment("williammartin", &format!("Comment {index} body text"))
+            })
+            .collect();
+
+        let card = Card::Thread(review.id.clone());
+        let window = 8;
+        let mut heights = Vec::new();
+        let mut limit;
+        let mut scroll = 0;
+
+        loop {
+            let rows = Rows::build(
+                &file,
+                std::slice::from_ref(&review),
+                View {
+                    focused: Some(&card),
+                    expanded: Some(&card),
+                    scroll,
+                    width: 80,
+                    window,
+                    theme: Theme::dark(),
+                    drafts: &[],
+                },
+            );
+
+            heights.push(
+                (0..rows.len())
+                    .filter(|&row| {
+                        matches!(rows.get(row), Some(Row::Body { .. }))
+                    })
+                    .count(),
+            );
+            limit = rows.body_limit();
+
+            if scroll >= limit {
+                break;
+            }
+            scroll += 1;
+        }
+
+        assert!(limit > 0, "the fixture has to overflow its window");
+        assert_eq!(heights, vec![window; heights.len()]);
     }
 
     #[test]

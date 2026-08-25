@@ -1742,14 +1742,23 @@ impl App {
 
         let viewport = layout.diff_viewport();
 
-        // An open conversation captures the cursor: motions scroll through it
-        // rather than walking away from it. Visual mode overrides that, since a
-        // selection is being extended over code.
+        // An open conversation captures the cursor while it still has something
+        // to scroll. Once it runs out the motion carries on into the diff, so
+        // the pane reads as one list and a short conversation never swallows a
+        // keypress. Visual mode overrides all of it, since a selection is being
+        // extended over code.
         if self.mode != Mode::Visual && self.expanded_card.is_some() {
             let limit = layout.rows.body_limit();
-            self.thread_scroll =
-                step(motion, self.thread_scroll, limit + 1, viewport);
-            return;
+            let target = step(motion, self.thread_scroll, limit + 1, viewport);
+
+            // `gg` and `G` mean the ends of the conversation, not the ends of
+            // the file, so they stay inside it even when nothing moves.
+            if target != self.thread_scroll
+                || matches!(motion, Motion::Top | Motion::Bottom)
+            {
+                self.thread_scroll = target;
+                return;
+            }
         }
 
         if self.mode == Mode::Visual {
