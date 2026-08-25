@@ -14,6 +14,7 @@
 
 use crate::app::Card;
 use crate::app::draft::Draft;
+use crate::expand::Gap;
 use crate::model::{ChangedFile, DiffLine, LineKind, ReviewThread, Side};
 use crate::renderer::Theme;
 use crate::renderer::markdown::{self, Block as MarkdownBlock};
@@ -85,6 +86,10 @@ pub enum Row {
     Code { source: usize, fragment: Fragment },
     /// A pending note of the reader's own, by index into [`View::drafts`].
     Draft { draft: usize },
+    /// A run of the file the patch left out, by index into [`View::gaps`].
+    /// Drawn where those lines belong: above the hunk that follows them, or at
+    /// the foot of the pane for the run below the last hunk.
+    Gap { gap: usize },
     /// A thread's one-line summary, by index into the file's thread slice.
     Summary {
         thread: usize,
@@ -140,6 +145,8 @@ pub struct View<'a> {
     pub theme: Theme,
     /// Pending notes on this file, in the order the view indexes them.
     pub drafts: &'a [&'a Draft],
+    /// Runs of the file the patch left out, in the order they read.
+    pub gaps: &'a [Gap],
 }
 
 /// A conversation about the file rather than any line in it.
@@ -410,6 +417,7 @@ impl Rows {
         let placed = placed_drafts(view.drafts);
         let last = file.lines.len() - 1;
         for (source, anchored) in by_source.iter().enumerate() {
+            builder.emit_gap(source);
             builder.code.push(builder.rows.len());
             builder.emit_code(&file.lines[source], source);
             builder.emit_drafts(&placed, source);
@@ -424,6 +432,10 @@ impl Rows {
                 builder.emit_threads(anchored);
             }
         }
+
+        // The run below the last hunk answers to no line of the patch, so it
+        // sits at the foot of the pane where those lines would be.
+        builder.emit_gap(file.lines.len());
 
         builder.finish(stops)
     }
@@ -530,6 +542,16 @@ impl Builder<'_> {
         self.view
             .expanded
             .is_some_and(|card| card.is_thread(&self.threads[thread].id))
+    }
+
+    /// The run of hidden lines that ends where `source` begins, if one does.
+    fn emit_gap(&mut self, source: usize) {
+        let Some(gap) = self.view.gaps.iter().position(|gap| gap.at == source)
+        else {
+            return;
+        };
+
+        self.rows.push(Row::Gap { gap });
     }
 
     /// A line wider than the pane folds onto further rows instead of being cut
@@ -1020,6 +1042,7 @@ mod tests {
                     window,
                     theme: Theme::dark(),
                     drafts: &[],
+                    gaps: &[],
                 },
             );
 
@@ -1150,6 +1173,7 @@ mod tests {
                 window: 8,
                 theme: Theme::dark(),
                 drafts: &[],
+                gaps: &[],
             },
         );
 

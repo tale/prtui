@@ -81,6 +81,7 @@ impl Layout {
             None => inner,
         });
         let (diff, composer, submit) = dock(inside(diff_pane), app);
+        let gaps = app.gaps();
 
         Self {
             header,
@@ -93,8 +94,8 @@ impl Layout {
             diff,
             composer,
             submit,
-            rows: build_rows(app, diff),
-            gaps: app.gaps(),
+            rows: build_rows(app, diff, &gaps),
+            gaps,
             files: build_tree(
                 app,
                 files_list.map_or(0, |list| list.height as usize),
@@ -183,7 +184,7 @@ fn build_tree(app: &App, height: usize) -> Tree {
     tree
 }
 
-fn build_rows(app: &App, diff: Rect) -> Rows {
+fn build_rows(app: &App, diff: Rect, gaps: &[Gap]) -> Rows {
     let Some(open) = app.open() else {
         return Rows::empty();
     };
@@ -199,6 +200,7 @@ fn build_rows(app: &App, diff: Rect) -> Rows {
             window: rows::thread_window(diff.height as usize),
             theme: app.theme(),
             drafts: &open.drafts,
+            gaps,
         },
     )
 }

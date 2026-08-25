@@ -193,18 +193,13 @@ fn opening_a_gap_fetches_the_file_and_then_reveals_it() {
     let before = app.files[app.selected_file].lines.len();
 
     // The fixture's first patch starts at line 127, so everything above it is
-    // hidden and the leading gap is the one to open.
+    // hidden, and the header on the cursor's line is what names that run.
     let gaps = app.gaps();
     assert_eq!(gaps[0].place, Place::Leading);
     assert_eq!(gaps[0].len, Some(126));
+    assert_eq!(app.cursor, 0);
 
-    act(
-        &mut app,
-        &Action::Expand {
-            gap: 0,
-            reveal: Reveal::Up(STEP),
-        },
-    );
+    act(&mut app, &Action::Expand(Reveal::Up(STEP)));
 
     match app.take_requests().as_slice() {
         [
@@ -234,43 +229,81 @@ fn opening_a_gap_fetches_the_file_and_then_reveals_it() {
     // The patch grew, so the colors held for it no longer describe it.
     assert_eq!(app.take_recolor(), [path]);
 
-    // The file is kept, so the next gap opens without another round trip.
-    act(
-        &mut app,
-        &Action::Expand {
-            gap: 1,
-            reveal: Reveal::Down(4),
-        },
-    );
+    // The file is kept, so the next gap opens without another round trip. The
+    // trailing one has no header, so the last line of the patch names it.
+    app.cursor = app.files[app.selected_file].lines.len() - 1;
+    act(&mut app, &Action::Expand(Reveal::Down(4)));
+
     assert!(app.take_requests().is_empty());
     assert_eq!(app.files[app.selected_file].lines.len(), before + 24);
 }
 
-/// A reveal above the cursor moves every line under it, and the cursor has to
-/// travel with the line it was resting on rather than stay on a row number.
+/// A gap is named by the header the cursor rests on, so that header has to
+/// still be under the cursor once the reveal has pushed it down.
 #[test]
-fn a_reveal_carries_the_cursor_with_its_line() {
+fn a_reveal_keeps_the_header_it_opened_under_the_cursor() {
     let mut app = load();
     app.pane = Pane::Diff;
-    app.cursor = 4;
-    let path = app.files[app.selected_file].path.clone();
-    let resting = app.files[app.selected_file].lines[4].text.clone();
+    // The second file's patch has two hunks, so it has a gap between them.
+    app.selected_file = 1;
+    app.cursor = 8;
 
-    act(
-        &mut app,
-        &Action::Expand {
-            gap: 0,
-            reveal: Reveal::Up(STEP),
-        },
-    );
+    let path = app.files[1].path.clone();
+    assert_eq!(app.files[1].lines[8].kind, LineKind::Hunk);
+
+    act(&mut app, &Action::Expand(Reveal::Down(4)));
     app.take_requests();
     app.finish(Ok(Sent::Blob {
         path,
         lines: head_of(&app),
     }));
 
-    assert_eq!(app.cursor, 24);
-    assert_eq!(app.files[app.selected_file].lines[24].text, resting);
+    assert_eq!(app.cursor, 12);
+    assert_eq!(app.files[1].lines[12].kind, LineKind::Hunk);
+    assert_eq!(app.files[1].lines[8].text, "head line 21");
+}
+
+/// `zR` in the diff: every run at once, which is the whole file rather than
+/// the parts of it that changed.
+#[test]
+fn expanding_the_file_opens_every_gap_at_once() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    let path = app.files[0].path.clone();
+
+    act(&mut app, &Action::ExpandFile);
+    app.take_requests();
+    app.finish(Ok(Sent::Blob {
+        path,
+        lines: head_of(&app),
+    }));
+
+    let lines = &app.files[0].lines;
+    // Nothing is hidden any more, so no header is left to say that it is.
+    assert!(lines.iter().all(|line| line.kind != LineKind::Hunk));
+    assert_eq!(lines[0].text, "head line 1");
+    assert_eq!(lines[0].new_line, Some(1));
+    assert_eq!(lines.len(), 173);
+    assert!(app.gaps().is_empty());
+
+    // The cursor followed the reveal above it and not the one below it: the
+    // header it sat on closed, leaving it on the last line pulled in over it.
+    assert_eq!(app.cursor, 125);
+    assert_eq!(app.files[0].lines[125].new_line, Some(126));
+}
+
+/// The cursor names the gap, so resting somewhere that hides nothing asks for
+/// nothing rather than opening whichever gap happens to be first.
+#[test]
+fn a_line_that_hides_nothing_expands_nothing() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    app.cursor = 3;
+
+    act(&mut app, &Action::Expand(Reveal::Up(STEP)));
+
+    assert!(app.take_requests().is_empty());
+    assert_eq!(app.status, "no hidden lines here");
 }
 
 /// A deleted file is not at head to be read, and its patch already carries
@@ -283,27 +316,58 @@ fn a_deleted_file_has_nothing_to_expand_into() {
     app.files = files.into();
     app.selected_file = 0;
 
-    act(
-        &mut app,
-        &Action::Expand {
-            gap: 0,
-            reveal: Reveal::Up(STEP),
-        },
-    );
+    act(&mut app, &Action::Expand(Reveal::Up(STEP)));
 
     assert!(app.take_requests().is_empty());
     assert_eq!(app.status, "no file at head to expand");
 }
 
-/// The header stands for the run hidden above it, so it says how much that run
-/// holds rather than only where it stops.
+/// A run of hidden lines gets a band of its own, above the hunk that follows
+/// it and at the foot of the pane for the run below the last one.
 #[test]
-fn a_hunk_header_says_how_much_it_hides() {
+fn a_hidden_run_is_drawn_as_its_own_band() {
     let mut app = load();
     app.pane = Pane::Diff;
     app.is_files_visible = false;
 
-    assert!(draw(&app).contains("⋯ 126 hidden"));
+    let screen = draw(&app);
+    assert!(screen.contains("⋯  126 lines hidden"), "{screen}");
+    // The patch cannot say where the file ends, so the last band says only
+    // that there is more of it.
+    assert!(screen.contains("⋯  rest of the file"), "{screen}");
+
+    // The band is above the header rather than written into it.
+    let rows: Vec<&str> = screen.lines().collect();
+    let band = rows.iter().position(|row| row.contains("hidden")).unwrap();
+    assert!(rows[band + 1].contains("@@ -127,6 +127,7 @@"));
+}
+
+/// Once the file itself is in hand, the trailing band can name a real count —
+/// or stand down, when the patch already ran to the end of the file.
+#[test]
+fn the_trailing_band_learns_the_length_of_the_file() {
+    let mut app = load();
+    app.pane = Pane::Diff;
+    app.is_files_visible = false;
+    let path = app.files[0].path.clone();
+
+    // Head holds 40 lines past the end of the patch.
+    app.finish(Ok(Sent::Blob {
+        path: path.clone(),
+        lines: head_of(&app),
+    }));
+    assert_eq!(app.gaps().last().unwrap().len, Some(40));
+    assert!(draw(&app).contains("⋯  40 lines hidden"));
+
+    // A file whose patch already reaches the end has no trailing run at all.
+    let short: Arc<[String]> =
+        (1..=133).map(|line| format!("head line {line}")).collect();
+    app.finish(Ok(Sent::Blob { path, lines: short }));
+
+    let gaps = app.gaps();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].place, Place::Leading);
+    assert!(!draw(&app).contains("rest of the file"));
 }
 
 #[test]
@@ -1115,22 +1179,23 @@ fn visual_selection_paints_every_row_in_the_span() {
     app.selection = Some(Selection { anchor: 2, head: 6 });
     let selected = snapshot(&mut app);
 
-    // Diff row N draws on screen row N+2; the header and pane title occupy two rows.
-    for row in 4..=8 {
+    // The header, the pane title, and the band standing in for the lines
+    // hidden above the first hunk all sit above diff row 0.
+    let screen = |diff_row: usize| diff_row + 3;
+
+    for row in 2..=6 {
         assert_ne!(
-            plain[row],
-            selected[row],
-            "diff row {} is inside the selection and must change tint",
-            row - 2
+            plain[screen(row)],
+            selected[screen(row)],
+            "diff row {row} is inside the selection and must change tint"
         );
     }
 
-    for row in [3, 9, 10] {
+    for row in [1, 7, 8] {
         assert_eq!(
-            plain[row],
-            selected[row],
-            "diff row {} is outside the selection and must not change",
-            row - 2
+            plain[screen(row)],
+            selected[screen(row)],
+            "diff row {row} is outside the selection and must not change"
         );
     }
 }

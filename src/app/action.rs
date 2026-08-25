@@ -60,12 +60,10 @@ pub enum Action {
     DeleteDraft,
     /// Resolve the focused thread, or reopen it if it is already resolved.
     ToggleResolved,
-    /// Pull part of a run the patch left out into the diff. `gap` indexes the
-    /// open file's gaps, in the order they read.
-    Expand {
-        gap: usize,
-        reveal: Reveal,
-    },
+    /// Pull part of the run of hidden lines the cursor rests on into the diff.
+    Expand(Reveal),
+    /// Pull in every run the open file's patch left out, at once.
+    ExpandFile,
 
     /// Open the overlay that ships every draft as one review.
     StartSubmit,

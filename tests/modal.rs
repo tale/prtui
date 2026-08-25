@@ -6,6 +6,7 @@ use prtui::app::mode::Mode;
 use prtui::app::review::{Failure, Request, ReviewEvent, Sent};
 use prtui::app::search::Match;
 use prtui::app::{App, Card, Pane};
+use prtui::expand::{Reveal, STEP};
 use prtui::layout::Layout;
 use prtui::model::{parse_files, parse_meta};
 use ratatui::layout::Rect;
@@ -226,6 +227,72 @@ fn gg_needs_both_keys() {
     );
     assert_eq!(app.cursor, 0);
     assert!(input.pending_hint().is_empty());
+}
+
+/// Hidden lines answer to Vim's fold keys, and a count on one says how many
+/// lines to pull in rather than how many times to repeat the command.
+#[test]
+fn z_opens_hidden_lines_the_way_it_opens_folds() {
+    fn chord(keymap: &mut Keymap, keys: &str) -> Resolution {
+        let mut last = Resolution::Unbound;
+        for c in keys.chars() {
+            last = keymap.resolve(
+                Mode::Normal,
+                false,
+                KeyEvent::new(KeyCode::Char(c), Modifiers::NONE),
+            );
+        }
+
+        last
+    }
+
+    let keymap = &mut Keymap::default();
+
+    assert_eq!(
+        chord(keymap, "zk"),
+        Resolution::Action(Action::Expand(Reveal::Up(STEP)))
+    );
+    assert_eq!(
+        chord(keymap, "zj"),
+        Resolution::Action(Action::Expand(Reveal::Down(STEP)))
+    );
+    assert_eq!(
+        chord(keymap, "za"),
+        Resolution::Action(Action::Expand(Reveal::All))
+    );
+    assert_eq!(chord(keymap, "zR"), Resolution::Action(Action::ExpandFile));
+
+    // A count is lines, not repetitions.
+    assert_eq!(
+        chord(keymap, "120zk"),
+        Resolution::Action(Action::Expand(Reveal::Up(120)))
+    );
+
+    // A lone `z` waits for its second key, and an unbound one drops the chord.
+    assert_eq!(
+        keymap.resolve(
+            Mode::Normal,
+            false,
+            KeyEvent::new(KeyCode::Char('z'), Modifiers::NONE)
+        ),
+        Resolution::Pending
+    );
+    assert_eq!(keymap.pending_hint(), "z");
+    assert_eq!(chord(keymap, "q"), Resolution::Unbound);
+    assert!(keymap.pending_hint().is_empty());
+}
+
+/// The fold keys act on the diff, where the cursor names a run of hidden
+/// lines. Visual mode has a selection to keep, so `z` is not its key.
+#[test]
+fn z_is_not_bound_outside_normal_mode() {
+    let mut keymap = Keymap::default();
+    let key = KeyEvent::new(KeyCode::Char('z'), Modifiers::NONE);
+
+    assert_eq!(
+        keymap.resolve(Mode::Visual, false, key),
+        Resolution::Unbound
+    );
 }
 
 #[test]

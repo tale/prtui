@@ -7,7 +7,7 @@ pub mod mode;
 pub mod review;
 pub mod search;
 
-use crate::expand::{self, Gap, Reveal};
+use crate::expand::{self, Gap, Place, Reveal};
 use crate::layout::Layout;
 use crate::layout::rows;
 use crate::layout::tree::Row as TreeNode;
@@ -208,6 +208,36 @@ struct SearchOrigin {
     diff_scroll: usize,
 }
 
+/// What a reveal was asked for, held while the file it needs is on the way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wanted {
+    /// One run of hidden lines, by index into the open file's gaps.
+    Gap(usize, Reveal),
+    /// Every run at once, which puts the whole file on screen.
+    File,
+}
+
+/// The runs a reveal asks for, paired with how much of each to open.
+///
+/// Ordered back to front: a splice moves only what is below it, so working
+/// upward leaves every gap still waiting at the index it was found at.
+fn wanted_gaps(file: &ChangedFile, wanted: Wanted) -> Vec<(Gap, Reveal)> {
+    let gaps = expand::gaps(file);
+
+    match wanted {
+        Wanted::Gap(index, reveal) => gaps
+            .get(index)
+            .map(|gap| (*gap, reveal))
+            .into_iter()
+            .collect(),
+        Wanted::File => gaps
+            .into_iter()
+            .rev()
+            .map(|gap| (gap, Reveal::All))
+            .collect(),
+    }
+}
+
 /// The patches drive the whole review surface, so what the file pane shows
 /// when it is empty depends on why it is empty.
 enum FilesState {
@@ -313,7 +343,7 @@ pub struct App {
     fetching: HashSet<Arc<str>>,
     /// The expansion waiting on a file's contents. One at a time: a gap is
     /// named by where it sits in the patch, and revealing one moves the rest.
-    deferred: Option<(Arc<str>, usize, Reveal)>,
+    deferred: Option<(Arc<str>, Wanted)>,
     /// Paths whose patch has grown since it was colored. Drained by the event
     /// loop, which owns the syntax pass.
     recolor: Vec<Arc<str>>,
@@ -627,16 +657,65 @@ impl App {
     }
 
     /// The runs of the open file its patch left out, in the order they read.
+    ///
+    /// The trailing run ends wherever the file ends, which the patch cannot
+    /// say. Once the file itself is in hand that run can name a real count, or
+    /// go away when the patch already reached the end.
     pub fn gaps(&self) -> Vec<Gap> {
-        self.current_file().map_or_else(Vec::new, expand::gaps)
+        let Some(file) = self.current_file() else {
+            return Vec::new();
+        };
+
+        let mut gaps = expand::gaps(file);
+        let Some(content) = self.blobs.get(&file.path) else {
+            return gaps;
+        };
+
+        if let Some(last) = gaps.last_mut()
+            && last.place == Place::Trailing
+        {
+            last.len = Some(last.len_in(content.len()));
+        }
+        gaps.retain(|gap| gap.len != Some(0));
+
+        gaps
     }
 
-    /// Pulls part of one of those runs into the diff.
+    /// The run of hidden lines the cursor is addressing.
     ///
-    /// `gap` indexes [`Self::gaps`]. The file's contents are fetched the first
-    /// time a gap in it is opened, and the reveal is replayed once they land;
-    /// after that every further gap in the same file opens immediately.
-    pub fn expand(&mut self, gap: usize, reveal: Reveal) {
+    /// A gap is drawn on the hunk header below it, so that header is what the
+    /// cursor rests on to name one. The trailing gap has no header of its own,
+    /// so the last line of the patch stands in for it.
+    fn gap_at_cursor(&self) -> Option<usize> {
+        let last = self.current_file()?.lines.len().checked_sub(1)?;
+        let cursor = self.cursor;
+
+        self.gaps().into_iter().position(|gap| match gap.place {
+            Place::Trailing => cursor == last,
+            Place::Leading | Place::Between => gap.at == cursor,
+        })
+    }
+
+    /// Pulls part of the run under the cursor into the diff.
+    pub fn expand(&mut self, reveal: Reveal) {
+        let Some(gap) = self.gap_at_cursor() else {
+            self.status = "no hidden lines here".into();
+            return;
+        };
+
+        self.open_gaps(Wanted::Gap(gap, reveal));
+    }
+
+    /// Pulls in every run the open file's patch left out, which is the whole
+    /// file rather than the parts of it that changed.
+    pub fn expand_file(&mut self) {
+        self.open_gaps(Wanted::File);
+    }
+
+    /// The file's contents are fetched the first time a gap in it is opened,
+    /// and the reveal is replayed once they land; after that every further gap
+    /// in the same file opens with no round trip.
+    fn open_gaps(&mut self, wanted: Wanted) {
         let Some(file) = self.current_file() else {
             return;
         };
@@ -650,7 +729,7 @@ impl App {
         }
 
         if let Some(content) = self.blobs.get(&path).cloned() {
-            self.status = self.reveal(&path, gap, reveal, &content);
+            self.status = self.reveal(&path, wanted, &content);
             return;
         }
 
@@ -662,7 +741,7 @@ impl App {
             return;
         };
 
-        self.deferred = Some((path.clone(), gap, reveal));
+        self.deferred = Some((path.clone(), wanted));
         if self.fetching.insert(path.clone()) {
             self.send(Request::Blob { path, commit });
             self.status = "loading the file…".into();
@@ -684,8 +763,8 @@ impl App {
         self.blobs.insert(path.clone(), lines.clone());
 
         match self.deferred.take() {
-            Some((waiting, gap, reveal)) if waiting == *path => {
-                self.reveal(path, gap, reveal, lines)
+            Some((waiting, wanted)) if waiting == *path => {
+                self.reveal(path, wanted, lines)
             }
             deferred => {
                 self.deferred = deferred;
@@ -699,8 +778,7 @@ impl App {
     fn reveal(
         &mut self,
         path: &Arc<str>,
-        gap: usize,
-        reveal: Reveal,
+        wanted: Wanted,
         content: &[String],
     ) -> String {
         let Some(index) = self.files.iter().position(|file| file.path == *path)
@@ -711,19 +789,32 @@ impl App {
         // The patches are shared with the highlighting pass, so a reveal
         // publishes a new list rather than writing through the one on screen.
         let mut files = self.files.to_vec();
-        let Some(gap) = expand::gaps(&files[index]).get(gap).copied() else {
-            return String::new();
-        };
+        let file = &mut files[index];
+        let mut count = 0;
 
-        let before = files[index].lines.len();
-        let Some(revealed) =
-            expand::reveal(&mut files[index], &gap, reveal, content)
-        else {
+        // Each splice moves only what is below it, so the cursor follows one
+        // gap at a time rather than the whole expansion at once.
+        for (gap, how) in wanted_gaps(file, wanted) {
+            let before = file.lines.len();
+            let Some(revealed) = expand::reveal(file, &gap, how, content)
+            else {
+                continue;
+            };
+
+            count += revealed.count;
+            if revealed.at > self.cursor {
+                continue;
+            }
+
+            let shift = file.lines.len().cast_signed() - before.cast_signed();
+            self.cursor = self.cursor.saturating_add_signed(shift);
+            self.diff_scroll = self.diff_scroll.saturating_add_signed(shift);
+        }
+
+        if count == 0 {
             return "nothing left to expand".into();
-        };
+        }
 
-        let shift =
-            files[index].lines.len().cast_signed() - before.cast_signed();
         self.files = files.into();
 
         // Colors are held per line and drafts are anchored by line number, so
@@ -732,16 +823,7 @@ impl App {
         self.recolor.push(path.clone());
         self.reanchor_drafts();
 
-        // Everything below the reveal moved by the same amount, which keeps the
-        // line under the cursor under it. The scroll offset counts rows rather
-        // than lines, so it only holds the view roughly still until the next
-        // motion follows the cursor properly.
-        if revealed.at <= self.cursor {
-            self.cursor = self.cursor.saturating_add_signed(shift);
-            self.diff_scroll = self.diff_scroll.saturating_add_signed(shift);
-        }
-
-        format!("expanded {} lines", revealed.count)
+        format!("expanded {count} lines")
     }
 
     /// Recomputes the rows each draft covers. A draft names its lines by
@@ -827,7 +909,8 @@ impl App {
             Action::EditDraft => self.edit_draft(layout),
             Action::DeleteDraft => self.delete_draft(),
             Action::ToggleResolved => self.toggle_resolved(),
-            Action::Expand { gap, reveal } => self.expand(gap, reveal),
+            Action::Expand(reveal) => self.expand(reveal),
+            Action::ExpandFile => self.expand_file(),
 
             Action::StartSubmit => self.start_submit(layout),
             Action::CommitSubmit => self.commit_submit(),

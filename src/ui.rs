@@ -511,15 +511,10 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
         .window(app.diff_scroll, area.height as usize)
         .iter()
         .map(|row| match row {
-            Row::Code { source, fragment } => code_line(
-                &open,
-                focus,
-                *source,
-                *fragment,
-                &layout.gaps,
-                width,
-                theme,
-            ),
+            Row::Code { source, fragment } => {
+                code_line(&open, focus, *source, *fragment, width, theme)
+            }
+            Row::Gap { gap } => gap_line(layout.gaps.get(*gap), width, theme),
             Row::Draft { draft } => {
                 draft_line(&open, focus, *draft, width, theme)
             }
@@ -544,12 +539,33 @@ fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// The band standing in for a run of the file the patch left out.
+///
+/// It carries the hunk band's colours because it is the same kind of thing: a
+/// break in the file rather than a line of it. What it says is how much is
+/// missing, which is what the reader decides on before opening it.
+fn gap_line(gap: Option<&Gap>, width: usize, theme: Theme) -> Line<'static> {
+    let hidden = match gap.map(|gap| gap.len) {
+        Some(Some(len)) => format!("{len} lines hidden"),
+        // The last run ends where the file does, which only the file says.
+        _ => "rest of the file".to_string(),
+    };
+    let text = format!(" ⋯  {hidden:<width$}", width = width.saturating_sub(4));
+
+    Line::from(Span::styled(
+        text,
+        Style::default()
+            .bg(theme.hunk)
+            .fg(theme.muted)
+            .add_modifier(Modifier::ITALIC),
+    ))
+}
+
 fn code_line<'a>(
     open: &OpenFile<'a>,
     focus: Focus<'_>,
     index: usize,
     fragment: Fragment,
-    gaps: &[Gap],
     width: usize,
     theme: Theme,
 ) -> Line<'a> {
@@ -561,18 +577,7 @@ fn code_line<'a>(
     let is_selected = focus.is_selected(index);
 
     if line.kind == LineKind::Hunk {
-        // The header is what stands for the run of the file hidden above it,
-        // so it says how much that run holds rather than only where it stops.
-        let hidden = gaps
-            .iter()
-            .find(|gap| gap.at == index)
-            .and_then(|gap| gap.len)
-            .map_or_else(String::new, |len| format!("  ⋯ {len} hidden"));
-        let text = format!(
-            "{}{hidden:<width$}",
-            line.text,
-            width = width.saturating_sub(text_width(&line.text))
-        );
+        let text = format!("{:<width$}", line.text, width = width);
         let bg = if is_selected {
             theme.selection
         } else {

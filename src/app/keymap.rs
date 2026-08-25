@@ -1,5 +1,6 @@
 use super::action::{Action, Motion};
 use super::mode::Mode;
+use crate::expand::{self, Reveal};
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 const MAX_COUNT: usize = 999_999;
@@ -98,12 +99,23 @@ impl Keymap {
             };
         }
 
+        // A count on a fold says how many lines to pull in, so it is read
+        // before the operator clears it.
+        if self.operator == Some('z') {
+            let count = self.count.take();
+            self.clear();
+            return Self::resolve_fold(count, c);
+        }
+
+        // An operator waits for its second key. A count typed ahead of one
+        // belongs to the whole chord, so it must survive being parked here.
+        if c == 'g' || (c == 'z' && mode == Mode::Normal) {
+            self.operator = Some(c);
+            return Resolution::Pending;
+        }
+
         let count = self.take_count();
         let action = match c {
-            'g' => {
-                self.operator = Some('g');
-                return Resolution::Pending;
-            }
             'j' => Action::Move(Motion::Down(count)),
             'k' => Action::Move(Motion::Up(count)),
             'G' => Action::Move(Motion::Bottom),
@@ -139,6 +151,22 @@ impl Keymap {
 
         self.clear();
         Resolution::Action(action)
+    }
+
+    /// Hidden lines in Vim's own vocabulary for folds: `zk` and `zj` open a
+    /// run upward and downward, `za` opens the whole of the one under the
+    /// cursor, and `zR` opens every run in the file. A count says how many
+    /// lines to pull in rather than how many times to do it.
+    fn resolve_fold(count: Option<usize>, c: char) -> Resolution {
+        let lines = count.map_or(expand::STEP, |count| count as u32);
+
+        Resolution::Action(match c {
+            'k' => Action::Expand(Reveal::Up(lines)),
+            'j' => Action::Expand(Reveal::Down(lines)),
+            'a' => Action::Expand(Reveal::All),
+            'R' => Action::ExpandFile,
+            _ => return Resolution::Unbound,
+        })
     }
 
     const fn resolve_control(
