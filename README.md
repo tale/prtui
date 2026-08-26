@@ -1,18 +1,116 @@
 # prtui
-> Purr-tooey
 
-Something about a cat eventually?
+A modal terminal UI for reviewing GitHub pull requests for the people who are
+most comfortable in the terminal with Vim motions and a command line.
 
 ## Install
 
+Any of these work. All of them need the [GitHub CLI][gh] on your `PATH`, which
+is where `prtui` gets its credentials and works out which repo you are in.
+
+**Homebrew**
+
 ```sh
-brew tap tale/tap
-brew install prtui
+brew install tale/tap/prtui
 ```
 
-The formula tracks `main` and builds from source, so git needs an SSH key that
-can read this repo. Pick up later commits with `brew upgrade --fetch-HEAD prtui`
-— plain `brew upgrade` never re-checks a HEAD install.
+**Cargo**
 
-Homebrew refuses source builds when Xcode is older than it wants, so the install
-machine needs a current Xcode or none at all.
+```sh
+cargo install prtui
+```
+
+**Nix**
+
+```sh
+nix run github:tale/prtui -- 1234
+```
+
+**Prebuilt binaries** for macOS and Linux, on arm64 and x86_64, are attached to
+every [release][releases] with SHA-256 checksums. Linux builds use glibc 2.35 so
+they require Ubuntu 22.04, Debian 12, RHEL 9, or newer.
+
+## Use
+
+Authenticate once, then open a pull request by number:
+
+```sh
+gh auth login
+prtui 1234
+```
+
+From inside a checkout, the repo is determined based on the git remote of the
+current working directory. You can also override it with `-R` like below:
+
+```sh
+prtui 1234 -R rust-lang/cargo
+```
+
+GitHub Enterprise works through the same flag, with the host in front:
+
+```sh
+prtui 1234 -R github.example.com/team/service
+```
+
+```
+Options:
+  -R, --repo <[HOST/]OWNER/REPO>  Select another repository
+      --theme <auto|dark|light>   Color theme [default: auto]
+  -h, --help                      Print help
+  -V, --version                   Print version
+```
+
+## Keys
+
+Press `?` for the same list in the app, or `:` for a command line. Every key
+below is a named command, so anything bound to a key is also reachable as
+`:name` — and `:42` jumps to line 42.
+
+**Motion** — `j`/`k` a row, `<C-d>`/`<C-u>` half a screen, `gg`/`G` the first
+and last line. A count works where you would expect: `10j`.
+
+**Files** — `]`/`[` step through files, `f` shows or hides the tree, `<Tab>`
+swaps the focused pane, `h`/`l` move between them, `<CR>` opens what the cursor
+is on.
+
+**Reading** — `/` filters the tree or searches the file, depending on which pane
+has focus; `n`/`N` walk the hits and `:noh` clears them. `za` reveals the hidden
+lines under the cursor, `zj`/`zk` reveal downward or upward, and `zR` opens
+every gap in the file — the surrounding code is fetched from GitHub on demand.
+
+**Conversations** — `}`/`{` jump between unanswered threads and `R` resolves or
+reopens the one you are on.
+
+**Comments** — `c` comments on the line, on a visual span, or replies to the
+thread under the cursor. `v` selects lines first; `C` writes a note about the
+whole file. `e` reopens a draft, `d` discards it.
+
+**Submitting** — `s` opens the form. `<Tab>` steps the verdict between comment,
+approve, and request changes; `<CR>` ships every draft as one review.
+
+`q` or `:q` quits.
+
+## Contributing
+
+CI runs formatting, Clippy (pedantic, nursery, and cargo lints, warnings denied)
+and the test suite. Reproduce all three locally:
+
+```sh
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+```
+
+With [mise][mise] installed, `mise run check` does the same and `mise install`
+sets up the pre-commit hook that formats and lints staged Rust.
+
+`ARCHITECTURE.md` describes the internal boundaries and the refactors still in
+flight; read it before a change that crosses modules.
+
+## License
+
+MIT. See `LICENSE`.
+
+[gh]: https://cli.github.com
+[mise]: https://mise.jdx.dev
+[releases]: https://github.com/tale/prtui/releases
