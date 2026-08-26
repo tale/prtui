@@ -1,9 +1,13 @@
 # Architecture
 
-The baseline this codebase is working toward. Steps A and B of the order of work
-have landed; C through E have not, so the tree below is still partly a target.
-The **Why** section describes the problems as they were found — the ones A and B
-fixed are marked resolved so the reasoning stays readable.
+Where code lives, what the boundaries are, and which of them exist yet. Steps A
+and B of the order of work have landed and describe the tree as it stands; C
+through E are planned, so parts of what follows are a target rather than a
+description. Every section marks which is which.
+
+**Rules** is the contract, **Tree** is the map, and **Why** is the reasoning —
+a record of the boundary problems that motivated the work, with the resolved
+ones marked so the argument still reads in order.
 
 ## Why
 
@@ -87,23 +91,30 @@ own.
 ## Rules
 
 Five invariants. The tree follows from them; these are the actual contract.
+Each is tagged with the step that delivers it, so a rule that is still a target
+is not mistaken for one the code already keeps.
 
-1. **The view never mutates.** `view::draw(&Frame, &App, &Layout) ->
+1. **The view never mutates.** *(Invariant live since A and B; the signature
+   below arrives with E.)* `view::draw(&Frame, &App, &Layout) ->
    Vec<Placement>`. Anything render would otherwise discover is computed by
-   layout instead.
-2. **Layout is a value, computed once per frame.** `Layout::compute(area,
-   &App)` holds the pane rects, the viewport heights, and the virtual row list.
-   The loop computes it and hands the same value to both `apply` and `draw`.
-   This is what removes the `viewport_height` parameter and the `- 3`.
-3. **One effect channel.** `App::apply` queues an `Effect`; every result
-   arrives as one `Msg`; the loop is the only thing that spawns. Requests carry
-   a generation so a stale response drops instead of clobbering.
-4. **Domain types at boundaries.** `serde_json::Value` never leaves
-   `github/wire.rs`. `github` returns `PullRequest` / `Vec<ChangedFile>`;
-   drafts serialize at the edge, never inside `app`.
-5. **Grouped private state.** `App` owns sub-structs (`Focus`, `Drafts`,
-   `Find`, `Loading`) that keep their own invariants, rather than 25 public
-   fields any caller can desynchronize.
+   layout instead. Today this is `ui::draw(&mut Frame, &App, &Layout)`, which
+   already takes the model immutably; E is what renames it and lifts kitty
+   placements into the return.
+2. **Layout is a value, computed once per frame.** *(Live since B.)*
+   `Layout::compute(area, &App)` holds the pane rects, the viewport heights,
+   and the virtual row list. The loop computes it and hands the same value to
+   both `apply` and `draw`. This is what removes the `viewport_height`
+   parameter and the `- 3`.
+3. **One effect channel.** *(Planned, C.)* `App::apply` queues an `Effect`;
+   every result arrives as one `Msg`; the loop is the only thing that spawns.
+   Requests carry a generation so a stale response drops instead of
+   clobbering.
+4. **Domain types at boundaries.** *(Planned, D.)* `serde_json::Value` never
+   leaves `github/wire.rs`. `github` returns `PullRequest` /
+   `Vec<ChangedFile>`; drafts serialize at the edge, never inside `app`.
+5. **Grouped private state.** *(Planned, E.)* `App` owns sub-structs (`Focus`,
+   `Drafts`, `Find`, `Loading`) that keep their own invariants, rather than 25
+   public fields any caller can desynchronize.
 
 ## Tree
 

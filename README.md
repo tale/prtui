@@ -73,20 +73,21 @@ and last line. A count works where you would expect: `10j`.
 swaps the focused pane, `h`/`l` move between them, `<CR>` opens what the cursor
 is on.
 
-**Reading** — `/` filters the tree or searches the file, depending on which pane
-has focus; `n`/`N` walk the hits and `:noh` clears them. `za` reveals the hidden
-lines under the cursor, `zj`/`zk` reveal downward or upward, and `zR` opens
-every gap in the file — the surrounding code is fetched from GitHub on demand.
+**Reading** — `/` filters the tree or searches the file, depending on which
+pane has focus; `n`/`N` walk the hits and `:noh` clears them. `za` reveals the
+hidden lines under the cursor, `zj`/`zk` reveal downward or upward, and `zR`
+opens every gap in the file — the surrounding code is fetched from GitHub on
+demand.
 
-**Conversations** — `}`/`{` jump between unanswered threads and `R` resolves or
-reopens the one you are on.
+**Conversations** — `}`/`{` jump between unanswered threads and `R` resolves
+or reopens the one you are on.
 
 **Comments** — `c` comments on the line, on a visual span, or replies to the
 thread under the cursor. `v` selects lines first; `C` writes a note about the
 whole file. `e` reopens a draft, `d` discards it.
 
-**Submitting** — `s` opens the form. `<Tab>` steps the verdict between comment,
-approve, and request changes; `<CR>` ships every draft as one review.
+**Submitting** — `s` opens the form. `<Tab>` steps the verdict between
+comment, approve, and request changes; `<CR>` ships every draft as one review.
 
 `q` or `:q` quits.
 
