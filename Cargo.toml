@@ -5,9 +5,12 @@ edition = "2024"
 description = "A terminal UI for reviewing GitHub pull requests"
 license = "MIT"
 repository = "https://github.com/tale/prtui"
+homepage = "https://github.com/tale/prtui"
+documentation = "https://github.com/tale/prtui"
 readme = "README.md"
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["github", "pull-request", "review", "tui"]
+exclude = ["/.github", "/ARCHITECTURE.md", "/flake.lock", "/flake.nix", "/lefthook.yml", "/mise.toml"]
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -28,7 +31,6 @@ unreadable_literal = "allow"
 too_many_lines = "allow"
 future_not_send = "allow"
 multiple_crate_versions = "allow"
-cargo_common_metadata = "allow"
 
 [profile.release]
 codegen-units = 1
