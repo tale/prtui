@@ -352,6 +352,101 @@ fn the_command_line_remembers_what_was_run() {
     assert_eq!(app.command_line.as_ref().unwrap().text(), "");
 }
 
+/// The reference is a view of the command table, so a command that no key
+/// carries still has to be listed under the name `:` reaches it by.
+#[test]
+fn the_reference_lists_every_command_and_the_keys_bound_to_it() {
+    use prtui::app::keymap::Reference;
+
+    let app = load();
+    let reference = app.keymap().reference();
+
+    let entries: Vec<(&str, &str)> = reference
+        .iter()
+        .filter_map(|line| match line {
+            Reference::Entry { keys, name, .. } => Some((*name, keys.as_str())),
+            Reference::Heading(_) => None,
+        })
+        .collect();
+
+    let find = |name: &str| {
+        entries
+            .iter()
+            .find(|(command, _)| *command == name)
+            .map(|(_, keys)| *keys)
+    };
+
+    // The same command reached from more than one mode lists each chord once.
+    assert_eq!(find("move-down"), Some("j  <Down>  <C-n>"));
+    assert_eq!(find("expand-file"), Some("zR"));
+    assert_eq!(find("help"), Some("?"));
+    // Reachable only by name, and listed anyway.
+    assert_eq!(find("leave-card"), Some(""));
+
+    assert!(reference.contains(&Reference::Heading("hidden lines")));
+}
+
+#[test]
+fn the_reference_opens_scrolls_and_closes() {
+    let mut app = load();
+
+    press(&mut app, "?");
+    assert_eq!(app.mode, Mode::Help);
+    assert_eq!(app.help_scroll, 0);
+
+    press(&mut app, "5j");
+    assert_eq!(app.help_scroll, 5);
+    press(&mut app, "2k");
+    assert_eq!(app.help_scroll, 3);
+    press(&mut app, "gg");
+    assert_eq!(app.help_scroll, 0);
+
+    // The reference is longer than the box it is read in.
+    press(&mut app, "G");
+    assert!(app.help_scroll > 0);
+
+    press(&mut app, "q");
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.help_scroll, 0);
+    assert!(!app.should_quit);
+}
+
+/// Reading the reference must not move the cursor, or a reader loses their
+/// place by looking a key up.
+#[test]
+fn the_reference_leaves_the_diff_where_it_was() {
+    let mut app = load();
+    press(&mut app, "6j");
+    let (cursor, scroll) = (app.cursor, app.diff_scroll);
+
+    press(&mut app, "?");
+    press(&mut app, "9j");
+    let mut input = InputRouter::default();
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
+    );
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.cursor, cursor);
+    assert_eq!(app.diff_scroll, scroll);
+}
+
+#[test]
+fn the_reference_answers_to_the_command_line_too() {
+    let mut app = load();
+
+    ex(&mut app, "h");
+    assert_eq!(app.mode, Mode::Help);
+
+    press(&mut app, "?");
+    assert_eq!(app.mode, Mode::Normal);
+
+    ex(&mut app, "help");
+    assert_eq!(app.mode, Mode::Help);
+}
+
 #[test]
 fn gg_needs_both_keys() {
     let mut app = load();
@@ -363,14 +458,14 @@ fn gg_needs_both_keys() {
     let key = KeyEvent::new(KeyCode::Char('g'), Modifiers::NONE);
     assert_eq!(send(&mut input, &mut app, key), DispatchResult::Pending);
     assert_eq!(app.cursor, 9);
-    assert_eq!(input.pending_hint(), "g");
+    assert_eq!(app.pending_hint(), "g");
 
     assert_eq!(
         send(&mut input, &mut app, key),
         DispatchResult::Applied(Action::Move(Motion::Top))
     );
     assert_eq!(app.cursor, 0);
-    assert!(input.pending_hint().is_empty());
+    assert!(app.pending_hint().is_empty());
 }
 
 /// Hidden lines answer to Vim's fold keys, and a count on one says how many
@@ -958,6 +1053,7 @@ fn ctrl_c_quits_from_every_mode() {
         Mode::Filter,
         Mode::Search,
         Mode::CommandLine,
+        Mode::Help,
         Mode::Submit,
     ] {
         let mut app = load();
@@ -974,6 +1070,7 @@ fn ctrl_c_quits_from_every_mode() {
             }
             Mode::Search => press(&mut app, "/"),
             Mode::CommandLine => press(&mut app, ":"),
+            Mode::Help => press(&mut app, "?"),
             Mode::Submit => press(&mut app, "s"),
         }
         assert_eq!(app.mode, mode);
@@ -2321,4 +2418,27 @@ fn meta_with_pending(comment: &str, body: &str) -> prtui::model::Meta {
     pr["reviewThreads"]["nodes"] = serde_json::json!([thread]);
 
     parse_meta(&meta).unwrap()
+}
+
+/// The reference is a fixed-column table, so the columns have to be wide
+/// enough for what the keymap and the command table actually hold.
+#[test]
+fn the_reference_fits_the_columns_it_is_drawn_in() {
+    use prtui::app::keymap::Reference;
+
+    let app = load();
+    for line in app.keymap().reference() {
+        let Reference::Entry {
+            keys,
+            name,
+            summary,
+        } = line
+        else {
+            continue;
+        };
+
+        assert!(keys.chars().count() <= 18, "keys column: {keys}");
+        assert!(name.chars().count() <= 19, "name column: {name}");
+        assert!(summary.chars().count() <= 36, "summary column: {summary}");
+    }
 }

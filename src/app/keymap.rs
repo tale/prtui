@@ -35,6 +35,7 @@ const DEFAULT: &[(&str, &str, &str)] = &[
     ("n", "<Right>", "focus-diff"),
     ("n", "/", "find"),
     ("n", ":", "command-line"),
+    ("n", "?", "help"),
     ("n", "v", "enter-visual"),
     ("n", "V", "enter-visual"),
     ("v", "v", "leave-visual"),
@@ -74,9 +75,32 @@ const DEFAULT: &[(&str, &str, &str)] = &[
     ("s", "<Esc>", "cancel-search"),
     ("c", "<Esc>", "cancel-command-line"),
     ("r", "<Esc>", "cancel-submit"),
-    ("nvifscr", "<C-c>", "quit"),
+    ("nvifscrh", "<C-c>", "quit"),
     ("nv", "q", "quit"),
+    ("h", "j", "move-down"),
+    ("h", "k", "move-up"),
+    ("h", "<Down>", "move-down"),
+    ("h", "<Up>", "move-up"),
+    ("h", "<C-d>", "half-page-down"),
+    ("h", "<C-u>", "half-page-up"),
+    ("h", "gg", "goto-first-line"),
+    ("h", "G", "goto-last-line"),
+    ("h", "<Esc>", "close-help"),
+    ("h", "q", "close-help"),
+    ("h", "?", "close-help"),
 ];
+
+/// One line of the key reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reference {
+    Heading(&'static str),
+    Entry {
+        /// The chords bound to the command, or empty when only `:` reaches it.
+        keys: String,
+        name: &'static str,
+        summary: &'static str,
+    },
+}
 
 /// The result of feeding one key into the command parser.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +174,46 @@ impl Keymap {
             count: None,
             pending: Vec::new(),
         }
+    }
+
+    /// The key reference: the command table, annotated with the chords bound
+    /// to each command.
+    ///
+    /// Reading it off the bindings rather than off a second list is what stops
+    /// the two disagreeing. A command with no chord still appears, since `:` is
+    /// how it is reached.
+    pub fn reference(&self) -> Vec<Reference> {
+        let mut lines = Vec::new();
+        let mut group = "";
+
+        for command in command::COMMANDS {
+            if command.group != group {
+                group = command.group;
+                lines.push(Reference::Heading(group));
+            }
+
+            // One command answers to the same chord in several modes, and
+            // reading `j` three times says nothing the first one did not.
+            let mut keys: Vec<String> = Vec::new();
+            for binding in self
+                .bindings
+                .iter()
+                .filter(|binding| binding.command.name == command.name)
+            {
+                let chord = keys::render(&binding.chord);
+                if !keys.contains(&chord) {
+                    keys.push(chord);
+                }
+            }
+
+            lines.push(Reference::Entry {
+                keys: keys.join("  "),
+                name: command.name,
+                summary: command.summary,
+            });
+        }
+
+        lines
     }
 
     pub fn pending_hint(&self) -> String {

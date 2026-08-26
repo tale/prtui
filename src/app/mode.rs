@@ -14,6 +14,8 @@ pub enum Mode {
     Search,
     /// Typing a `:` command.
     CommandLine,
+    /// Reading the key reference, which scrolls and does nothing else.
+    Help,
     /// Choosing a verdict and writing the summary that ships the review.
     Submit,
 }
@@ -29,6 +31,7 @@ impl Mode {
             'f' => Self::Filter,
             's' => Self::Search,
             'c' => Self::CommandLine,
+            'h' => Self::Help,
             'r' => Self::Submit,
             _ => return None,
         })
@@ -36,7 +39,7 @@ impl Mode {
 
     /// Where a digit is a count prefix rather than something to type.
     pub const fn takes_count(self) -> bool {
-        matches!(self, Self::Normal | Self::Visual)
+        matches!(self, Self::Normal | Self::Visual | Self::Help)
     }
 
     /// Whether the mode is editing a line of text of its own.
@@ -59,6 +62,7 @@ impl Mode {
             Self::Filter => " FILTER ",
             Self::Search => " SEARCH ",
             Self::CommandLine => " COMMAND ",
+            Self::Help => " HELP ",
             Self::Submit => " SUBMIT ",
         }
     }

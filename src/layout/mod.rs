@@ -2,6 +2,8 @@ pub mod rows;
 pub mod tree;
 
 use crate::app::App;
+use crate::app::keymap::Reference;
+use crate::app::mode::Mode;
 use crate::expand::Gap;
 use ratatui::layout::{Constraint, Direction, Rect};
 use rows::{Rows, View};
@@ -30,6 +32,10 @@ pub struct Layout {
     pub composer: Option<Rect>,
     /// The submit form, docked in the same place.
     pub submit: Option<Rect>,
+    /// The key reference, while it is open. It floats over the panes rather
+    /// than docking: it is read, not typed into, so nothing under it has to
+    /// stay visible.
+    pub help: Option<Help>,
     pub rows: Rows,
     pub files: Tree,
     /// The runs of the open file its patch left out, which the hunk headers
@@ -94,6 +100,7 @@ impl Layout {
             diff,
             composer,
             submit,
+            help: build_help(app, body),
             rows: build_rows(app, diff, &gaps),
             gaps,
             files: build_tree(
@@ -119,6 +126,68 @@ impl Layout {
     /// visible for either and needs no guess about which is opening.
     pub const fn viewport_once_docked(&self) -> usize {
         self.diff_viewport().saturating_sub(SUBMIT_HEIGHT as usize)
+    }
+
+    /// The rows the reference can be scrolled by, which is however much of it
+    /// does not fit.
+    pub fn help_viewport(&self) -> usize {
+        self.help
+            .as_ref()
+            .map_or(0, |help| help.inner.height as usize)
+    }
+
+    pub fn help_limit(&self) -> usize {
+        self.help.as_ref().map_or(0, |help| {
+            help.lines.len().saturating_sub(help.inner.height as usize)
+        })
+    }
+}
+
+/// The key reference, laid out: where it sits and what it says.
+pub struct Help {
+    /// The bordered box, for the frame to clear and paint.
+    pub area: Rect,
+    /// What is left inside the border, which is what scrolls.
+    pub inner: Rect,
+    pub lines: Vec<Reference>,
+}
+
+/// Widest the reference gets before it stops using the whole terminal.
+const HELP_WIDTH: u16 = 80;
+
+/// Rows of chrome around the reference: two borders, and a row of margin above
+/// and below so it reads as a panel rather than as a second pane.
+const HELP_MARGIN: u16 = 2;
+
+fn build_help(app: &App, body: Rect) -> Option<Help> {
+    if app.mode != Mode::Help {
+        return None;
+    }
+
+    let width = HELP_WIDTH.min(body.width);
+    let height = body.height.saturating_sub(HELP_MARGIN * 2).max(3);
+    let area = Rect {
+        x: body.x + (body.width.saturating_sub(width)) / 2,
+        y: body.y + (body.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    Some(Help {
+        area,
+        inner: inside_border(area),
+        lines: app.keymap().reference(),
+    })
+}
+
+/// The area a bordered box leaves for its content, with a column of padding on
+/// each side.
+const fn inside_border(area: Rect) -> Rect {
+    Rect {
+        x: area.x + 2,
+        y: area.y + 1,
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(2),
     }
 }
 

@@ -87,5 +87,9 @@ pub enum Action {
     /// Walk the command history back (-1) or forward (1).
     WalkHistory(isize),
 
+    /// Open and close the key reference.
+    OpenHelp,
+    CloseHelp,
+
     Quit,
 }

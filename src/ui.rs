@@ -5,6 +5,7 @@
 //! layout, so nothing has to be discovered mid-render and written back.
 
 use crate::app::draft::{Side, Sync};
+use crate::app::keymap::Reference;
 use crate::app::mode::Mode;
 use crate::app::review::ReviewEvent;
 use crate::app::search::Query;
@@ -35,12 +36,12 @@ const ICON_WIDTH: usize = 2;
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-pub fn draw(frame: &mut Frame, app: &App, layout: &Layout, pending_hint: &str) {
+pub fn draw(frame: &mut Frame, app: &App, layout: &Layout) {
     draw_header(frame, app, layout.header);
 
     if app.is_loading() {
         draw_loading(frame, app, layout.body);
-        draw_bottom_bar(frame, app, layout, pending_hint);
+        draw_bottom_bar(frame, app, layout);
         return;
     }
 
@@ -49,9 +50,86 @@ pub fn draw(frame: &mut Frame, app: &App, layout: &Layout, pending_hint: &str) {
     }
     draw_diff(frame, app, layout);
 
-    draw_bottom_bar(frame, app, layout, pending_hint);
+    draw_bottom_bar(frame, app, layout);
     draw_composer(frame, app, layout);
     draw_submit(frame, app, layout);
+    draw_help(frame, app, layout);
+}
+
+/// Columns the reference spends on its indent, on the chord, and on the command
+/// name, leaving the rest of the line for what the command does.
+const HELP_INDENT: usize = 2;
+const HELP_KEYS: usize = 18;
+const HELP_NAME: usize = 20;
+
+/// The key reference: every command, the chord bound to it, and what it does.
+///
+/// A command with no chord still gets a row. Its name is how `:` addresses it,
+/// which is the only way to reach it.
+fn draw_help(frame: &mut Frame, app: &App, layout: &Layout) {
+    let Some(help) = layout.help.as_ref() else {
+        return;
+    };
+    let theme = app.theme();
+
+    let block = docked_block(" keys ".to_owned(), theme.accent).title_bottom(
+        Line::styled(
+            " j/k scroll · esc close ",
+            Style::default().fg(theme.dim),
+        )
+        .right_aligned(),
+    );
+    frame.render_widget(Clear, help.area);
+    frame.render_widget(block, help.area);
+
+    let width = help.inner.width as usize;
+    let lines: Vec<Line> = help
+        .lines
+        .iter()
+        .skip(app.help_scroll)
+        .take(help.inner.height as usize)
+        .map(|line| help_line(line, width, theme))
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), help.inner);
+}
+
+fn help_line(line: &Reference, width: usize, theme: Theme) -> Line<'static> {
+    match line {
+        Reference::Heading(title) => Line::styled(
+            (*title).to_owned(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Reference::Entry {
+            keys,
+            name,
+            summary,
+        } => {
+            let budget =
+                width.saturating_sub(HELP_INDENT + HELP_KEYS + HELP_NAME);
+
+            Line::from(vec![
+                Span::styled(
+                    format!(
+                        "{:HELP_INDENT$}{:HELP_KEYS$}",
+                        "",
+                        truncate(keys, HELP_KEYS)
+                    ),
+                    Style::default().fg(theme.heading),
+                ),
+                Span::styled(
+                    format!("{:HELP_NAME$}", truncate(name, HELP_NAME)),
+                    Style::default().fg(theme.muted),
+                ),
+                Span::styled(
+                    truncate(summary, budget),
+                    Style::default().fg(theme.dim),
+                ),
+            ])
+        }
+    }
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -1373,13 +1451,9 @@ fn draw_submit(frame: &mut Frame, app: &App, layout: &Layout) {
     );
 }
 
-fn draw_bottom_bar(
-    frame: &mut Frame,
-    app: &App,
-    layout: &Layout,
-    pending_hint: &str,
-) {
+fn draw_bottom_bar(frame: &mut Frame, app: &App, layout: &Layout) {
     let area = layout.status;
+    let pending_hint = app.pending_hint();
     let theme = app.theme();
     let bar = Style::default().bg(theme.hunk);
     let mode_bg = match app.mode {
@@ -1389,7 +1463,7 @@ fn draw_bottom_bar(
         Mode::Filter => theme.purple,
         Mode::Search => theme.warning,
         Mode::CommandLine => theme.muted,
-        Mode::Submit => theme.heading,
+        Mode::Help | Mode::Submit => theme.heading,
     };
 
     let pane = match app.pane {
@@ -1552,6 +1626,7 @@ fn draw_key_hints(
         (Mode::Search, _) => {
             &[("↑↓", "step"), ("↵", "accept"), ("esc", "cancel")]
         }
+        (Mode::Help, _) => &[("j/k", "scroll"), ("esc", "close")],
         (Mode::CommandLine, _) => &[
             (":42", "line"),
             ("↑↓", "history"),

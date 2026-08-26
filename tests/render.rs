@@ -68,7 +68,7 @@ fn summary(app: &App) -> (usize, usize) {
 /// draw against it.
 fn paint(frame: &mut Frame, app: &App) {
     let layout = Layout::compute(frame.area(), app);
-    ui::draw(frame, app, &layout, "");
+    ui::draw(frame, app, &layout);
 }
 
 /// Drives the app the way the event loop does: raw keys through the keymap.
@@ -1354,6 +1354,32 @@ fn the_selection_counts_one_row_in_the_singular() {
 
 /// The bar used to read `1/4 · 1/8`, which counted two things and named
 /// neither.
+#[test]
+fn the_reference_lists_the_keys_over_the_panes() {
+    let mut app = load();
+    press(&mut app, "?");
+
+    let rendered = draw(&app);
+    assert!(rendered.contains("HELP"), "{rendered}");
+    assert!(rendered.contains("keys"), "{rendered}");
+    assert!(rendered.contains("motion"), "{rendered}");
+    assert!(rendered.contains("move-down"), "{rendered}");
+    assert!(rendered.contains("down one row"), "{rendered}");
+    assert!(rendered.contains("esc close"), "{rendered}");
+}
+
+/// Scrolling has to reach the groups the first screen has no room for.
+#[test]
+fn the_reference_scrolls_to_its_last_group() {
+    let mut app = load();
+    press(&mut app, "?");
+    assert!(!draw(&app).contains("leave prtui"));
+
+    press(&mut app, "G");
+    let rendered = draw(&app);
+    assert!(rendered.contains("leave prtui"), "{rendered}");
+}
+
 #[test]
 fn the_command_line_takes_the_bottom_bar_while_it_is_open() {
     let mut app = load();

@@ -1,6 +1,6 @@
 use super::App;
 use super::action::Action;
-use super::keymap::{Keymap, Resolution};
+use super::keymap::Resolution;
 use super::mode::Mode;
 use crate::layout::Layout;
 use termina::event::KeyEvent;
@@ -14,19 +14,15 @@ pub enum DispatchResult {
     Ignored,
 }
 
-/// Owns transient input state and routes keys between the application keymap
-/// and whichever line the current mode is editing.
+/// Routes keys between the application keymap and whichever line the current
+/// mode is editing, and drops a half-typed command when the mode changes under
+/// it.
 #[derive(Default)]
 pub struct InputRouter {
-    keymap: Keymap,
     mode: Option<Mode>,
 }
 
 impl InputRouter {
-    pub fn pending_hint(&self) -> String {
-        self.keymap.pending_hint()
-    }
-
     pub fn dispatch_key(
         &mut self,
         app: &mut App,
@@ -34,12 +30,13 @@ impl InputRouter {
         layout: &Layout,
     ) -> DispatchResult {
         let mode = app.mode;
-        self.sync_mode(mode);
+        self.sync_mode(app, mode);
 
-        match self.keymap.resolve(mode, key) {
+        match app.resolve_key(key) {
             Resolution::Action(action) => {
                 app.apply(&action, layout);
-                self.sync_mode(app.mode);
+                let mode = app.mode;
+                self.sync_mode(app, mode);
                 DispatchResult::Applied(action)
             }
             Resolution::Pending => DispatchResult::Pending,
@@ -56,7 +53,8 @@ impl InputRouter {
         text: &str,
         layout: &Layout,
     ) -> DispatchResult {
-        self.sync_mode(app.mode);
+        let mode = app.mode;
+        self.sync_mode(app, mode);
 
         if app.type_text(text, layout) {
             return DispatchResult::ForwardedToEditor;
@@ -65,12 +63,12 @@ impl InputRouter {
         DispatchResult::Ignored
     }
 
-    fn sync_mode(&mut self, mode: Mode) {
+    fn sync_mode(&mut self, app: &mut App, mode: Mode) {
         if self.mode == Some(mode) {
             return;
         }
 
-        self.keymap.clear();
+        app.clear_pending();
         self.mode = Some(mode);
     }
 }

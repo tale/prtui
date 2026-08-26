@@ -19,6 +19,7 @@ use crate::renderer::{Segment, Theme, ThemeMode};
 use action::{Action, Motion};
 use draft::{Anchor, Attachment, Draft, Parent, Sync};
 use editor::CommentEditor;
+use keymap::{Keymap, Resolution};
 use mode::{Mode, Selection};
 use review::{Failure, Request, Sent, Submission};
 use search::Query;
@@ -338,6 +339,9 @@ pub struct App {
 
     outbox: Vec<Request>,
     theme: Theme,
+    /// The bindings. Configuration the app owns and the view reads, the same
+    /// way the theme is.
+    keymap: Keymap,
     /// Keyed by path, which is what a file is. A position would only mean
     /// anything for as long as the list it indexes stays put.
     highlights: HashMap<Arc<str>, Highlight>,
@@ -359,6 +363,8 @@ pub struct App {
     command_history: Vec<String>,
     /// How far back through the history the open `:` line has been walked.
     history_cursor: Option<usize>,
+    /// How far the key reference has been scrolled.
+    pub help_scroll: usize,
     files_state: FilesState,
 }
 
@@ -407,6 +413,7 @@ impl App {
             in_flight: 0,
             outbox: Vec::new(),
             theme,
+            keymap: Keymap::default(),
             highlights: HashMap::new(),
             blobs: HashMap::new(),
             fetching: HashSet::new(),
@@ -416,12 +423,32 @@ impl App {
             search_origin: None,
             command_history: Vec::new(),
             history_cursor: None,
+            help_scroll: 0,
             files_state: FilesState::Loading,
         }
     }
 
     pub const fn theme(&self) -> Theme {
         self.theme
+    }
+
+    pub const fn keymap(&self) -> &Keymap {
+        &self.keymap
+    }
+
+    /// Feeds one key to the bindings. The mode is the keymap's addressing, so
+    /// the app supplies it rather than the caller.
+    pub fn resolve_key(&mut self, key: KeyEvent) -> Resolution {
+        self.keymap.resolve(self.mode, key)
+    }
+
+    /// Drops a half-typed command, which is what a mode change means for one.
+    pub fn clear_pending(&mut self) {
+        self.keymap.clear();
+    }
+
+    pub fn pending_hint(&self) -> String {
+        self.keymap.pending_hint()
     }
 
     pub const fn is_loading(&self) -> bool {
@@ -939,6 +966,14 @@ impl App {
                 }
             }
 
+            Action::OpenHelp => {
+                self.mode = Mode::Help;
+                self.help_scroll = 0;
+            }
+            Action::CloseHelp => {
+                self.mode = Mode::Normal;
+                self.help_scroll = 0;
+            }
             Action::StartCommandLine => self.start_command_line(),
             Action::RunCommandLine => self.run_command_line(layout),
             Action::CancelCommandLine => self.cancel_command_line(),
@@ -1569,7 +1604,7 @@ impl App {
                 edit(line);
                 self.history_cursor = None;
             }
-            Mode::Normal | Mode::Visual => return false,
+            Mode::Normal | Mode::Visual | Mode::Help => return false,
         }
 
         true
@@ -2149,6 +2184,16 @@ impl App {
     }
 
     fn travel(&mut self, motion: Motion, layout: &Layout) {
+        if self.mode == Mode::Help {
+            self.help_scroll = step(
+                motion,
+                self.help_scroll,
+                layout.help_limit() + 1,
+                layout.help_viewport(),
+            );
+            return;
+        }
+
         if self.pane == Pane::Files {
             self.travel_files(motion, layout);
             return;

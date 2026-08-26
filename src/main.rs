@@ -353,7 +353,7 @@ async fn event_loop(
         }
 
         if is_dirty {
-            layout = present_frame(terminal, &app, &input.pending_hint())?;
+            layout = present_frame(terminal, &app)?;
             is_dirty = false;
         }
 
@@ -504,12 +504,11 @@ async fn event_loop(
 fn present_frame(
     terminal: &mut terminal::AppTerminal,
     app: &App,
-    pending_hint: &str,
 ) -> Result<Layout> {
     let layout = Layout::compute(terminal.get_frame().area(), app);
 
     terminal::render(terminal, |frame| {
-        ui::draw(frame, app, &layout, pending_hint);
+        ui::draw(frame, app, &layout);
     })
     .context("drawing a frame")?;
 
