@@ -36,6 +36,9 @@ const DEFAULT: &[(&str, &str, &str)] = &[
     ("n", "/", "find"),
     ("n", ":", "command-line"),
     ("n", "?", "help"),
+    ("n", "o", "overview"),
+    ("n", "gx", "open"),
+    ("nv", "y", "yank"),
     ("n", "v", "enter-visual"),
     ("n", "V", "enter-visual"),
     ("v", "v", "leave-visual"),
@@ -75,19 +78,20 @@ const DEFAULT: &[(&str, &str, &str)] = &[
     ("s", "<Esc>", "cancel-search"),
     ("c", "<Esc>", "cancel-command-line"),
     ("r", "<Esc>", "cancel-submit"),
-    ("nvifscrh", "<C-c>", "quit"),
+    ("nvifscrho", "<C-c>", "quit"),
     ("nv", "q", "quit"),
-    ("h", "j", "move-down"),
-    ("h", "k", "move-up"),
-    ("h", "<Down>", "move-down"),
-    ("h", "<Up>", "move-up"),
-    ("h", "<C-d>", "half-page-down"),
-    ("h", "<C-u>", "half-page-up"),
-    ("h", "gg", "goto-first-line"),
-    ("h", "G", "goto-last-line"),
-    ("h", "<Esc>", "close-help"),
-    ("h", "q", "close-help"),
-    ("h", "?", "close-help"),
+    ("ho", "j", "move-down"),
+    ("ho", "k", "move-up"),
+    ("ho", "<Down>", "move-down"),
+    ("ho", "<Up>", "move-up"),
+    ("ho", "<C-d>", "half-page-down"),
+    ("ho", "<C-u>", "half-page-up"),
+    ("ho", "gg", "goto-first-line"),
+    ("ho", "G", "goto-last-line"),
+    ("ho", "<Esc>", "close-panel"),
+    ("ho", "q", "close-panel"),
+    ("h", "?", "close-panel"),
+    ("o", "o", "close-panel"),
 ];
 
 /// One line of the key reference.
@@ -112,23 +116,24 @@ pub enum Resolution {
     Unbound,
 }
 
-/// The modes a binding is live in.
+/// The modes a binding is live in, one bit each. Wide enough for every mode
+/// there is: a mask that cannot hold them all shifts off its own end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Modes(u8);
+struct Modes(u16);
 
 impl Modes {
     fn parse(letters: &str) -> Option<Self> {
         let mut mask = 0;
 
         for letter in letters.chars() {
-            mask |= 1 << Mode::from_letter(letter)? as u8;
+            mask |= 1 << Mode::from_letter(letter)? as u16;
         }
 
         Some(Self(mask))
     }
 
     const fn contains(self, mode: Mode) -> bool {
-        self.0 & (1 << mode as u8) != 0
+        self.0 & (1 << mode as u16) != 0
     }
 }
 

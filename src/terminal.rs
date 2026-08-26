@@ -11,7 +11,7 @@ use termina::escape::csi::{
     Csi, DecPrivateMode, DecPrivateModeCode, Keyboard, KittyKeyboardFlags,
     Mode, ThemeMode as TerminalThemeMode,
 };
-use termina::escape::osc::{ColorOrQuery, DynamicColorNumber, Osc};
+use termina::escape::osc::{ColorOrQuery, DynamicColorNumber, Osc, Selection};
 use termina::{
     Event, EventReader, EventStream, PlatformHandle, PlatformTerminal,
     Terminal as TerminaTerminal, WindowSize,
@@ -174,6 +174,20 @@ pub fn render(
     terminal.backend_mut().flush()?;
 
     drawn
+}
+
+/// Puts text on the terminal's own clipboard, which is the only one reachable
+/// from the far end of an SSH session.
+///
+/// A terminal that refuses OSC 52 drops it silently and answers nothing either
+/// way, so there is no outcome to report beyond the write itself.
+pub fn copy(terminal: &mut AppTerminal, text: &str) -> io::Result<()> {
+    write!(
+        terminal.backend_mut(),
+        "{}",
+        Osc::SetSelection(Selection::CLIPBOARD, text)
+    )?;
+    terminal.backend_mut().flush()
 }
 
 struct TerminalSession {

@@ -2,6 +2,7 @@ use prtui::app::action::{Action, Motion};
 use prtui::app::draft::{Parent, Side, Sync};
 use prtui::app::input::{DispatchResult, InputRouter};
 use prtui::app::keymap::{Keymap, Resolution};
+use prtui::app::link::{Errand, Origin};
 use prtui::app::mode::Mode;
 use prtui::app::review::{Failure, Request, ReviewEvent, Sent};
 use prtui::app::search::Match;
@@ -108,6 +109,10 @@ fn load() -> App {
     let mut app = App::new();
     app.set_files(parse_files(&files).unwrap());
     app.set_meta(parse_meta(&meta).unwrap());
+    app.set_origin(Origin {
+        repo_url: "https://github.com/cli/cli".to_owned(),
+        number: 9000,
+    });
     app.pane = Pane::Diff;
 
     // The first fixture file is only 8 rows; motions need room to breathe.
@@ -386,28 +391,167 @@ fn the_reference_lists_every_command_and_the_keys_bound_to_it() {
     assert!(reference.contains(&Reference::Heading("hidden lines")));
 }
 
+/// The one errand a key left behind, which is what the event loop would carry
+/// out.
+fn errand(app: &mut App) -> Errand {
+    let mut errands = app.take_errands();
+
+    assert_eq!(errands.len(), 1, "expected exactly one errand");
+    errands.remove(0)
+}
+
+#[test]
+fn the_overview_reads_the_description_and_the_discussion() {
+    let mut app = load();
+    let (cursor, scroll) = (app.cursor, app.diff_scroll);
+
+    press(&mut app, "o");
+    assert_eq!(app.mode, Mode::Overview);
+    assert_eq!(app.overlay_scroll, 0);
+
+    let layout = layout_of(&app);
+    let panel = drawn_lines(&layout);
+    assert!(
+        panel.iter().any(|line| line.contains("Relates #8995")),
+        "the description is missing: {panel:?}"
+    );
+
+    // The fixture's discussion is under the description, so it takes a scroll
+    // to reach.
+    press(&mut app, "G");
+    assert!(app.overlay_scroll > 0);
+    let panel = drawn_lines(&layout_of(&app));
+    assert!(
+        panel.iter().any(|line| line.contains("@malept")),
+        "the discussion is missing: {panel:?}"
+    );
+
+    // Reading it must not move the cursor, the way the reference does not.
+    press(&mut app, "o");
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.overlay_scroll, 0);
+    assert_eq!((app.cursor, app.diff_scroll), (cursor, scroll));
+    assert!(!app.should_quit);
+}
+
+/// The panel's lines, as the view would paint them.
+fn drawn_lines(layout: &Layout) -> Vec<String> {
+    use prtui::layout::Content;
+
+    let overlay = layout.overlay.as_ref().expect("a panel is open");
+    match &overlay.content {
+        Content::Keys(_) => panic!("the reference is open, not the overview"),
+        Content::Prose(lines) => {
+            lines.iter().map(ToString::to_string).collect()
+        }
+    }
+}
+
+#[test]
+fn yanking_a_line_links_to_the_file_at_head() {
+    let mut app = load();
+    park_on_code(&mut app);
+
+    let line = app.files[app.selected_file].lines[app.cursor]
+        .new_line
+        .expect("parked on a line that is at head");
+    let path = app.files[app.selected_file].path.clone();
+
+    press(&mut app, "y");
+
+    assert_eq!(
+        errand(&mut app),
+        Errand::Copy(format!(
+            "https://github.com/cli/cli/blob/{}/{path}#L{line}",
+            app.pr.as_ref().unwrap().head_oid
+        ))
+    );
+    assert!(app.status.starts_with("yanked https://"));
+}
+
+/// A span links to the whole span, and the selection has done its job once it
+/// has been copied.
+#[test]
+fn yanking_a_visual_span_links_every_line_and_drops_the_selection() {
+    let mut app = load();
+    park_on_code(&mut app);
+
+    press(&mut app, "v2j");
+    assert_eq!(app.mode, Mode::Visual);
+    press(&mut app, "y");
+
+    let Errand::Copy(url) = errand(&mut app) else {
+        panic!("a yank copies");
+    };
+    assert!(url.contains("#L"), "{url}");
+    assert!(url.contains("-L"), "a span names both ends: {url}");
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.selection.is_none());
+}
+
+/// A conversation is addressed on the web by its own comment, not by the line
+/// it hangs off.
+#[test]
+fn yanking_a_conversation_links_the_comment() {
+    let mut app = load();
+    let thread = park_on_unresolved_thread(&mut app);
+    let rest_id = thread.comments[0]
+        .rest_id
+        .expect("the fixture's comments carry their REST ids");
+
+    press(&mut app, "j");
+    assert!(app.focused_card.is_some(), "the card takes the focus");
+
+    press(&mut app, "y");
+    assert_eq!(
+        errand(&mut app),
+        Errand::Copy(format!(
+            "https://github.com/cli/cli/pull/9000#discussion_r{rest_id}"
+        ))
+    );
+}
+
+/// A yank is addressed at the cursor; the browser is not. Opening a blob page
+/// halfway through a review is not what `gx` is for.
+#[test]
+fn gx_opens_the_pull_request_wherever_the_cursor_is() {
+    let mut app = load();
+    let pull = Errand::Open("https://github.com/cli/cli/pull/9000".to_owned());
+
+    park_on_code(&mut app);
+    press(&mut app, "gx");
+    assert_eq!(errand(&mut app), pull);
+    assert_eq!(app.status, "opening the pull request");
+
+    park_on_unresolved_thread(&mut app);
+    press(&mut app, "j");
+    press(&mut app, "gx");
+    assert_eq!(errand(&mut app), pull);
+}
+
 #[test]
 fn the_reference_opens_scrolls_and_closes() {
     let mut app = load();
 
     press(&mut app, "?");
     assert_eq!(app.mode, Mode::Help);
-    assert_eq!(app.help_scroll, 0);
+    assert_eq!(app.overlay_scroll, 0);
 
     press(&mut app, "5j");
-    assert_eq!(app.help_scroll, 5);
+    assert_eq!(app.overlay_scroll, 5);
     press(&mut app, "2k");
-    assert_eq!(app.help_scroll, 3);
+    assert_eq!(app.overlay_scroll, 3);
     press(&mut app, "gg");
-    assert_eq!(app.help_scroll, 0);
+    assert_eq!(app.overlay_scroll, 0);
 
     // The reference is longer than the box it is read in.
     press(&mut app, "G");
-    assert!(app.help_scroll > 0);
+    assert!(app.overlay_scroll > 0);
 
     press(&mut app, "q");
     assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.help_scroll, 0);
+    assert_eq!(app.overlay_scroll, 0);
     assert!(!app.should_quit);
 }
 
@@ -1054,6 +1198,7 @@ fn ctrl_c_quits_from_every_mode() {
         Mode::Search,
         Mode::CommandLine,
         Mode::Help,
+        Mode::Overview,
         Mode::Submit,
     ] {
         let mut app = load();
@@ -1071,6 +1216,7 @@ fn ctrl_c_quits_from_every_mode() {
             Mode::Search => press(&mut app, "/"),
             Mode::CommandLine => press(&mut app, ":"),
             Mode::Help => press(&mut app, "?"),
+            Mode::Overview => press(&mut app, "o"),
             Mode::Submit => press(&mut app, "s"),
         }
         assert_eq!(app.mode, mode);

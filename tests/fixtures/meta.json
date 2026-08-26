@@ -111,6 +111,28 @@
         "id": "PR_fixture",
         "pendingReview": {
           "nodes": []
+        },
+        "discussion": {
+          "nodes": [
+            {
+              "id": "IC_kwDOAAAAAM6XXXX1",
+              "fullDatabaseId": "2145678901",
+              "author": {
+                "login": "malept"
+              },
+              "body": "Held off on tests here because `IsAuthCheckEnabled` has none to\nextend yet. Worth a follow-up.",
+              "createdAt": "2024-05-14T16:02:11Z"
+            },
+            {
+              "id": "IC_kwDOAAAAAM6XXXX2",
+              "fullDatabaseId": "2145679002",
+              "author": {
+                "login": "tale"
+              },
+              "body": "Agreed. Opened #9014 for the test pass.",
+              "createdAt": "2024-05-15T09:41:07Z"
+            }
+          ]
         }
       }
     }

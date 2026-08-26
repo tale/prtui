@@ -87,9 +87,16 @@ pub enum Action {
     /// Walk the command history back (-1) or forward (1).
     WalkHistory(isize),
 
-    /// Open and close the key reference.
+    /// Open the key reference, open the description and the discussion, or
+    /// close whichever of the two is being read.
     OpenHelp,
-    CloseHelp,
+    OpenOverview,
+    CloseOverlay,
+
+    /// Hand what the cursor is on to the browser, or put its link on the
+    /// clipboard.
+    OpenInBrowser,
+    YankLink,
 
     Quit,
 }

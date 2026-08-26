@@ -1,5 +1,5 @@
+use crate::text::url::escape_path;
 use anyhow::{Context, Result, bail};
-use std::fmt::Write as _;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::process::Command;
@@ -15,6 +15,9 @@ query($owner:String!, $repo:String!, $number:Int!) {
       author { login }
       baseRefName headRefName headRefOid body
       pendingReview: reviews(first:1, states:[PENDING]) { nodes { id } }
+      discussion: comments(first:100) {
+        nodes { id fullDatabaseId author { login } body createdAt }
+      }
       reviewThreads(first:100) {
         nodes {
           id isResolved isOutdated viewerCanResolve path subjectType
@@ -150,6 +153,14 @@ impl Repo {
             Some(host) => format!("https://{host}/api/v3{path}"),
             None => format!("https://api.github.com{path}"),
         }
+    }
+
+    /// Where the repository is read by a person rather than by the API, which
+    /// is what a permalink names and what the browser is handed.
+    pub fn web_url(&self) -> String {
+        let host = self.host.as_deref().unwrap_or("github.com");
+
+        format!("https://{host}/{}/{}", self.owner, self.name)
     }
 
     fn graphql_url(&self) -> String {
@@ -511,24 +522,6 @@ pub async fn fetch_blob(
     })
     .await
     .context("file fetch panicked")?
-}
-
-/// Percent-encodes what a path may not carry into a URL. The separators stay:
-/// the contents endpoint takes the path as written, not as one segment.
-fn escape_path(path: &str) -> String {
-    const KEEP: &[u8] = b"/-._~";
-
-    let mut escaped = String::with_capacity(path.len());
-    for byte in path.bytes() {
-        if byte.is_ascii_alphanumeric() || KEEP.contains(&byte) {
-            escaped.push(byte as char);
-            continue;
-        }
-
-        let _ = write!(escaped, "%{byte:02X}");
-    }
-
-    escaped
 }
 
 /// A mutation that is not safe to send twice. A timeout or a 502 says the

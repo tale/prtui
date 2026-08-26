@@ -6,6 +6,7 @@ pub mod ex;
 pub mod input;
 pub mod keymap;
 pub mod keys;
+pub mod link;
 pub mod mode;
 pub mod review;
 pub mod search;
@@ -14,12 +15,15 @@ use crate::expand::{self, Gap, Place, Reveal};
 use crate::layout::Layout;
 use crate::layout::rows;
 use crate::layout::tree::Row as TreeNode;
-use crate::model::{ChangedFile, DiffLine, Meta, PullRequest, ReviewThread};
+use crate::model::{
+    ChangedFile, Comment, DiffLine, Meta, PullRequest, ReviewThread,
+};
 use crate::renderer::{Segment, Theme, ThemeMode};
 use action::{Action, Motion};
 use draft::{Anchor, Attachment, Draft, Parent, Sync};
 use editor::CommentEditor;
 use keymap::{Keymap, Resolution};
+use link::{Errand, Origin};
 use mode::{Mode, Selection};
 use review::{Failure, Request, Sent, Submission};
 use search::Query;
@@ -331,6 +335,10 @@ pub struct App {
     pub pane: Pane,
     pub is_files_visible: bool,
 
+    /// The comments made about the change as a whole, which the overview
+    /// reads under the description.
+    pub discussion: Vec<Comment>,
+
     pub status: String,
     pub loading_frame: usize,
     pub should_quit: bool,
@@ -338,6 +346,11 @@ pub struct App {
     pub in_flight: usize,
 
     outbox: Vec<Request>,
+    /// Links handed to the event loop, which owns the browser and the terminal.
+    errands: Vec<Errand>,
+    /// Where the pull request lives on the web. Absent only in a test that
+    /// never asked for a link.
+    origin: Option<Origin>,
     theme: Theme,
     /// The bindings. Configuration the app owns and the view reads, the same
     /// way the theme is.
@@ -363,8 +376,8 @@ pub struct App {
     command_history: Vec<String>,
     /// How far back through the history the open `:` line has been walked.
     history_cursor: Option<usize>,
-    /// How far the key reference has been scrolled.
-    pub help_scroll: usize,
+    /// How far the open panel has been scrolled.
+    pub overlay_scroll: usize,
     files_state: FilesState,
 }
 
@@ -407,11 +420,14 @@ impl App {
             diff_scroll: 0,
             pane: Pane::Files,
             is_files_visible: true,
+            discussion: Vec::new(),
             status: String::new(),
             loading_frame: 0,
             should_quit: false,
             in_flight: 0,
             outbox: Vec::new(),
+            errands: Vec::new(),
+            origin: None,
             theme,
             keymap: Keymap::default(),
             highlights: HashMap::new(),
@@ -423,7 +439,7 @@ impl App {
             search_origin: None,
             command_history: Vec::new(),
             history_cursor: None,
-            help_scroll: 0,
+            overlay_scroll: 0,
             files_state: FilesState::Loading,
         }
     }
@@ -534,6 +550,7 @@ impl App {
         self.threads_by_path = by_path;
         self.pending_threads = pending;
         self.pending_review = meta.pending_review;
+        self.discussion = meta.discussion;
         self.pr = Some(meta.pr);
         self.reseed_drafts();
         self.create_drafts();
@@ -794,6 +811,99 @@ impl App {
         std::mem::take(&mut self.recolor)
     }
 
+    /// Where the pull request lives on the web. Session configuration the app
+    /// is handed once, the same way the theme is.
+    pub fn set_origin(&mut self, origin: Origin) {
+        self.origin = Some(origin);
+    }
+
+    pub fn take_errands(&mut self) -> Vec<Errand> {
+        std::mem::take(&mut self.errands)
+    }
+
+    /// What the cursor is on, addressed on the web.
+    ///
+    /// A conversation names itself, code names the file at the head commit,
+    /// and anything else names the pull request. The commit is what makes it a
+    /// permalink: a branch moves out from under one.
+    fn permalink(&self) -> Option<String> {
+        let origin = self.origin.as_ref()?;
+
+        if let Some(url) = self.comment_url(origin) {
+            return Some(url);
+        }
+
+        Some(self.code_url(origin).unwrap_or_else(|| origin.pull_url()))
+    }
+
+    fn comment_url(&self, origin: &Origin) -> Option<String> {
+        let id = self.focused_card.as_ref()?.thread()?;
+        let comment = self.thread(id)?.comments.first()?;
+
+        comment.rest_id.map(|rest_id| origin.comment_url(rest_id))
+    }
+
+    fn code_url(&self, origin: &Origin) -> Option<String> {
+        let commit = &self.pr.as_ref()?.head_oid;
+        let file = self.current_file()?;
+
+        // A file the change deletes is not at head to be linked to.
+        if file.status == "removed" {
+            return None;
+        }
+
+        let lines = match self.pane {
+            Pane::Files => None,
+            Pane::Diff => self.cursor_lines(),
+        };
+
+        Some(origin.blob_url(commit, &file.path, lines))
+    }
+
+    /// The new-side numbers the cursor or the selection covers. A span with
+    /// nothing on the new side is a run of deletions, which has no line at
+    /// head to name, so the link falls back to the file itself.
+    fn cursor_lines(&self) -> Option<(u32, u32)> {
+        let rows = self
+            .selection
+            .map_or(self.cursor..=self.cursor, |selection| selection.range());
+        let lines = self.current_file()?.lines.get(rows)?;
+        let numbers: Vec<u32> =
+            lines.iter().filter_map(|line| line.new_line).collect();
+
+        Some((*numbers.iter().min()?, *numbers.iter().max()?))
+    }
+
+    /// The pull request itself, never the line under the cursor. A blob page
+    /// opened mid-review drops the reader out of the review; the page they
+    /// want is the one they are already reading.
+    fn open_link(&mut self) {
+        let Some(origin) = self.origin.as_ref() else {
+            self.status = "nothing to open yet".into();
+            return;
+        };
+
+        self.status = "opening the pull request".into();
+        self.errands.push(Errand::Open(origin.pull_url()));
+    }
+
+    fn yank_link(&mut self) {
+        let Some(url) = self.permalink() else {
+            self.status = "nothing to link to yet".into();
+            return;
+        };
+
+        self.status = format!("yanked {url}");
+        self.errands.push(Errand::Copy(url));
+
+        // A yank ends the selection the way Vim's does: the span was chosen to
+        // be copied, and it has been.
+        if self.mode == Mode::Visual {
+            self.mode = Mode::Normal;
+            self.selection = None;
+        }
+    }
+
     fn blob_loaded(
         &mut self,
         path: &Arc<str>,
@@ -968,12 +1078,18 @@ impl App {
 
             Action::OpenHelp => {
                 self.mode = Mode::Help;
-                self.help_scroll = 0;
+                self.overlay_scroll = 0;
             }
-            Action::CloseHelp => {
+            Action::OpenOverview => {
+                self.mode = Mode::Overview;
+                self.overlay_scroll = 0;
+            }
+            Action::CloseOverlay => {
                 self.mode = Mode::Normal;
-                self.help_scroll = 0;
+                self.overlay_scroll = 0;
             }
+            Action::OpenInBrowser => self.open_link(),
+            Action::YankLink => self.yank_link(),
             Action::StartCommandLine => self.start_command_line(),
             Action::RunCommandLine => self.run_command_line(layout),
             Action::CancelCommandLine => self.cancel_command_line(),
@@ -1604,7 +1720,9 @@ impl App {
                 edit(line);
                 self.history_cursor = None;
             }
-            Mode::Normal | Mode::Visual | Mode::Help => return false,
+            Mode::Normal | Mode::Visual | Mode::Help | Mode::Overview => {
+                return false;
+            }
         }
 
         true
@@ -2184,12 +2302,12 @@ impl App {
     }
 
     fn travel(&mut self, motion: Motion, layout: &Layout) {
-        if self.mode == Mode::Help {
-            self.help_scroll = step(
+        if self.mode.is_overlay() {
+            self.overlay_scroll = step(
                 motion,
-                self.help_scroll,
-                layout.help_limit() + 1,
-                layout.help_viewport(),
+                self.overlay_scroll,
+                layout.overlay_limit() + 1,
+                layout.overlay_viewport(),
             );
             return;
         }

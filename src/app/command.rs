@@ -339,16 +339,34 @@ pub const COMMANDS: &[Command] = &[
         build: |_| Action::WalkHistory(1),
     },
     Command {
+        name: "open",
+        group: "links",
+        summary: "open the pull request in a browser",
+        build: |_| Action::OpenInBrowser,
+    },
+    Command {
+        name: "yank",
+        group: "links",
+        summary: "copy a permalink to it",
+        build: |_| Action::YankLink,
+    },
+    Command {
+        name: "overview",
+        group: "prtui",
+        summary: "the description and the discussion",
+        build: |_| Action::OpenOverview,
+    },
+    Command {
         name: "help",
         group: "prtui",
         summary: "this list",
         build: |_| Action::OpenHelp,
     },
     Command {
-        name: "close-help",
+        name: "close-panel",
         group: "prtui",
-        summary: "close this list",
-        build: |_| Action::CloseHelp,
+        summary: "close whichever panel is open",
+        build: |_| Action::CloseOverlay,
     },
     // Normal mode's escape is a precedence rule over state — leave the card,
     // else drop the query, else quit — so the app resolves it and the keymap

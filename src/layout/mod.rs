@@ -1,3 +1,4 @@
+pub mod overview;
 pub mod rows;
 pub mod tree;
 
@@ -6,6 +7,7 @@ use crate::app::keymap::Reference;
 use crate::app::mode::Mode;
 use crate::expand::Gap;
 use ratatui::layout::{Constraint, Direction, Rect};
+use ratatui::text::Line;
 use rows::{Rows, View};
 use tree::Tree;
 
@@ -32,10 +34,10 @@ pub struct Layout {
     pub composer: Option<Rect>,
     /// The submit form, docked in the same place.
     pub submit: Option<Rect>,
-    /// The key reference, while it is open. It floats over the panes rather
-    /// than docking: it is read, not typed into, so nothing under it has to
-    /// stay visible.
-    pub help: Option<Help>,
+    /// The panel being read, while one is open. It floats over the panes
+    /// rather than docking: it is read, not typed into, so nothing under it
+    /// has to stay visible.
+    pub overlay: Option<Overlay>,
     pub rows: Rows,
     pub files: Tree,
     /// The runs of the open file its patch left out, which the hunk headers
@@ -100,7 +102,7 @@ impl Layout {
             diff,
             composer,
             submit,
-            help: build_help(app, body),
+            overlay: build_overlay(app, body),
             rows: build_rows(app, diff, &gaps),
             gaps,
             files: build_tree(
@@ -128,55 +130,94 @@ impl Layout {
         self.diff_viewport().saturating_sub(SUBMIT_HEIGHT as usize)
     }
 
-    /// The rows the reference can be scrolled by, which is however much of it
+    /// The rows the open panel can be scrolled by, which is however much of it
     /// does not fit.
-    pub fn help_viewport(&self) -> usize {
-        self.help
+    pub fn overlay_viewport(&self) -> usize {
+        self.overlay
             .as_ref()
-            .map_or(0, |help| help.inner.height as usize)
+            .map_or(0, |overlay| overlay.inner.height as usize)
     }
 
-    pub fn help_limit(&self) -> usize {
-        self.help.as_ref().map_or(0, |help| {
-            help.lines.len().saturating_sub(help.inner.height as usize)
+    pub fn overlay_limit(&self) -> usize {
+        self.overlay.as_ref().map_or(0, |overlay| {
+            overlay
+                .content
+                .len()
+                .saturating_sub(overlay.inner.height as usize)
         })
     }
 }
 
-/// The key reference, laid out: where it sits and what it says.
-pub struct Help {
+/// A panel floating over the panes, laid out: where it sits and what it says.
+pub struct Overlay {
     /// The bordered box, for the frame to clear and paint.
     pub area: Rect,
     /// What is left inside the border, which is what scrolls.
     pub inner: Rect,
-    pub lines: Vec<Reference>,
+    pub title: &'static str,
+    pub content: Content,
 }
 
-/// Widest the reference gets before it stops using the whole terminal.
-const HELP_WIDTH: u16 = 80;
+/// What an open panel is showing.
+///
+/// The reference stays descriptors, since its columns are budgeted against the
+/// width as it is painted. The overview is prose, and prose wraps to a width,
+/// which is settled here.
+pub enum Content {
+    Keys(Vec<Reference>),
+    Prose(Vec<Line<'static>>),
+}
 
-/// Rows of chrome around the reference: two borders, and a row of margin above
-/// and below so it reads as a panel rather than as a second pane.
-const HELP_MARGIN: u16 = 2;
+impl Content {
+    const fn len(&self) -> usize {
+        match self {
+            Self::Keys(lines) => lines.len(),
+            Self::Prose(lines) => lines.len(),
+        }
+    }
+}
 
-fn build_help(app: &App, body: Rect) -> Option<Help> {
-    if app.mode != Mode::Help {
+/// Widest a panel gets before it stops using the whole terminal.
+const OVERLAY_WIDTH: u16 = 80;
+
+/// Rows of chrome around a panel: two borders, and a row of margin above and
+/// below so it reads as a panel rather than as a second pane.
+const OVERLAY_MARGIN: u16 = 2;
+
+fn build_overlay(app: &App, body: Rect) -> Option<Overlay> {
+    if !app.mode.is_overlay() {
         return None;
     }
 
-    let width = HELP_WIDTH.min(body.width);
-    let height = body.height.saturating_sub(HELP_MARGIN * 2).max(3);
+    let width = OVERLAY_WIDTH.min(body.width);
+    let height = body.height.saturating_sub(OVERLAY_MARGIN * 2).max(3);
     let area = Rect {
         x: body.x + (body.width.saturating_sub(width)) / 2,
         y: body.y + (body.height.saturating_sub(height)) / 2,
         width,
         height,
     };
+    let inner = inside_border(area);
 
-    Some(Help {
+    let (title, content) = if app.mode == Mode::Help {
+        (" keys ", Content::Keys(app.keymap().reference()))
+    } else {
+        (
+            " overview ",
+            Content::Prose(overview::build(
+                app.pr.as_ref(),
+                &app.discussion,
+                inner.width as usize,
+                app.theme(),
+            )),
+        )
+    };
+
+    Some(Overlay {
         area,
-        inner: inside_border(area),
-        lines: app.keymap().reference(),
+        inner,
+        title,
+        content,
     })
 }
 

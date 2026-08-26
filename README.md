@@ -68,6 +68,10 @@ Press `?` for the same list in the app, or `:` for a command line. Every key
 below is a named command, so anything bound to a key is also reachable as
 `:name` — and `:42` jumps to line 42.
 
+**The pull request** — `o` opens the description and the discussion over the
+panes. It scrolls with the same keys the rest of the app uses, and `esc` closes
+it.
+
 **Motion** — `j`/`k` a row, `<C-d>`/`<C-u>` half a screen, `gg`/`G` the first
 and last line. A count works where you would expect: `10j`.
 
@@ -87,6 +91,10 @@ or reopens the one you are on.
 **Comments** — `c` comments on the line, on a visual span, or replies to the
 thread under the cursor. `v` selects lines first; `C` writes a note about the
 whole file. `e` reopens a draft, `d` discards it.
+
+**Links** — `y` copies a permalink to whatever the cursor is on: the line, the
+visual span, or the conversation. The copy goes through the terminal itself, so
+it works over SSH. `gx` opens the pull request in a browser.
 
 **Submitting** — `s` opens the form. `<Tab>` steps the verdict between
 comment, approve, and request changes; `<CR>` ships every draft as one review.

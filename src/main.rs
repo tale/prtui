@@ -3,6 +3,7 @@ use clap::{Parser, ValueEnum};
 use futures_core::Stream;
 use prtui::app::draft::Parent;
 use prtui::app::input::InputRouter;
+use prtui::app::link::{Errand, Origin};
 use prtui::app::review::{Failure, Request, Sent};
 use prtui::app::{App, Highlight};
 use prtui::layout::Layout;
@@ -10,7 +11,7 @@ use prtui::model::{self, ChangedFile, Meta};
 use prtui::renderer::{self, Theme, ThemeMode};
 use prtui::{gh, ui};
 use std::sync::Arc;
-use std::{future::poll_fn, pin::Pin, time::Duration};
+use std::{future::poll_fn, pin::Pin, process::Stdio, time::Duration};
 use termina::escape::csi::{
     Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode,
 };
@@ -244,6 +245,29 @@ fn spawn_request(
     });
 }
 
+/// Hands a link to whatever the desktop opens links with.
+///
+/// The child outlives the review, so nothing waits on it. Tokio reaps it once
+/// the handle drops, which is what keeps a session's worth of browser tabs from
+/// leaving a session's worth of zombies.
+fn open_url(url: &str) -> Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+
+    tokio::process::Command::new(opener)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to spawn {opener}"))?;
+
+    Ok(())
+}
+
 /// Colors one file again after its patch grew. Colors are held one list per
 /// line, so a reveal strands every line below it.
 fn spawn_recolor(
@@ -334,6 +358,10 @@ async fn main() -> Result<()> {
     std::thread::spawn(move || renderer::preload(theme.mode));
 
     let session = Session {
+        origin: Origin {
+            repo_url: repo.web_url(),
+            number,
+        },
         repo,
         number,
         follow_terminal,
@@ -347,6 +375,9 @@ async fn main() -> Result<()> {
 struct Session {
     repo: gh::Repo,
     number: u32,
+    /// Where the same pull request is read on the web, which is what a
+    /// permalink and the browser are handed.
+    origin: Origin,
     follow_terminal: bool,
 }
 
@@ -374,6 +405,7 @@ async fn event_loop(
 ) -> Result<()> {
     let follow_terminal = session.follow_terminal;
     let mut app = App::with_theme(theme);
+    app.set_origin(session.origin.clone());
     let mut input = InputRouter::default();
     let mut pending: u8 = 2;
     let mut failure: Option<String> = None;
@@ -399,6 +431,18 @@ async fn event_loop(
 
         for path in app.take_recolor() {
             spawn_recolor(&app.files, &path, app.theme().mode, tx.clone());
+        }
+
+        for errand in app.take_errands() {
+            match errand {
+                Errand::Open(url) => {
+                    if let Err(err) = open_url(&url) {
+                        app.status = format!("error: {err}");
+                    }
+                }
+                Errand::Copy(text) => terminal::copy(terminal, &text)
+                    .context("copying to the clipboard")?,
+            }
         }
 
         if is_dirty {

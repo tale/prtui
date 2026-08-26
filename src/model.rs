@@ -167,6 +167,9 @@ pub struct PullRequest {
 pub struct Meta {
     pub pr: PullRequest,
     pub threads: Vec<ReviewThread>,
+    /// The pull request's own comments: the ones written about the change as a
+    /// whole rather than against a line of it.
+    pub discussion: Vec<Comment>,
     /// The review the viewer has open but not submitted, which every draft is
     /// filed against once the first one has opened it.
     pub pending_review: Option<Arc<str>>,
@@ -319,6 +322,7 @@ struct WirePullRequest {
     body: String,
     pending_review: Nodes<WireReview>,
     review_threads: Nodes<WireThread>,
+    discussion: Nodes<WireDiscussionComment>,
 }
 
 #[derive(Deserialize)]
@@ -368,6 +372,31 @@ impl RestId {
         match self {
             Self::Text(text) => text.parse().ok(),
             Self::Number(id) => Some(id),
+        }
+    }
+}
+
+/// A pull request comment carries no review state: there is no pending review
+/// for it to be held inside, so it is visible the moment it is written.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireDiscussionComment {
+    id: String,
+    full_database_id: Option<RestId>,
+    author: Option<WireAuthor>,
+    body: String,
+    created_at: String,
+}
+
+impl From<WireDiscussionComment> for Comment {
+    fn from(wire: WireDiscussionComment) -> Self {
+        Self {
+            id: wire.id.into(),
+            rest_id: wire.full_database_id.and_then(RestId::value),
+            author: WireAuthor::login(wire.author),
+            body: wire.body,
+            created_at: wire.created_at,
+            is_pending: false,
         }
     }
 }
@@ -443,6 +472,7 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<Meta> {
             .into_iter()
             .map(Into::into)
             .collect(),
+        discussion: pr.discussion.nodes.into_iter().map(Into::into).collect(),
     })
 }
 
@@ -525,6 +555,7 @@ mod tests {
             "body": "",
             "pendingReview": { "nodes": [] },
             "reviewThreads": { "nodes": threads },
+            "discussion": { "nodes": [] },
         })
     }
 

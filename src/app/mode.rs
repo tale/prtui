@@ -16,6 +16,9 @@ pub enum Mode {
     CommandLine,
     /// Reading the key reference, which scrolls and does nothing else.
     Help,
+    /// Reading the pull request's description and its discussion, which scrolls
+    /// the same way the reference does.
+    Overview,
     /// Choosing a verdict and writing the summary that ships the review.
     Submit,
 }
@@ -32,6 +35,7 @@ impl Mode {
             's' => Self::Search,
             'c' => Self::CommandLine,
             'h' => Self::Help,
+            'o' => Self::Overview,
             'r' => Self::Submit,
             _ => return None,
         })
@@ -39,7 +43,16 @@ impl Mode {
 
     /// Where a digit is a count prefix rather than something to type.
     pub const fn takes_count(self) -> bool {
-        matches!(self, Self::Normal | Self::Visual | Self::Help)
+        matches!(
+            self,
+            Self::Normal | Self::Visual | Self::Help | Self::Overview
+        )
+    }
+
+    /// Whether the mode is reading a panel floating over the panes. Both of
+    /// them scroll one list and close, so the app moves them as one.
+    pub const fn is_overlay(self) -> bool {
+        matches!(self, Self::Help | Self::Overview)
     }
 
     /// Whether the mode is editing a line of text of its own.
@@ -63,6 +76,7 @@ impl Mode {
             Self::Search => " SEARCH ",
             Self::CommandLine => " COMMAND ",
             Self::Help => " HELP ",
+            Self::Overview => " OVERVIEW ",
             Self::Submit => " SUBMIT ",
         }
     }

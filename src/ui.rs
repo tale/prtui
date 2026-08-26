@@ -11,9 +11,9 @@ use crate::app::review::ReviewEvent;
 use crate::app::search::Query;
 use crate::app::{App, Focus, OpenFile, Pane, Target, TreeRow};
 use crate::expand::Gap;
-use crate::layout::Layout;
 use crate::layout::rows::{self, BodyRow, GUTTER, Row, ThreadState};
 use crate::layout::tree::{self, Row as TreeNode};
+use crate::layout::{Content, Layout};
 use crate::model::{LineKind, ReviewThread};
 use crate::renderer::{Theme, ThemeMode, markdown};
 use crate::text::measure::{self, clip_text_to_budget, text_width, truncate};
@@ -53,7 +53,7 @@ pub fn draw(frame: &mut Frame, app: &App, layout: &Layout) {
     draw_bottom_bar(frame, app, layout);
     draw_composer(frame, app, layout);
     draw_submit(frame, app, layout);
-    draw_help(frame, app, layout);
+    draw_overlay(frame, app, layout);
 }
 
 /// Columns the reference spends on its indent, on the chord, and on the command
@@ -62,36 +62,45 @@ const HELP_INDENT: usize = 2;
 const HELP_KEYS: usize = 18;
 const HELP_NAME: usize = 20;
 
-/// The key reference: every command, the chord bound to it, and what it does.
+/// The panel floating over the panes: the key reference, or the pull request's
+/// description and the discussion under it.
 ///
-/// A command with no chord still gets a row. Its name is how `:` addresses it,
-/// which is the only way to reach it.
-fn draw_help(frame: &mut Frame, app: &App, layout: &Layout) {
-    let Some(help) = layout.help.as_ref() else {
+/// Both are one scrolling list, so only the lines differ. The reference is
+/// styled here because its columns are budgeted against the width it is painted
+/// at; the overview arrives already wrapped.
+fn draw_overlay(frame: &mut Frame, app: &App, layout: &Layout) {
+    let Some(overlay) = layout.overlay.as_ref() else {
         return;
     };
     let theme = app.theme();
 
-    let block = docked_block(" keys ".to_owned(), theme.accent).title_bottom(
-        Line::styled(
-            " j/k scroll · esc close ",
-            Style::default().fg(theme.dim),
-        )
-        .right_aligned(),
-    );
-    frame.render_widget(Clear, help.area);
-    frame.render_widget(block, help.area);
+    let block = docked_block(overlay.title.to_owned(), theme.accent)
+        .title_bottom(
+            Line::styled(
+                " j/k scroll · esc close ",
+                Style::default().fg(theme.dim),
+            )
+            .right_aligned(),
+        );
+    frame.render_widget(Clear, overlay.area);
+    frame.render_widget(block, overlay.area);
 
-    let width = help.inner.width as usize;
-    let lines: Vec<Line> = help
-        .lines
-        .iter()
-        .skip(app.help_scroll)
-        .take(help.inner.height as usize)
-        .map(|line| help_line(line, width, theme))
-        .collect();
+    let width = overlay.inner.width as usize;
+    let scroll = app.overlay_scroll;
+    let height = overlay.inner.height as usize;
+    let lines: Vec<Line> = match &overlay.content {
+        Content::Keys(entries) => entries
+            .iter()
+            .skip(scroll)
+            .take(height)
+            .map(|entry| help_line(entry, width, theme))
+            .collect(),
+        Content::Prose(prose) => {
+            prose.iter().skip(scroll).take(height).cloned().collect()
+        }
+    };
 
-    frame.render_widget(Paragraph::new(lines), help.inner);
+    frame.render_widget(Paragraph::new(lines), overlay.inner);
 }
 
 fn help_line(line: &Reference, width: usize, theme: Theme) -> Line<'static> {
@@ -1463,7 +1472,7 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, layout: &Layout) {
         Mode::Filter => theme.purple,
         Mode::Search => theme.warning,
         Mode::CommandLine => theme.muted,
-        Mode::Help | Mode::Submit => theme.heading,
+        Mode::Help | Mode::Overview | Mode::Submit => theme.heading,
     };
 
     let pane = match app.pane {
@@ -1626,7 +1635,9 @@ fn draw_key_hints(
         (Mode::Search, _) => {
             &[("↑↓", "step"), ("↵", "accept"), ("esc", "cancel")]
         }
-        (Mode::Help, _) => &[("j/k", "scroll"), ("esc", "close")],
+        (Mode::Help | Mode::Overview, _) => {
+            &[("j/k", "scroll"), ("esc", "close")]
+        }
         (Mode::CommandLine, _) => &[
             (":42", "line"),
             ("↑↓", "history"),

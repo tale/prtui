@@ -1380,6 +1380,33 @@ fn the_reference_scrolls_to_its_last_group() {
     assert!(rendered.contains("leave prtui"), "{rendered}");
 }
 
+/// The description is fetched with everything else and used to have nowhere to
+/// be read.
+#[test]
+fn the_overview_paints_the_description_over_the_panes() {
+    let mut app = load();
+    press(&mut app, "o");
+
+    let rendered = draw(&app);
+    assert!(rendered.contains("OVERVIEW"), "{rendered}");
+    assert!(rendered.contains("overview"), "{rendered}");
+    assert!(rendered.contains("Relates #8995"), "{rendered}");
+    assert!(rendered.contains("esc close"), "{rendered}");
+}
+
+/// The discussion sits under the description, which is a scroll away.
+#[test]
+fn the_overview_scrolls_into_the_discussion() {
+    let mut app = load();
+    press(&mut app, "o");
+    assert!(!draw(&app).contains("@malept"));
+
+    press(&mut app, "G");
+    let rendered = draw(&app);
+    assert!(rendered.contains("@malept"), "{rendered}");
+    assert!(rendered.contains("2024-05-14"), "{rendered}");
+}
+
 #[test]
 fn the_command_line_takes_the_bottom_bar_while_it_is_open() {
     let mut app = load();

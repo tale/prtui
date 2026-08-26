@@ -12,6 +12,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("w", "submit"),
     ("write", "submit"),
     ("h", "help"),
+    ("o", "open"),
+    ("y", "yank"),
     ("noh", "clear-find"),
     ("nohlsearch", "clear-find"),
 ];
