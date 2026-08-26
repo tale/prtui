@@ -100,6 +100,29 @@ jobs:
             --generate-notes \
             artifacts/*
 
+  # The tap regenerates its formula from whatever the newest release published,
+  # so this has to follow `release` rather than `build`: dispatching earlier
+  # points the generator at assets that are not attached yet.
+  tap:
+    name: Update the Homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      # Scoped to the tap alone and minted per run, so the only standing secret
+      # is the app key rather than a token that can reach anything it owns.
+      - name: Mint a token for the tap
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app
+        with:
+          client-id: "Iv23liki4UCydzX0wo2N"
+          private-key: ${{ secrets.TALE_APP_PRIVATE_KEY }}
+          repositories: homebrew-tap
+
+      - name: Dispatch the formula update
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh workflow run update-prtui.yml --repo tale/homebrew-tap
+
   # Trusted publishing: the token is minted per-run over OIDC and expires in
   # 30 minutes, so no long-lived credential lives in the repository. crates.io
   # matches the claim against the workflow filename, which is this file.
