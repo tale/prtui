@@ -62,12 +62,8 @@ const HELP_INDENT: usize = 2;
 const HELP_KEYS: usize = 18;
 const HELP_NAME: usize = 20;
 
-/// The panel floating over the panes: the key reference, or the pull request's
-/// description and the discussion under it.
-///
-/// Both are one scrolling list, so only the lines differ. The reference is
-/// styled here because its columns are budgeted against the width it is painted
-/// at; the overview arrives already wrapped.
+// The reference is styled here rather than in the layout because its columns
+// are budgeted against the width it is painted at.
 fn draw_overlay(frame: &mut Frame, app: &App, layout: &Layout) {
     let Some(overlay) = layout.overlay.as_ref() else {
         return;
@@ -120,11 +116,8 @@ fn draw_overlay(frame: &mut Frame, app: &App, layout: &Layout) {
     frame.render_widget(Paragraph::new(lines), overlay.inner);
 }
 
-/// Repaints one already-styled line where the query hits it.
-///
-/// Hits are found inside each span rather than across the whole line, so a
-/// match straddling a style change is stepped to but left unpainted. The
-/// panel's own text is plain runs, so that is rare enough to accept.
+// Hits are found per span, so a match straddling a style change is stepped to
+// but left unpainted.
 fn paint_hits(
     line: Line<'static>,
     query: Option<Query<'_>>,
@@ -1790,13 +1783,8 @@ fn draw_key_hints(
         ],
     };
 
-    // The reference is the only hint that leads anywhere, so its room is taken
-    // before the mode's own hints are laid out rather than after: the bar
-    // truncates from the tail, and this must not be what a narrow terminal
-    // drops.
-    //
-    // Offered only where `?` is a key. Inside a panel the reader is already
-    // there, and at a prompt the character would be typed rather than acted on.
+    // Claimed before the mode's own hints, since the bar truncates from the
+    // tail. Dropped where `?` is not a key: inside a panel, or at a prompt.
     let reserved: &[(&str, &str)] =
         if app.mode.is_overlay() || app.mode.is_prompt() {
             &[]
@@ -1843,8 +1831,6 @@ fn draw_key_hints(
     );
 }
 
-/// The columns one hint pair costs: a leading space, the gap between key and
-/// label, and a trailing space.
 fn hint_width((key, label): (&str, &str)) -> usize {
     text_width(key) + text_width(label) + 3
 }

@@ -904,8 +904,6 @@ impl App {
         self.status = format!("yanked {url}");
         self.errands.push(Errand::Copy(url));
 
-        // A yank ends the selection the way Vim's does: the span was chosen to
-        // be copied, and it has been.
         if self.mode == Mode::Visual {
             self.mode = Mode::Normal;
             self.selection = None;
@@ -1915,11 +1913,8 @@ impl App {
         self.search_query().and_then(Query::new)
     }
 
-    /// Which panel is on screen, if any.
-    ///
-    /// A search opened from a panel keeps that panel up while it is being typed
-    /// into — the prompt lives in the bottom bar, and what it is searching has
-    /// to stay visible — so the current mode alone does not answer this.
+    /// Which panel is on screen, if any. Not the same as the mode: a search
+    /// opened from a panel keeps it up while the prompt is typed into.
     pub fn overlay_mode(&self) -> Option<Mode> {
         if self.mode.is_overlay() {
             return Some(self.mode);
@@ -1970,7 +1965,6 @@ impl App {
         }
 
         for _ in 0..count {
-            // The panel is one list with two ends, so both of them wrap.
             let next = match self.overlay_match {
                 Some(index) if direction > 0 => (index + 1) % matches.len(),
                 Some(index) => (index + matches.len() - 1) % matches.len(),
@@ -2110,8 +2104,8 @@ impl App {
             return;
         };
 
-        // The prompt's own mode says nothing about what is being searched, so
-        // the arrows have to ask where the search was opened from.
+        // The prompt has its own mode, so where the search was opened from is
+        // what says which surface the arrows step through.
         if self.is_searching_overlay() {
             self.step_overlay_match(direction, count, layout);
             return;

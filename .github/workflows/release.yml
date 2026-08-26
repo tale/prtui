@@ -84,11 +84,29 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           merge-multiple: true
+
+      # knope wrote this section from the changesets; lifting it verbatim is
+      # what keeps the release notes and the file the same words.
+      - name: Lift the release notes out of the changelog
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v heading="## $version " '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > NOTES.md
+          if [ ! -s NOTES.md ]; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
 
       - name: Create the release
         env:
@@ -97,7 +115,7 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes-file NOTES.md \
             artifacts/*
 
   # The tap regenerates its formula from whatever the newest release published,

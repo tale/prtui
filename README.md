@@ -119,6 +119,10 @@ sets up the pre-commit hook that formats and lints staged Rust.
 `ARCHITECTURE.md` describes the internal boundaries and the refactors still in
 flight; read it before a change that crosses modules.
 
+A change someone using `prtui` would notice needs a changeset: `mise exec --
+knope document-change` writes one into `.changeset/`, describing what the change
+gives them rather than what it altered. Internal work needs none.
+
 ## License
 
 MIT. See `LICENSE`.

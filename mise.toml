@@ -2,6 +2,7 @@
 prtui = "cargo run --"
 
 [tools]
+"github:knope-dev/knope" = "knope/v0.23.0"
 lefthook = "latest"
 
 [hooks]

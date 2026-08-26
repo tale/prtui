@@ -245,11 +245,7 @@ fn spawn_request(
     });
 }
 
-/// Hands a link to whatever the desktop opens links with.
-///
-/// The child outlives the review, so nothing waits on it. Tokio reaps it once
-/// the handle drops, which is what keeps a session's worth of browser tabs from
-/// leaving a session's worth of zombies.
+// Nothing waits on the child; tokio reaps it when the handle drops.
 fn open_url(url: &str) -> Result<()> {
     let opener = if cfg!(target_os = "macos") {
         "open"

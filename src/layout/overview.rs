@@ -44,15 +44,12 @@ fn dim(text: &'static str, theme: Theme) -> Line<'static> {
     Line::styled(text, Style::default().fg(theme.dim))
 }
 
-/// The same token the submit form's divider and a markdown `---` are drawn in.
-/// `hunk` reads as a rule in neither mode: it is a background color, and one
-/// painted as text disappears into the terminal behind it.
+// `hunk` is a background color; painted as text it vanishes in both modes.
 fn rule(width: usize, theme: Theme) -> Line<'static> {
     Line::styled("─".repeat(width), Style::default().fg(theme.dim))
 }
 
-/// The same `@author · date` a thread card writes, so one comment reads the
-/// same wherever it is met.
+// Matches the header a thread card writes.
 fn header(comment: &Comment, theme: Theme) -> Line<'static> {
     let date = comment.created_at.get(..10).unwrap_or(&comment.created_at);
     let mut text = format!("@{}", comment.author);

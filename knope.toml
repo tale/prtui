@@ -1,0 +1,25 @@
+[changes]
+ignore_conventional_commits = true
+
+[package]
+versioned_files = ["Cargo.toml", "Cargo.lock"]
+changelog = "CHANGELOG.md"
+
+[[workflows]]
+name = "document-change"
+
+[[workflows.steps]]
+type = "CreateChangeFile"
+
+[[workflows]]
+name = "release"
+
+[[workflows.steps]]
+type = "PrepareRelease"
+
+[[workflows.steps]]
+type = "Command"
+command = "git commit -m 'chore: release $version' Cargo.toml Cargo.lock CHANGELOG.md .changeset"
+
+[[workflows.steps]]
+type = "Release"
