@@ -10,7 +10,7 @@ documentation = "https://github.com/tale/prtui"
 readme = "README.md"
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["github", "pull-request", "review", "tui"]
-exclude = ["/.github", "/ARCHITECTURE.md", "/flake.lock", "/flake.nix", "/lefthook.yml", "/mise.toml"]
+exclude = ["/.github", "/ARCHITECTURE.md", "/docs", "/flake.lock", "/flake.nix", "/lefthook.yml", "/mise.toml"]
 
 [lints.rust]
 unsafe_code = "forbid"

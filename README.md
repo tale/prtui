@@ -3,6 +3,8 @@
 A modal terminal UI for reviewing GitHub pull requests for the people who are
 most comfortable in the terminal with Vim motions and a command line.
 
+![prtui reviewing a pull request](https://raw.githubusercontent.com/tale/prtui/main/docs/demo.gif)
+
 ## Install
 
 Any of these work. All of them need the [GitHub CLI][gh] on your `PATH`, which
