@@ -23,6 +23,7 @@ mod terminal;
 #[derive(Parser)]
 #[command(
     name = "prtui",
+    version,
     about = "Review GitHub pull requests in the terminal"
 )]
 struct Args {
