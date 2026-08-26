@@ -47,10 +47,12 @@ mini-outbox (`images.take_pending()`), highlighting is spawned directly from
 `main` on a raw thread, and refetch-after-write is decided inside a `select!`
 arm rather than by the app. Nothing arbitrates between them.
 
-That last one is a live race: every successful write spawns a metadata fetch,
-so resolving two threads quickly puts two in flight and the older response can
-land last, restoring stale state. `Message::Highlight` guards exactly this
-hazard with a theme-mode comparison — a generation counter for one case.
+That last one used to be a live race: every successful write spawned a metadata
+fetch, so resolving two threads quickly put two in flight and the older response
+could land last, restoring stale state. `MetaFetch` in `main` now holds the
+refetch to one in flight and reissues it when a write arrives mid-flight, so the
+hazard is closed — but the arbitration still lives in `main`'s locals, out of
+reach of the tests, which is what C moves.
 
 ### `serde_json::Value` as the inter-layer transport
 

@@ -90,6 +90,53 @@ fn spawn_meta_fetch(
     });
 }
 
+/// Keeps one metadata fetch in flight at a time.
+///
+/// Every write has to be read back before it shows in the diff, but two
+/// responses out together can land in either order, and the older one restores
+/// the threads the newer one already replaced. A write that arrives while a
+/// fetch is out therefore marks the result stale instead of racing it, and the
+/// fetch is reissued once the first one returns.
+struct MetaFetch {
+    is_in_flight: bool,
+    is_stale: bool,
+}
+
+impl MetaFetch {
+    /// The first fetch leaves before the loop starts, so the tracker opens
+    /// with that one already outstanding.
+    const fn started() -> Self {
+        Self {
+            is_in_flight: true,
+            is_stale: false,
+        }
+    }
+
+    /// Whether the caller spawns the fetch now.
+    const fn request(&mut self) -> bool {
+        if self.is_in_flight {
+            self.is_stale = true;
+            return false;
+        }
+
+        self.is_in_flight = true;
+        true
+    }
+
+    /// Whether a reissue has to go out, which it does when a write landed
+    /// while the finished fetch was reading the old state.
+    const fn finish(&mut self) -> bool {
+        self.is_in_flight = false;
+
+        if !self.is_stale {
+            return false;
+        }
+
+        self.is_stale = false;
+        self.request()
+    }
+}
+
 /// Asked only after something has already failed, so a healthy session never
 /// pays the round trip. Silence means GitHub says it is fine and the failure
 /// belongs to this request alone.
@@ -331,6 +378,7 @@ async fn event_loop(
     let mut failure: Option<String> = None;
     let mut outage: Option<String> = None;
     let mut is_outage_probed = false;
+    let mut meta_fetch = MetaFetch::started();
     let mut is_dirty = true;
     // Replaced by the first frame's own layout before any input is routed
     // against it, since the loop draws before it reads.
@@ -368,6 +416,8 @@ async fn event_loop(
                 };
 
                 let pending_before = pending;
+                let is_meta_result =
+                    matches!(message, Message::Meta(_) | Message::MetaFailed(_));
                 let affects_display = match message {
                     // A result colored under the previous palette is dropped:
                     // the pass that replaces it is already running.
@@ -428,7 +478,7 @@ async fn event_loop(
                         let is_written =
                             outcome.as_ref().is_ok_and(Sent::is_write);
                         app.finish(outcome);
-                        if is_written {
+                        if is_written && meta_fetch.request() {
                             spawn_meta_fetch(
                                 session.repo.clone(),
                                 session.number,
@@ -438,6 +488,14 @@ async fn event_loop(
                         true
                     }
                 };
+
+                if is_meta_result && meta_fetch.finish() {
+                    spawn_meta_fetch(
+                        session.repo.clone(),
+                        session.number,
+                        tx.clone(),
+                    );
+                }
 
                 if pending_before != 0 && pending == 0 {
                     app.status =
@@ -530,6 +588,28 @@ mod tests {
         assert_eq!(highlight_order(4, 2).collect::<Vec<_>>(), [2, 0, 1, 3]);
         assert_eq!(highlight_order(3, 0).collect::<Vec<_>>(), [0, 1, 2]);
         assert!(highlight_order(0, 0).next().is_none());
+    }
+
+    /// Two writes finishing back to back used to put two fetches in flight,
+    /// and the older response restored the threads the newer one replaced.
+    #[test]
+    fn a_write_during_a_fetch_reissues_it_rather_than_racing_it() {
+        let mut meta = MetaFetch::started();
+
+        assert!(!meta.request());
+        assert!(!meta.request());
+
+        assert!(meta.finish());
+        assert!(!meta.finish());
+    }
+
+    #[test]
+    fn a_write_between_fetches_goes_out_at_once() {
+        let mut meta = MetaFetch::started();
+
+        assert!(!meta.finish());
+        assert!(meta.request());
+        assert!(!meta.finish());
     }
 
     #[test]
