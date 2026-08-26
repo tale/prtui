@@ -530,6 +530,119 @@ fn gx_opens_the_pull_request_wherever_the_cursor_is() {
     assert_eq!(errand(&mut app), pull);
 }
 
+/// A panel is a wall of text, and a wall of text you cannot search is a wall.
+#[test]
+fn the_reference_searches_and_steps_its_hits() {
+    let mut app = load();
+    press(&mut app, "?");
+
+    let mut input = InputRouter::default();
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+    );
+    assert_eq!(app.mode, Mode::Search);
+    paste(&mut input, &mut app, "comment");
+    send(&mut input, &mut app, KeyCode::Enter.into());
+
+    // Accepting hands the reader back to the panel, not to the diff.
+    assert_eq!(app.mode, Mode::Help);
+
+    let hits = app.overlay_matches(&layout_of(&app));
+    assert!(hits.len() > 1, "the reference names comment more than once");
+    assert_eq!(app.overlay_match_row(&layout_of(&app)), Some(hits[0]));
+
+    press(&mut app, "n");
+    assert_eq!(app.overlay_match_row(&layout_of(&app)), Some(hits[1]));
+    press(&mut app, "N");
+    assert_eq!(app.overlay_match_row(&layout_of(&app)), Some(hits[0]));
+
+    // Both ends wrap, the way the diff's search does.
+    press(&mut app, "N");
+    assert_eq!(
+        app.overlay_match_row(&layout_of(&app)),
+        hits.last().copied()
+    );
+}
+
+/// The panel has to scroll to a hit that is past the bottom of it, or the count
+/// in the bar names a line nobody can see.
+#[test]
+fn searching_the_overview_scrolls_the_hit_into_the_panel() {
+    let mut app = load();
+    press(&mut app, "o");
+
+    let mut input = InputRouter::default();
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+    );
+    paste(&mut input, &mut app, "malept");
+    send(&mut input, &mut app, KeyCode::Enter.into());
+
+    let layout = layout_of(&app);
+    let row = app
+        .overlay_match_row(&layout)
+        .expect("the discussion matches");
+    assert!(
+        row >= layout.overlay_viewport(),
+        "the hit is past the first screen"
+    );
+    assert!(app.overlay_scroll <= row);
+    assert!(row < app.overlay_scroll + layout.overlay_viewport());
+    assert_eq!(app.search_summary(&layout), (1, 1));
+}
+
+/// Cancelling puts the panel back where the reader left it rather than where
+/// the search wandered to.
+#[test]
+fn cancelling_a_panel_search_restores_the_scroll() {
+    let mut app = load();
+    press(&mut app, "o");
+    press(&mut app, "5j");
+    let scroll = app.overlay_scroll;
+
+    let mut input = InputRouter::default();
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+    );
+    paste(&mut input, &mut app, "malept");
+    send(&mut input, &mut app, KeyCode::Escape.into());
+
+    assert_eq!(app.mode, Mode::Overview);
+    assert_eq!(app.overlay_scroll, scroll);
+    assert!(app.search.is_none());
+}
+
+/// A search inside a panel must not disturb the review underneath it.
+#[test]
+fn a_panel_search_leaves_the_diff_alone() {
+    let mut app = load();
+    press(&mut app, "6j");
+    let (cursor, scroll, pane) = (app.cursor, app.diff_scroll, app.pane);
+
+    press(&mut app, "?");
+    let mut input = InputRouter::default();
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+    );
+    paste(&mut input, &mut app, "comment");
+    send(&mut input, &mut app, KeyCode::Enter.into());
+    press(&mut app, "q");
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(
+        (app.cursor, app.diff_scroll, app.pane),
+        (cursor, scroll, pane)
+    );
+}
+
 #[test]
 fn the_reference_opens_scrolls_and_closes() {
     let mut app = load();
@@ -1231,7 +1344,9 @@ fn ctrl_c_quits_from_every_mode() {
 }
 
 #[test]
-fn escape_and_ctrl_bracket_quit_from_normal_mode() {
+/// `<Esc>` used to quit outright, which is the one thing nobody means by it:
+/// it is the key you press to get out of a state you did not want to be in.
+fn escape_says_how_to_quit_rather_than_quitting() {
     for key in [
         KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
         KeyEvent::new(KeyCode::Char('['), Modifiers::CONTROL),
@@ -1242,8 +1357,13 @@ fn escape_and_ctrl_bracket_quit_from_normal_mode() {
             send(&mut input, &mut app, key),
             DispatchResult::Applied(Action::Escape)
         );
-        assert!(app.should_quit);
+        assert!(!app.should_quit);
+        assert_eq!(app.status, "press q to quit");
     }
+
+    let mut app = load();
+    press(&mut app, "q");
+    assert!(app.should_quit);
 }
 
 #[test]
@@ -1377,7 +1497,7 @@ fn escape_restores_whatever_the_filter_replaced() {
 }
 
 #[test]
-fn escape_clears_a_committed_filter_before_quitting() {
+fn escape_clears_a_committed_filter_first() {
     for clear in [
         KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
         KeyEvent::new(KeyCode::Char('['), Modifiers::CONTROL),
@@ -1403,7 +1523,8 @@ fn escape_clears_a_committed_filter_before_quitting() {
         assert!(!app.should_quit);
 
         send(&mut input, &mut app, clear);
-        assert!(app.should_quit);
+        assert!(!app.should_quit);
+        assert_eq!(app.status, "press q to quit");
     }
 }
 
@@ -1651,7 +1772,7 @@ fn the_tree_filter_reads_case_the_way_the_diff_search_does() {
 }
 
 #[test]
-fn escape_clears_a_committed_search_before_it_quits() {
+fn escape_clears_a_committed_search_before_anything_else() {
     let mut app = load();
     let mut input = search_for(&mut app, "cobra");
     send(&mut input, &mut app, KeyCode::Enter.into());
@@ -1662,7 +1783,8 @@ fn escape_clears_a_committed_search_before_it_quits() {
     assert!(!app.should_quit, "the first escape only clears the pattern");
 
     send(&mut input, &mut app, KeyCode::Escape.into());
-    assert!(app.should_quit);
+    assert!(!app.should_quit);
+    assert_eq!(app.status, "press q to quit");
 }
 
 #[test]

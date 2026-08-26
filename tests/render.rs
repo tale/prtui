@@ -1407,6 +1407,52 @@ fn the_overview_scrolls_into_the_discussion() {
     assert!(rendered.contains("2024-05-14"), "{rendered}");
 }
 
+/// The bar truncates from the tail, so the key that leads to every other key
+/// has to be laid out before the ones that do not.
+#[test]
+fn the_bar_keeps_the_reference_hint_on_a_narrow_terminal() {
+    let app = load();
+
+    for width in [60, 80, 120, 200] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+        terminal.draw(|frame| paint(frame, &app)).unwrap();
+        let rendered = terminal.backend().to_string();
+
+        assert!(rendered.contains("? keys"), "at {width}:\n{rendered}");
+    }
+}
+
+/// Launching and finding no way out is the oldest failure a terminal app has.
+#[test]
+fn the_bar_offers_a_way_out_and_a_way_in() {
+    let rendered = draw(&load());
+
+    assert!(rendered.contains("q quit"), "{rendered}");
+    assert!(rendered.contains("o description"), "{rendered}");
+    assert!(rendered.contains("? keys"), "{rendered}");
+}
+
+/// A panel that vanishes when you press `/` cannot be searched, whatever the
+/// match count says.
+#[test]
+fn a_panel_stays_on_screen_while_its_search_is_typed() {
+    let mut app = load();
+    press(&mut app, "?");
+
+    let mut input = InputRouter::default();
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+    );
+    paste(&mut input, &mut app, "resolve");
+
+    let rendered = draw(&app);
+    assert!(rendered.contains("keys"), "the panel is gone:\n{rendered}");
+    assert!(rendered.contains("toggle-resolved"), "{rendered}");
+    assert!(rendered.contains("/resolve"), "{rendered}");
+}
+
 #[test]
 fn the_command_line_takes_the_bottom_bar_while_it_is_open() {
     let mut app = load();

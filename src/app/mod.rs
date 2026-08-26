@@ -215,6 +215,11 @@ struct SearchOrigin {
     cursor: usize,
     focused_card: Option<Card>,
     diff_scroll: usize,
+    overlay_scroll: usize,
+    /// The mode the search was opened from, which is the one accepting or
+    /// cancelling returns to. A search started inside a panel has to leave the
+    /// reader in that panel.
+    mode: Mode,
 }
 
 /// What a reveal was asked for, held while the file it needs is on the way.
@@ -378,6 +383,8 @@ pub struct App {
     history_cursor: Option<usize>,
     /// How far the open panel has been scrolled.
     pub overlay_scroll: usize,
+    /// Which of the panel's hits `n` last landed on, as an index into them.
+    overlay_match: Option<usize>,
     files_state: FilesState,
 }
 
@@ -440,6 +447,7 @@ impl App {
             command_history: Vec::new(),
             history_cursor: None,
             overlay_scroll: 0,
+            overlay_match: None,
             files_state: FilesState::Loading,
         }
     }
@@ -687,7 +695,7 @@ impl App {
             pane: self.pane,
             card: self.focused_card.as_ref(),
             expanded: self.expanded_card.as_ref(),
-            query: self.diff_query(),
+            query: self.live_query(),
         }
     }
 
@@ -1087,6 +1095,7 @@ impl App {
             Action::CloseOverlay => {
                 self.mode = Mode::Normal;
                 self.overlay_scroll = 0;
+                self.overlay_match = None;
             }
             Action::OpenInBrowser => self.open_link(),
             Action::YankLink => self.yank_link(),
@@ -1576,16 +1585,24 @@ impl App {
 
     /// `/` means "narrow what I am looking at", which is the file list from the
     /// tree and the open patch from the diff.
+    /// `/` means "find what I am reading". Which surface that is comes from
+    /// where the reader is: an open panel, then the tree, then the diff.
     fn start_find(&mut self) {
-        if self.pane == Pane::Files {
-            self.start_file_filter();
-        } else {
+        if self.mode.is_overlay() || self.pane == Pane::Diff {
             self.start_search();
+            return;
         }
+
+        self.start_file_filter();
     }
 
     /// Backs out of the innermost thing the reader is inside: the conversation
-    /// holding the focus, then a live query, then the app itself.
+    /// holding the focus, then a live query.
+    ///
+    /// With nothing left to back out of it says how to leave rather than
+    /// leaving. `<Esc>` is what someone presses to escape a state they did not
+    /// mean to enter, and answering that by quitting is the one reading of the
+    /// key nobody intends.
     fn escape(&mut self) {
         if self.focused_card.is_some() {
             self.set_focus(None);
@@ -1597,7 +1614,7 @@ impl App {
             return;
         }
 
-        self.should_quit = true;
+        self.status = "press q to quit".into();
     }
 
     fn start_command_line(&mut self) {
@@ -1729,9 +1746,12 @@ impl App {
     }
 
     fn clear_find(&mut self) {
-        if self.pane == Pane::Diff && self.search.is_some() {
+        if self.search.is_some()
+            && (self.mode.is_overlay() || self.pane == Pane::Diff)
+        {
             self.search = None;
             self.search_origin = None;
+            self.overlay_match = None;
             return;
         }
 
@@ -1795,11 +1815,18 @@ impl App {
             cursor: self.cursor,
             focused_card: self.focused_card.clone(),
             diff_scroll: self.diff_scroll,
+            overlay_scroll: self.overlay_scroll,
+            mode: self.mode,
         });
         self.search = Some(CommentEditor::default());
-        self.pane = Pane::Diff;
+
+        // A panel floats over the panes, so a search inside one leaves the
+        // diff's cursor and selection exactly where they were.
+        if !self.mode.is_overlay() {
+            self.pane = Pane::Diff;
+            self.selection = None;
+        }
         self.mode = Mode::Search;
-        self.selection = None;
     }
 
     fn accept_search(&mut self, layout: &Layout) {
@@ -1807,8 +1834,8 @@ impl App {
             return;
         }
 
-        self.search_origin = None;
-        self.mode = Mode::Normal;
+        let origin = self.search_origin.take();
+        self.mode = origin.map_or(Mode::Normal, |origin| origin.mode);
 
         let Some(query) = self.search_query().filter(|query| !query.is_empty())
         else {
@@ -1816,23 +1843,36 @@ impl App {
             return;
         };
 
-        if self.search_matches(layout).is_empty() {
+        let is_found = if self.mode.is_overlay() {
+            !self.overlay_matches(layout).is_empty()
+        } else {
+            !self.search_matches(layout).is_empty()
+        };
+
+        if !is_found {
             self.status = format!("pattern not found: {query}");
         }
     }
 
     fn cancel_search(&mut self) {
-        self.mode = Mode::Normal;
-
         let Some(origin) = self.search_origin.take() else {
+            self.mode = Mode::Normal;
             return;
         };
 
+        self.mode = origin.mode;
         self.search = origin.query.map(|query| {
             let mut editor = CommentEditor::default();
             editor.set_text(&query);
             editor
         });
+
+        if origin.mode.is_overlay() {
+            self.overlay_scroll = origin.overlay_scroll;
+            self.overlay_match = None;
+            return;
+        }
+
         self.cursor = origin.cursor;
         self.diff_scroll = origin.diff_scroll;
         self.set_focus(origin.focused_card);
@@ -1844,6 +1884,14 @@ impl App {
         let Some(origin) = self.search_origin.as_ref() else {
             return;
         };
+
+        if origin.mode.is_overlay() {
+            let from = origin.overlay_scroll;
+            self.overlay_scroll = from;
+            self.overlay_match = None;
+            self.land_on_overlay_hit(from, layout);
+            return;
+        }
 
         self.cursor = origin.cursor;
         self.diff_scroll = origin.diff_scroll;
@@ -1861,9 +1909,108 @@ impl App {
         self.land_on(hit.row(), hit.card(), layout);
     }
 
-    /// What the diff is being searched for, with its case rule resolved.
-    fn diff_query(&self) -> Option<Query<'_>> {
+    /// What is being searched for, with its case rule resolved. One pattern
+    /// serves every surface, the way Vim's does.
+    pub fn live_query(&self) -> Option<Query<'_>> {
         self.search_query().and_then(Query::new)
+    }
+
+    /// Which panel is on screen, if any.
+    ///
+    /// A search opened from a panel keeps that panel up while it is being typed
+    /// into — the prompt lives in the bottom bar, and what it is searching has
+    /// to stay visible — so the current mode alone does not answer this.
+    pub fn overlay_mode(&self) -> Option<Mode> {
+        if self.mode.is_overlay() {
+            return Some(self.mode);
+        }
+
+        self.search_origin
+            .as_ref()
+            .map(|origin| origin.mode)
+            .filter(|mode| mode.is_overlay())
+    }
+
+    /// Whether the find in progress is aimed at the open panel rather than at
+    /// the diff.
+    pub fn is_searching_overlay(&self) -> bool {
+        self.overlay_mode().is_some()
+    }
+
+    /// The panel rows the query hits.
+    pub fn overlay_matches(&self, layout: &Layout) -> Vec<usize> {
+        let Some(overlay) = layout.overlay.as_ref() else {
+            return Vec::new();
+        };
+        let Some(query) = self.live_query() else {
+            return Vec::new();
+        };
+
+        overlay.matches(query)
+    }
+
+    /// The panel row `n` last landed on, for the view to paint apart from the
+    /// rest of the hits.
+    pub fn overlay_match_row(&self, layout: &Layout) -> Option<usize> {
+        let index = self.overlay_match?;
+
+        self.overlay_matches(layout).get(index).copied()
+    }
+
+    fn step_overlay_match(
+        &mut self,
+        direction: isize,
+        count: usize,
+        layout: &Layout,
+    ) {
+        let matches = self.overlay_matches(layout);
+        if matches.is_empty() {
+            self.status = "pattern not found".into();
+            return;
+        }
+
+        for _ in 0..count {
+            // The panel is one list with two ends, so both of them wrap.
+            let next = match self.overlay_match {
+                Some(index) if direction > 0 => (index + 1) % matches.len(),
+                Some(index) => (index + matches.len() - 1) % matches.len(),
+                None if direction > 0 => 0,
+                None => matches.len() - 1,
+            };
+            self.overlay_match = Some(next);
+        }
+
+        self.show_overlay_match(&matches, layout);
+    }
+
+    /// The first hit at or below where the panel already sits, which is what an
+    /// incremental search lands on as it is typed.
+    fn land_on_overlay_hit(&mut self, from: usize, layout: &Layout) {
+        let matches = self.overlay_matches(layout);
+        if matches.is_empty() {
+            return;
+        }
+
+        let index = matches.iter().position(|row| *row >= from).unwrap_or(0);
+        self.overlay_match = Some(index);
+        self.show_overlay_match(&matches, layout);
+    }
+
+    /// Scrolls the panel the least it can to put the current hit inside it.
+    fn show_overlay_match(&mut self, matches: &[usize], layout: &Layout) {
+        let Some(&row) = self.overlay_match.and_then(|at| matches.get(at))
+        else {
+            return;
+        };
+        let viewport = layout.overlay_viewport().max(1);
+
+        if row < self.overlay_scroll {
+            self.overlay_scroll = row;
+        } else if row >= self.overlay_scroll + viewport {
+            self.overlay_scroll = row + 1 - viewport;
+        }
+
+        self.overlay_scroll = self.overlay_scroll.min(layout.overlay_limit());
     }
 
     /// The search box holds a single line, so the query is a slice of it.
@@ -1877,7 +2024,7 @@ impl App {
     /// Every hit in the open file, ordered the way the diff renders them: a code
     /// line, then the threads that hang beneath it.
     pub fn search_matches(&self, layout: &Layout) -> Vec<search::Match> {
-        let Some(query) = self.diff_query() else {
+        let Some(query) = self.live_query() else {
             return Vec::new();
         };
         let Some(file) = self.current_file() else {
@@ -1937,6 +2084,11 @@ impl App {
     /// One-based cursor position within the match list, plus the total. A zero
     /// position means the cursor is currently between matches.
     pub fn search_summary(&self, layout: &Layout) -> (usize, usize) {
+        if self.is_searching_overlay() {
+            let matches = self.overlay_matches(layout);
+            return (self.overlay_match.map_or(0, |at| at + 1), matches.len());
+        }
+
         let matches = self.search_matches(layout);
         let current =
             self.match_position(&matches).map_or(0, |index| index + 1);
@@ -1957,6 +2109,13 @@ impl App {
             self.status = "no search pattern".into();
             return;
         };
+
+        // The prompt's own mode says nothing about what is being searched, so
+        // the arrows have to ask where the search was opened from.
+        if self.is_searching_overlay() {
+            self.step_overlay_match(direction, count, layout);
+            return;
+        }
 
         let matches = self.search_matches(layout);
         if matches.is_empty() {

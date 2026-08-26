@@ -5,6 +5,7 @@ pub mod tree;
 use crate::app::App;
 use crate::app::keymap::Reference;
 use crate::app::mode::Mode;
+use crate::app::search::Query;
 use crate::expand::Gap;
 use ratatui::layout::{Constraint, Direction, Rect};
 use ratatui::text::Line;
@@ -175,6 +176,39 @@ impl Content {
             Self::Prose(lines) => lines.len(),
         }
     }
+
+    /// One row as plain text, which is what a query is tested against. The
+    /// reference's columns join into one line so a query can run over the chord
+    /// and what it does at once.
+    fn row_text(&self, index: usize) -> Option<String> {
+        match self {
+            Self::Keys(entries) => {
+                entries.get(index).map(|entry| match entry {
+                    Reference::Heading(title) => (*title).to_owned(),
+                    Reference::Entry {
+                        keys,
+                        name,
+                        summary,
+                    } => format!("{keys} {name} {summary}"),
+                })
+            }
+            Self::Prose(lines) => lines.get(index).map(ToString::to_string),
+        }
+    }
+}
+
+impl Overlay {
+    /// The rows a query hits, in reading order, which is what `n` steps
+    /// through.
+    pub fn matches(&self, query: Query<'_>) -> Vec<usize> {
+        (0..self.content.len())
+            .filter(|index| {
+                self.content
+                    .row_text(*index)
+                    .is_some_and(|text| query.is_match(&text))
+            })
+            .collect()
+    }
 }
 
 /// Widest a panel gets before it stops using the whole terminal.
@@ -185,9 +219,7 @@ const OVERLAY_WIDTH: u16 = 80;
 const OVERLAY_MARGIN: u16 = 2;
 
 fn build_overlay(app: &App, body: Rect) -> Option<Overlay> {
-    if !app.mode.is_overlay() {
-        return None;
-    }
+    let mode = app.overlay_mode()?;
 
     let width = OVERLAY_WIDTH.min(body.width);
     let height = body.height.saturating_sub(OVERLAY_MARGIN * 2).max(3);
@@ -199,7 +231,7 @@ fn build_overlay(app: &App, body: Rect) -> Option<Overlay> {
     };
     let inner = inside_border(area);
 
-    let (title, content) = if app.mode == Mode::Help {
+    let (title, content) = if mode == Mode::Help {
         (" keys ", Content::Keys(app.keymap().reference()))
     } else {
         (

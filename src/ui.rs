@@ -77,7 +77,7 @@ fn draw_overlay(frame: &mut Frame, app: &App, layout: &Layout) {
     let block = docked_block(overlay.title.to_owned(), theme.accent)
         .title_bottom(
             Line::styled(
-                " j/k scroll · esc close ",
+                " j/k scroll · / find · esc close ",
                 Style::default().fg(theme.dim),
             )
             .right_aligned(),
@@ -88,19 +88,66 @@ fn draw_overlay(frame: &mut Frame, app: &App, layout: &Layout) {
     let width = overlay.inner.width as usize;
     let scroll = app.overlay_scroll;
     let height = overlay.inner.height as usize;
+    let query = app.live_query();
+    let current = app.overlay_match_row(layout);
+    let hit = |row: usize| {
+        Style::default().bg(if Some(row) == current {
+            theme.search_current
+        } else {
+            theme.search
+        })
+    };
+
     let lines: Vec<Line> = match &overlay.content {
         Content::Keys(entries) => entries
             .iter()
+            .enumerate()
             .skip(scroll)
             .take(height)
-            .map(|entry| help_line(entry, width, theme))
+            .map(|(row, entry)| {
+                paint_hits(help_line(entry, width, theme), query, hit(row))
+            })
             .collect(),
-        Content::Prose(prose) => {
-            prose.iter().skip(scroll).take(height).cloned().collect()
-        }
+        Content::Prose(prose) => prose
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(height)
+            .map(|(row, line)| paint_hits(line.clone(), query, hit(row)))
+            .collect(),
     };
 
     frame.render_widget(Paragraph::new(lines), overlay.inner);
+}
+
+/// Repaints one already-styled line where the query hits it.
+///
+/// Hits are found inside each span rather than across the whole line, so a
+/// match straddling a style change is stepped to but left unpainted. The
+/// panel's own text is plain runs, so that is rare enough to accept.
+fn paint_hits(
+    line: Line<'static>,
+    query: Option<Query<'_>>,
+    hit: Style,
+) -> Line<'static> {
+    let Some(query) = query else {
+        return line;
+    };
+
+    let spans: Vec<Span<'static>> = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            matched_spans(
+                span.content.to_string(),
+                Some(query),
+                span.style,
+                span.style.patch(hit),
+            )
+        })
+        .collect();
+
+    Line::from(spans).style(line.style)
 }
 
 fn help_line(line: &Reference, width: usize, theme: Theme) -> Line<'static> {
@@ -1480,7 +1527,8 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, layout: &Layout) {
         Pane::Diff => " diff",
     };
 
-    let show_search_position = app.search.is_some() && app.pane == Pane::Diff;
+    let show_search_position = app.search.is_some()
+        && (app.pane == Pane::Diff || app.is_searching_overlay());
     let show_match_position = app.mode == Mode::Filter
         || (app.mode == Mode::Normal
             && app.pane == Pane::Files
@@ -1635,8 +1683,11 @@ fn draw_key_hints(
         (Mode::Search, _) => {
             &[("↑↓", "step"), ("↵", "accept"), ("esc", "cancel")]
         }
+        (Mode::Help | Mode::Overview, _) if app.search.is_some() => {
+            &[("n/N", "step"), ("/", "find"), ("esc", "close")]
+        }
         (Mode::Help | Mode::Overview, _) => {
-            &[("j/k", "scroll"), ("esc", "close")]
+            &[("j/k", "scroll"), ("/", "find"), ("esc", "close")]
         }
         (Mode::CommandLine, _) => &[
             (":42", "line"),
@@ -1682,12 +1733,13 @@ fn draw_key_hints(
         (Mode::Normal, Pane::Files) => &[
             ("j/k", "move"),
             ("↵", "open"),
-            ("}", "comments"),
+            ("o", "description"),
             if app.file_filter.is_some() {
                 ("/", "edit filter")
             } else {
                 ("/", "filter")
             },
+            ("q", "quit"),
         ],
         (Mode::Normal, Pane::Diff) if app.focused_draft().is_some() => &[
             ("j/k", "move"),
@@ -1731,32 +1783,55 @@ fn draw_key_hints(
         ],
         (Mode::Normal, Pane::Diff) => &[
             ("j/k", "move"),
+            ("c", "comment"),
             ("/", "search"),
             ("}", "next comment"),
-            ("c", "comment"),
-            ("C", "file note"),
+            ("q", "quit"),
         ],
     };
 
+    // The reference is the only hint that leads anywhere, so its room is taken
+    // before the mode's own hints are laid out rather than after: the bar
+    // truncates from the tail, and this must not be what a narrow terminal
+    // drops.
+    //
+    // Offered only where `?` is a key. Inside a panel the reader is already
+    // there, and at a prompt the character would be typed rather than acted on.
+    let reserved: &[(&str, &str)] =
+        if app.mode.is_overlay() || app.mode.is_prompt() {
+            &[]
+        } else {
+            &[("?", "keys")]
+        };
+    let claimed: usize = reserved.iter().map(|&pair| hint_width(pair)).sum();
+
     let available = (area.width as usize).saturating_sub(left_width + 2);
+    let Some(budget) = available.checked_sub(claimed) else {
+        return;
+    };
+
     let mut hint_spans = Vec::new();
-    let mut hint_width = 0;
+    let mut used = 0;
     for &(key, label) in keys {
-        let pair_width = text_width(key) + text_width(label) + 3;
-        if hint_width + pair_width > available {
+        let pair_width = hint_width((key, label));
+        if used + pair_width > budget {
             break;
         }
-        hint_spans.push(Span::styled(
-            format!(" {key}"),
-            bar.fg(theme.accent).add_modifier(Modifier::BOLD),
-        ));
-        hint_spans.push(Span::styled(format!(" {label} "), bar.fg(theme.dim)));
-        hint_width += pair_width;
+        hint_spans.push(hint_key(key, bar, theme));
+        hint_spans.push(hint_label(label, bar, theme));
+        used += pair_width;
     }
 
-    if hint_width == 0 {
+    for &(key, label) in reserved {
+        hint_spans.push(hint_key(key, bar, theme));
+        hint_spans.push(hint_label(label, bar, theme));
+        used += hint_width((key, label));
+    }
+
+    if used == 0 {
         return;
     }
+    let hint_width = used;
 
     frame.render_widget(
         Paragraph::new(Line::from(hint_spans)).alignment(Alignment::Right),
@@ -1766,6 +1841,23 @@ fn draw_key_hints(
             ..area
         },
     );
+}
+
+/// The columns one hint pair costs: a leading space, the gap between key and
+/// label, and a trailing space.
+fn hint_width((key, label): (&str, &str)) -> usize {
+    text_width(key) + text_width(label) + 3
+}
+
+fn hint_key(key: &str, bar: Style, theme: Theme) -> Span<'static> {
+    Span::styled(
+        format!(" {key}"),
+        bar.fg(theme.accent).add_modifier(Modifier::BOLD),
+    )
+}
+
+fn hint_label(label: &str, bar: Style, theme: Theme) -> Span<'static> {
+    Span::styled(format!(" {label} "), bar.fg(theme.dim))
 }
 
 fn draw_loading(frame: &mut Frame, app: &App, area: Rect) {

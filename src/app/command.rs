@@ -161,7 +161,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "find",
         group: "find",
-        summary: "filter the tree, or search the file",
+        summary: "search the panel, tree, or file",
         build: |_| Action::StartFind,
     },
     Command {
@@ -369,8 +369,8 @@ pub const COMMANDS: &[Command] = &[
         build: |_| Action::CloseOverlay,
     },
     // Normal mode's escape is a precedence rule over state — leave the card,
-    // else drop the query, else quit — so the app resolves it and the keymap
-    // only names it.
+    // else drop the query — so the app resolves it and the keymap only names
+    // it.
     Command {
         name: "escape",
         group: "prtui",

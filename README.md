@@ -69,8 +69,8 @@ below is a named command, so anything bound to a key is also reachable as
 `:name` — and `:42` jumps to line 42.
 
 **The pull request** — `o` opens the description and the discussion over the
-panes. It scrolls with the same keys the rest of the app uses, and `esc` closes
-it.
+panes, and `?` opens the key reference. Both scroll with the same keys the rest
+of the app uses, both are searchable with `/`, and `esc` closes either.
 
 **Motion** — `j`/`k` a row, `<C-d>`/`<C-u>` half a screen, `gg`/`G` the first
 and last line. A count works where you would expect: `10j`.
@@ -79,8 +79,8 @@ and last line. A count works where you would expect: `10j`.
 swaps the focused pane, `h`/`l` move between them, `<CR>` opens what the cursor
 is on.
 
-**Reading** — `/` filters the tree or searches the file, depending on which
-pane has focus; `n`/`N` walk the hits and `:noh` clears them. `za` reveals the
+**Reading** — `/` searches whatever you are reading: an open panel, the tree,
+or the file. `n`/`N` walk the hits and `:noh` clears them. `za` reveals the
 hidden lines under the cursor, `zj`/`zk` reveal downward or upward, and `zR`
 opens every gap in the file — the surrounding code is fetched from GitHub on
 demand.
@@ -99,7 +99,8 @@ it works over SSH. `gx` opens the pull request in a browser.
 **Submitting** — `s` opens the form. `<Tab>` steps the verdict between
 comment, approve, and request changes; `<CR>` ships every draft as one review.
 
-`q` or `:q` quits.
+`q` or `:q` quits. `<Esc>` backs out of whatever you are inside — a
+conversation, then a live query — but never out of the app.
 
 ## Contributing
 
