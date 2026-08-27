@@ -51,8 +51,12 @@ prtui 1234 -R rust-lang/cargo
 GitHub Enterprise works through the same flag, with the host in front:
 
 ```sh
+gh auth login --hostname github.example.com
 prtui 1234 -R github.example.com/team/service
 ```
+
+Each host needs its own `gh` login; `prtui` uses the token for the host it is
+reviewing and never sends one host's credential to another.
 
 ```
 Options:
@@ -120,8 +124,12 @@ sets up the pre-commit hook that formats and lints staged Rust.
 flight; read it before a change that crosses modules.
 
 A change someone using `prtui` would notice needs a changeset: `mise exec --
-knope document-change` writes one into `.changeset/`, describing what the change
+knope document-change` writes one into `.changeset/`, saying what the change
 gives them rather than what it altered. Internal work needs none.
+
+Keep the entry to one physical line, under 78 columns. knope reads the first
+line as a title and everything after it as a body, so wrapping turns a bullet
+into a heading and splits the sentence wherever the wrap fell.
 
 ## License
 

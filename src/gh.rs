@@ -1,9 +1,9 @@
 use crate::text::url::escape_path;
 use anyhow::{Context, Result, bail};
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::process::Command;
-use tokio::sync::OnceCell;
 use ureq::http::{HeaderMap, Response, StatusCode};
 use ureq::{Agent, Body};
 
@@ -140,6 +140,18 @@ impl Repo {
         })
     }
 
+    /// Reads `HOST/OWNER/REPO` out of a repository's web URL, which is how
+    /// `gh` reports where a checkout actually points.
+    pub fn from_url(url: &str) -> Result<Self> {
+        let url = url.trim();
+        let rest = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .unwrap_or(url);
+
+        Self::parse(rest.trim_end_matches(".git"))
+    }
+
     /// Enterprise installations serve the same API under `/api/v3`, so an
     /// explicit `github.com` has to resolve to the public host instead.
     fn enterprise_host(&self) -> Option<&str> {
@@ -191,26 +203,44 @@ fn agent() -> &'static Agent {
 
 /// The CLI owns credential storage — keychain on macOS, secret service on
 /// Linux, plain config elsewhere — so ask it rather than reimplementing that.
-async fn token() -> Option<String> {
-    static TOKEN: OnceCell<Option<String>> = OnceCell::const_new();
+/// The credential for one host.
+///
+/// `gh` holds a token per host and they are not interchangeable: the github.com
+/// one is a bearer credential that an enterprise host has no business seeing,
+/// and `-R HOST/OWNER/REPO` takes any host at all. Asking without naming the
+/// host is what used to send it to whichever one the flag pointed at.
+async fn token(host: Option<&str>) -> Option<String> {
+    static TOKENS: OnceLock<Mutex<HashMap<String, Option<String>>>> =
+        OnceLock::new();
 
-    TOKEN
-        .get_or_init(|| async {
-            let out = Command::new("gh")
-                .args(["auth", "token"])
-                .output()
-                .await
-                .ok()?;
+    let cache = TOKENS.get_or_init(Mutex::default);
+    let key = host.unwrap_or("github.com").to_owned();
 
-            if !out.status.success() {
-                return None;
-            }
+    if let Some(hit) = cache.lock().ok()?.get(&key) {
+        return hit.clone();
+    }
 
-            let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            (!token.is_empty()).then_some(token)
-        })
+    let fetched = ask_gh_for_token(&key).await;
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, fetched.clone());
+    }
+
+    fetched
+}
+
+async fn ask_gh_for_token(host: &str) -> Option<String> {
+    let out = Command::new("gh")
+        .args(["auth", "token", "--hostname", host])
+        .output()
         .await
-        .clone()
+        .ok()?;
+
+    if !out.status.success() {
+        return None;
+    }
+
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!token.is_empty()).then_some(token)
 }
 
 /// A validation failure carries a generic `message` and puts what actually went
@@ -425,10 +455,13 @@ fn graphql(
 
 /// Anything that writes needs a credential; failing here beats a 401 that reads
 /// like the review itself was rejected.
-async fn write_token() -> Result<String> {
-    token()
-        .await
-        .context("no GitHub token; run `gh auth login` first")
+async fn write_token(repo: &Repo) -> Result<String> {
+    token(repo.host.as_deref()).await.with_context(|| {
+        let host = repo.host.as_deref().unwrap_or("github.com");
+        format!(
+            "no GitHub token for {host}; run `gh auth login --hostname {host}`"
+        )
+    })
 }
 
 /// Changed files with their unified-diff patches. Measured faster than the
@@ -437,7 +470,7 @@ pub async fn fetch_files(
     repo: &Repo,
     number: u32,
 ) -> Result<serde_json::Value> {
-    let token = token().await;
+    let token = token(repo.host.as_deref()).await;
     let first = repo.rest_url(&format!(
         "/repos/{}/{}/pulls/{number}/files?per_page=100",
         repo.owner, repo.name
@@ -470,7 +503,7 @@ pub async fn fetch_files(
 
 /// PR metadata plus review threads in a single GraphQL round trip.
 pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<serde_json::Value> {
-    let token = token().await;
+    let token = token(repo.host.as_deref()).await;
     let url = repo.graphql_url();
     let variables = serde_json::json!({
         "owner": repo.owner,
@@ -501,7 +534,7 @@ pub async fn fetch_blob(
     path: &str,
     commit: &str,
 ) -> Result<String> {
-    let token = token().await;
+    let token = token(repo.host.as_deref()).await;
     let url = repo.rest_url(&format!(
         "/repos/{}/{}/contents/{}?ref={commit}",
         repo.owner,
@@ -533,7 +566,7 @@ async fn mutate(
     variables: serde_json::Value,
     what: &'static str,
 ) -> Result<serde_json::Value> {
-    let token = write_token().await?;
+    let token = write_token(repo).await?;
     let url = repo.graphql_url();
 
     tokio::task::spawn_blocking(move || {
@@ -648,7 +681,7 @@ pub async fn reply(
     in_reply_to: u64,
     body: String,
 ) -> Result<()> {
-    let token = write_token().await?;
+    let token = write_token(repo).await?;
     let url = repo.rest_url(&format!(
         "/repos/{}/{}/pulls/{number}/comments",
         repo.owner, repo.name
@@ -714,7 +747,13 @@ fn summarize_outage(val: &serde_json::Value) -> Option<String> {
 /// Statuspage runs on its own infrastructure, so it stays up through the
 /// outages it reports. Only consulted once a request has already failed, which
 /// keeps the healthy path free of it.
-pub async fn fetch_outage() -> Option<String> {
+pub async fn fetch_outage(repo: &Repo) -> Option<String> {
+    // githubstatus.com describes github.com. An enterprise host being down is
+    // not something it has ever heard of.
+    if repo.enterprise_host().is_some() {
+        return None;
+    }
+
     tokio::task::spawn_blocking(|| {
         let mut response = get(STATUS_URL, JSON_ACCEPT, None).ok()?;
         check(&mut response, "reading GitHub status").ok()?;
@@ -735,15 +774,11 @@ pub async fn fetch_outage() -> Option<String> {
 /// Resolved from the local git remotes, which is the CLI's job rather than an
 /// API call.
 pub async fn current_repo() -> Result<Repo> {
+    // The web URL rather than `nameWithOwner`, which names the repository but
+    // not the host it lives on. Dropping the host sent an enterprise checkout
+    // to github.com.
     let out = Command::new("gh")
-        .args([
-            "repo",
-            "view",
-            "--json",
-            "nameWithOwner",
-            "--jq",
-            ".nameWithOwner",
-        ])
+        .args(["repo", "view", "--json", "url", "--jq", ".url"])
         .output()
         .await
         .context("failed to spawn gh; is it installed and on PATH?")?;
@@ -753,7 +788,7 @@ pub async fn current_repo() -> Result<Repo> {
         bail!("gh repo view failed: {}", err.trim());
     }
 
-    Repo::parse(String::from_utf8_lossy(&out.stdout).trim())
+    Repo::from_url(String::from_utf8_lossy(&out.stdout).trim())
 }
 
 #[cfg(test)]
@@ -764,6 +799,51 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("link", link.parse().unwrap());
         headers
+    }
+
+    /// `gh repo view` used to be asked for `nameWithOwner`, which named the
+    /// repository but not the host, so an enterprise checkout resolved to
+    /// github.com and took the github.com token with it.
+    #[test]
+    fn a_web_url_keeps_the_host_it_names() {
+        let enterprise =
+            Repo::from_url("https://github.example.com/team/service").unwrap();
+        assert_eq!(enterprise.host.as_deref(), Some("github.example.com"));
+        assert_eq!(enterprise.enterprise_host(), Some("github.example.com"));
+        assert_eq!(
+            enterprise.rest_url("/x"),
+            "https://github.example.com/api/v3/x"
+        );
+
+        // The public host is named the same way but is not an enterprise one,
+        // so it still resolves to the public API.
+        let public = Repo::from_url("https://github.com/cli/cli").unwrap();
+        assert_eq!(public.owner, "cli");
+        assert_eq!(public.enterprise_host(), None);
+        assert_eq!(public.rest_url("/x"), "https://api.github.com/x");
+
+        assert_eq!(
+            Repo::from_url("https://github.com/cli/cli.git")
+                .unwrap()
+                .name,
+            "cli"
+        );
+    }
+
+    /// The public token is not valid on another host, and handing it over would
+    /// give that host a credential it has no business seeing.
+    #[test]
+    fn every_host_is_asked_for_its_own_token() {
+        let public = Repo::parse("cli/cli").unwrap();
+        let enterprise =
+            Repo::parse("github.example.com/team/service").unwrap();
+
+        assert_eq!(public.host.as_deref(), None);
+        assert_eq!(enterprise.host.as_deref(), Some("github.example.com"));
+        assert_eq!(
+            enterprise.web_url(),
+            "https://github.example.com/team/service"
+        );
     }
 
     #[test]

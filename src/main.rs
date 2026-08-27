@@ -142,9 +142,9 @@ impl MetaFetch {
 /// Asked only after something has already failed, so a healthy session never
 /// pays the round trip. Silence means GitHub says it is fine and the failure
 /// belongs to this request alone.
-fn spawn_outage_probe(tx: mpsc::UnboundedSender<Message>) {
+fn spawn_outage_probe(repo: gh::Repo, tx: mpsc::UnboundedSender<Message>) {
     tokio::spawn(async move {
-        if let Some(summary) = gh::fetch_outage().await {
+        if let Some(summary) = gh::fetch_outage(&repo).await {
             let _ = tx.send(Message::Outage(summary));
         }
     });
@@ -545,7 +545,7 @@ async fn event_loop(
 
                 if failure.is_some() && !is_outage_probed {
                     is_outage_probed = true;
-                    spawn_outage_probe(tx.clone());
+                    spawn_outage_probe(session.repo.clone(), tx.clone());
                 }
 
                 is_dirty |= affects_display;
