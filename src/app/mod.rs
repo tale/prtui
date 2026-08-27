@@ -1400,6 +1400,21 @@ impl App {
         };
     }
 
+    /// Takes the mark over from GitHub, which has just confirmed it.
+    ///
+    /// This is the one piece of server state the app keeps rather than reads
+    /// back: a mark says nothing about the threads, so refetching the whole
+    /// review to learn one boolean would cost a round trip per file read.
+    fn mark_viewed(&mut self, path: Arc<str>, is_viewed: bool) -> String {
+        if is_viewed {
+            self.viewed.insert(path);
+            return "file marked viewed".into();
+        }
+
+        self.viewed.remove(&path);
+        "file marked unviewed".into()
+    }
+
     /// The next file the reader has not been through, in the order the tree
     /// lists them.
     ///
@@ -1548,8 +1563,9 @@ impl App {
             Ok(Sent::Reply) => "reply posted".into(),
             Ok(Sent::Resolution(true)) => "thread resolved".into(),
             Ok(Sent::Resolution(false)) => "thread unresolved".into(),
-            Ok(Sent::Viewed(true)) => "file marked viewed".into(),
-            Ok(Sent::Viewed(false)) => "file marked unviewed".into(),
+            Ok(Sent::Viewed { path, is_viewed }) => {
+                self.mark_viewed(path, is_viewed)
+            }
             Ok(Sent::Blob { path, lines }) => self.blob_loaded(&path, &lines),
             Err(failure) => {
                 let status = format!("error: {}", failure.message());

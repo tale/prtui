@@ -2391,12 +2391,16 @@ fn marking_a_file_viewed_toggles_it_and_steps_on() {
     );
     assert_eq!(app.selected_file, 1);
 
-    app.finish(Ok(Sent::Viewed(true)));
+    // The mark is the app's once GitHub confirms it: no metadata fetch has to
+    // land for the tick to show.
+    app.finish(Ok(Sent::Viewed {
+        path: path.clone(),
+        is_viewed: true,
+    }));
     assert_eq!(app.status, "file marked viewed");
-
-    app.set_meta(meta_marking_viewed(&path));
-    app.selected_file = 0;
     assert!(app.tree_row(0).unwrap().is_viewed);
+
+    app.selected_file = 0;
 
     press(&mut app, "x");
     assert_eq!(

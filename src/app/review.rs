@@ -128,7 +128,12 @@ pub enum Sent {
     Review,
     Reply,
     Resolution(bool),
-    Viewed(bool),
+    /// The path is what the mark is held against, since the app keeps this one
+    /// itself rather than reading it back.
+    Viewed {
+        path: Arc<str>,
+        is_viewed: bool,
+    },
     Blob {
         path: Arc<str>,
         lines: Arc<[String]>,
@@ -136,9 +141,17 @@ pub enum Sent {
 }
 
 impl Sent {
-    /// Whether the review at GitHub changed, which is what a refetch reads
-    /// back. Reading a file changes nothing there.
-    pub const fn is_write(&self) -> bool {
+    /// Whether the change only shows once GitHub is read back. Reading a file
+    /// changes nothing there, and a viewed mark is the one piece of server
+    /// state the app carries itself, so neither is worth a metadata fetch.
+    pub const fn needs_refetch(&self) -> bool {
+        !matches!(self, Self::Blob { .. } | Self::Viewed { .. })
+    }
+
+    /// Whether a metadata fetch already in flight is now out of date. It left
+    /// before this write and answers with the state the write replaced, so a
+    /// mark the app holds would be taken straight back off the file.
+    pub const fn invalidates_fetch(&self) -> bool {
         !matches!(self, Self::Blob { .. })
     }
 }

@@ -125,6 +125,15 @@ impl MetaFetch {
         true
     }
 
+    /// A write whose result the app already holds. Nothing has to be fetched
+    /// for it, but a fetch in flight left before the write and answers with the
+    /// state it replaced, so that one is reissued rather than believed.
+    const fn invalidate(&mut self) {
+        if self.is_in_flight {
+            self.is_stale = true;
+        }
+    }
+
     /// Whether a reissue has to go out, which it does when a write landed
     /// while the finished fetch was reading the old state.
     const fn finish(&mut self) -> bool {
@@ -234,9 +243,9 @@ fn spawn_request(
                 pr,
                 path,
                 is_viewed,
-            } => gh::set_viewed(&repo, pr, path, is_viewed)
+            } => gh::set_viewed(&repo, pr, path.clone(), is_viewed)
                 .await
-                .map(|()| Sent::Viewed(is_viewed))
+                .map(|()| Sent::Viewed { path, is_viewed })
                 .map_err(|err| Failure::Other(err.to_string())),
             Request::Blob { path, commit } => {
                 match gh::fetch_blob(&repo, &path, &commit).await {
@@ -522,12 +531,22 @@ async fn event_loop(
                         true
                     }
                     // A write only shows up in the diff once the threads are
-                    // read back, so a success pulls metadata again.
+                    // read back, so a success pulls metadata again. A mark the
+                    // app already holds skips the fetch but still unseats one
+                    // in flight, which left before the write.
                     Message::Sent(outcome) => {
-                        let is_written =
-                            outcome.as_ref().is_ok_and(Sent::is_write);
+                        let sent = outcome.as_ref().ok();
+                        let needs_refetch =
+                            sent.is_some_and(Sent::needs_refetch);
+                        let invalidates =
+                            sent.is_some_and(Sent::invalidates_fetch);
                         app.finish(outcome);
-                        if is_written && meta_fetch.request() {
+
+                        if invalidates {
+                            meta_fetch.invalidate();
+                        }
+
+                        if needs_refetch && meta_fetch.request() {
                             spawn_meta_fetch(
                                 session.repo.clone(),
                                 session.number,
@@ -649,6 +668,29 @@ mod tests {
         assert!(!meta.request());
 
         assert!(meta.finish());
+        assert!(!meta.finish());
+    }
+
+    /// A viewed mark needs no fetch of its own, but one already in flight left
+    /// before it and reports the file as unread. Believing that answer takes
+    /// the tick straight back off a file the reader has finished.
+    #[test]
+    fn a_mark_the_app_holds_still_unseats_a_fetch_in_flight() {
+        let mut meta = MetaFetch::started();
+
+        meta.invalidate();
+        assert!(meta.finish());
+    }
+
+    /// With nothing in flight there is no stale answer to guard against, so a
+    /// mark costs no round trip and queues none behind the next fetch.
+    #[test]
+    fn a_mark_between_fetches_costs_no_round_trip() {
+        let mut meta = MetaFetch::started();
+        assert!(!meta.finish());
+
+        meta.invalidate();
+        assert!(meta.request());
         assert!(!meta.finish());
     }
 
