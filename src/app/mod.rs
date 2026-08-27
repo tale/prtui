@@ -204,14 +204,12 @@ impl Composer {
 }
 
 struct FileFilterSnapshot {
-    query: Option<String>,
     selected_file: usize,
 }
 
 /// Where the diff sat when a search began, so cancelling undoes the incremental
 /// preview instead of stranding the cursor on a match the user rejected.
 struct SearchOrigin {
-    query: Option<String>,
     cursor: usize,
     focused_card: Option<Card>,
     diff_scroll: usize,
@@ -378,7 +376,11 @@ pub struct App {
     filter_snapshot: Option<FileFilterSnapshot>,
     search_origin: Option<SearchOrigin>,
     /// Every `:` line run this session, oldest first.
+    /// What each prompt has been given this session, oldest first. `/` and `:`
+    /// open clean, so recall is the only way back to an earlier one.
     command_history: Vec<String>,
+    search_history: Vec<String>,
+    filter_history: Vec<String>,
     /// How far back through the history the open `:` line has been walked.
     history_cursor: Option<usize>,
     /// How far the open panel has been scrolled.
@@ -445,6 +447,8 @@ impl App {
             filter_snapshot: None,
             search_origin: None,
             command_history: Vec::new(),
+            search_history: Vec::new(),
+            filter_history: Vec::new(),
             history_cursor: None,
             overlay_scroll: 0,
             overlay_match: None,
@@ -1100,7 +1104,9 @@ impl App {
             Action::StartCommandLine => self.start_command_line(),
             Action::RunCommandLine => self.run_command_line(layout),
             Action::CancelCommandLine => self.cancel_command_line(),
-            Action::WalkHistory(direction) => self.walk_history(direction),
+            Action::WalkHistory(direction) => {
+                self.walk_history(direction, layout);
+            }
         }
     }
 
@@ -1653,12 +1659,25 @@ impl App {
 
     /// Walks the `:` line back through what has been run before. Walking past
     /// the newest entry leaves an empty line, the way Vim does.
-    fn walk_history(&mut self, direction: isize) {
-        if self.command_history.is_empty() {
+    /// What the open prompt recalls from. A mode that is not a prompt has
+    /// nothing worth typing twice.
+    fn history(&self, mode: Mode) -> &[String] {
+        match mode {
+            Mode::Filter => &self.filter_history,
+            Mode::Search => &self.search_history,
+            Mode::CommandLine => &self.command_history,
+            _ => &[],
+        }
+    }
+
+    /// Walks the open prompt's history.
+    fn walk_history(&mut self, direction: isize, layout: &Layout) {
+        let history = self.history(self.mode);
+        if history.is_empty() {
             return;
         }
 
-        let last = self.command_history.len() - 1;
+        let last = history.len() - 1;
         let target = match (self.history_cursor, direction) {
             (None, -1) => Some(last),
             (None, _) => None,
@@ -1668,10 +1687,14 @@ impl App {
             (Some(index), _) => Some(index + 1),
         };
 
-        let text = target.map_or("", |index| &self.command_history[index]);
-        let mut editor = CommentEditor::default();
-        editor.set_text(text);
-        self.command_line = Some(editor);
+        let text = target
+            .map_or("", |index| history[index].as_str())
+            .to_owned();
+
+        // Through the path a keystroke takes, so the tree and the diff preview
+        // the recalled text exactly as if it had been typed. That path clears
+        // the cursor, so the position is written after it.
+        self.edit_prompt(layout, |editor| editor.set_text(&text));
         self.history_cursor = target;
     }
 
@@ -1699,6 +1722,11 @@ impl App {
         layout: &Layout,
         edit: impl FnOnce(&mut CommentEditor),
     ) -> bool {
+        // Typing moves off whatever was recalled, so the next recall starts
+        // from the end again. Set here rather than per prompt: this is the one
+        // path every keystroke into a prompt takes.
+        self.history_cursor = None;
+
         match self.mode {
             Mode::Insert => {
                 let Some(composer) = self.composer.as_mut() else {
@@ -1733,7 +1761,6 @@ impl App {
                     return false;
                 };
                 edit(line);
-                self.history_cursor = None;
             }
             Mode::Normal | Mode::Visual | Mode::Help | Mode::Overview => {
                 return false;
@@ -1743,13 +1770,19 @@ impl App {
         true
     }
 
+    /// Drops whichever find is live.
+    ///
+    /// The pane picks which one goes first when both are; it must not decide
+    /// whether anything is cleared at all. A search left highlighted behind the
+    /// file tree used to swallow every escape, since the pane said "filter" and
+    /// there was no filter to drop.
     fn clear_find(&mut self) {
+        let prefers_tree = self.pane == Pane::Files && !self.mode.is_overlay();
+
         if self.search.is_some()
-            && (self.mode.is_overlay() || self.pane == Pane::Diff)
+            && !(prefers_tree && self.file_filter.is_some())
         {
-            self.search = None;
-            self.search_origin = None;
-            self.overlay_match = None;
+            self.clear_search();
             return;
         }
 
@@ -1757,20 +1790,29 @@ impl App {
         self.filter_snapshot = None;
     }
 
+    fn clear_search(&mut self) {
+        self.search = None;
+        self.search_origin = None;
+        self.overlay_match = None;
+    }
+
     fn start_file_filter(&mut self) {
+        // Whatever was found in a file stops being interesting the moment the
+        // reader goes looking for a different file, and its highlights would
+        // otherwise sit behind the tree until something else cleared them.
+        self.clear_search();
+
         self.is_files_visible = true;
         self.pane = Pane::Files;
-        let query = self.filter_query();
+
+        // `/` opens on the whole tree, the way it opens on an unhighlighted
+        // diff. Reopening onto the last query left the list already narrowed
+        // by a filter the reader was in the middle of replacing.
         self.filter_snapshot = Some(FileFilterSnapshot {
-            query: query.clone(),
             selected_file: self.selected_file,
         });
-        match query {
-            Some(query) => {
-                self.file_filter.get_or_insert_default().set_text(query);
-            }
-            None => self.file_filter = Some(CommentEditor::default()),
-        }
+        self.file_filter = Some(CommentEditor::default());
+        self.history_cursor = None;
         self.mode = Mode::Filter;
     }
 
@@ -1781,8 +1823,12 @@ impl App {
         }
 
         self.filter_snapshot = None;
-        if self.filter_query().is_some_and(|query| query.is_empty()) {
-            self.file_filter = None;
+        match self.filter_query() {
+            Some(query) if query.is_empty() => self.file_filter = None,
+            Some(query) if self.filter_history.last() != Some(&query) => {
+                self.filter_history.push(query);
+            }
+            _ => {}
         }
         self.mode = Mode::Normal;
         self.pane = Pane::Files;
@@ -1790,14 +1836,8 @@ impl App {
 
     fn cancel_file_filter(&mut self) {
         let snapshot = self.filter_snapshot.take();
-        self.file_filter = snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.query.as_ref())
-            .map(|query| {
-                let mut editor = CommentEditor::default();
-                editor.set_text(query);
-                editor
-            });
+        self.file_filter = None;
+
         if let Some(snapshot) = snapshot {
             self.set_selected_file(snapshot.selected_file, false);
         }
@@ -1809,7 +1849,6 @@ impl App {
     /// still what `n` repeats, and cancelling puts it back.
     fn start_search(&mut self) {
         self.search_origin = Some(SearchOrigin {
-            query: self.search_query().map(str::to_string),
             cursor: self.cursor,
             focused_card: self.focused_card.clone(),
             diff_scroll: self.diff_scroll,
@@ -1817,6 +1856,7 @@ impl App {
             mode: self.mode,
         });
         self.search = Some(CommentEditor::default());
+        self.history_cursor = None;
 
         // A panel floats over the panes, so a search inside one leaves the
         // diff's cursor and selection exactly where they were.
@@ -1841,6 +1881,11 @@ impl App {
             return;
         };
 
+        let query = query.to_owned();
+        if self.search_history.last() != Some(&query) {
+            self.search_history.push(query.clone());
+        }
+
         let is_found = if self.mode.is_overlay() {
             !self.overlay_matches(layout).is_empty()
         } else {
@@ -1859,11 +1904,7 @@ impl App {
         };
 
         self.mode = origin.mode;
-        self.search = origin.query.map(|query| {
-            let mut editor = CommentEditor::default();
-            editor.set_text(&query);
-            editor
-        });
+        self.search = None;
 
         if origin.mode.is_overlay() {
             self.overlay_scroll = origin.overlay_scroll;

@@ -2,4 +2,4 @@
 default: minor
 ---
 
-Read the pull request description and its discussion with `o`
+`o` opens the pull request description and comments

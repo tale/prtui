@@ -1,5 +1,6 @@
 use prtui::app::action::{Action, Motion};
 use prtui::app::draft::{Parent, Side, Sync};
+use prtui::app::editor::CommentEditor;
 use prtui::app::input::{DispatchResult, InputRouter};
 use prtui::app::keymap::{Keymap, Resolution};
 use prtui::app::link::{Errand, Origin};
@@ -382,7 +383,8 @@ fn the_reference_lists_every_command_and_the_keys_bound_to_it() {
     };
 
     // The same command reached from more than one mode lists each chord once.
-    assert_eq!(find("move-down"), Some("j  <Down>  <C-n>"));
+    assert_eq!(find("move-down"), Some("j  <Down>"));
+    assert_eq!(find("history-prev"), Some("<Up>  <C-p>"));
     assert_eq!(find("expand-file"), Some("zR"));
     assert_eq!(find("help"), Some("?"));
     // Reachable only by name, and listed anyway.
@@ -1434,12 +1436,8 @@ fn filtering_narrows_the_tree_and_survives_commit() {
     assert_eq!(app.mode, Mode::Filter);
     assert_eq!(app.filtered_file_indices(), vec![2, 3]);
 
-    send(
-        &mut input,
-        &mut app,
-        KeyEvent::new(KeyCode::Char('p'), Modifiers::CONTROL),
-    );
-    assert_eq!(app.selected_file, 2, "ctrl-p steps back through matches");
+    send(&mut input, &mut app, KeyEvent::from(KeyCode::Up));
+    assert_eq!(app.selected_file, 2, "up steps back through matches");
 
     send(&mut input, &mut app, KeyCode::Enter.into());
     assert_eq!(app.mode, Mode::Normal);
@@ -1461,7 +1459,7 @@ fn filtering_narrows_the_tree_and_survives_commit() {
 }
 
 #[test]
-fn escape_restores_whatever_the_filter_replaced() {
+fn escape_puts_the_cursor_back_where_the_filter_found_it() {
     let mut app = load();
     app.pane = Pane::Files;
     let original_file = app.selected_file;
@@ -1482,18 +1480,26 @@ fn escape_restores_whatever_the_filter_replaced() {
     assert!(app.file_filter.is_none());
     assert_eq!(app.selected_file, original_file);
 
-    // Escaping an edit rewinds to the committed query, not to no filter at all.
+    // `/` opens on the whole tree rather than onto the committed query, so a
+    // second one types a new filter instead of extending the old one.
     press(&mut app, "/auth_check");
     send(&mut input, &mut app, KeyCode::Enter.into());
     app.selected_file = 2;
 
-    press(&mut app, "/_test");
-    assert_eq!(app.filter_query().as_deref(), Some("auth_check_test"));
-    assert_eq!(app.selected_file, 3, "the edit previews its narrower match");
+    press(&mut app, "/");
+    assert_eq!(app.filter_query().as_deref(), Some(""), "`/` opens clean");
+    assert_eq!(
+        app.filtered_file_indices().len(),
+        app.files.len(),
+        "and on every file"
+    );
+
+    press(&mut app, "_test");
+    assert_eq!(app.filter_query().as_deref(), Some("_test"));
 
     send(&mut input, &mut app, KeyCode::Escape.into());
-    assert_eq!(app.filter_query().as_deref(), Some("auth_check"));
-    assert_eq!(app.selected_file, 2);
+    assert!(app.file_filter.is_none(), "and leaves none behind");
+    assert_eq!(app.selected_file, 2, "but the cursor goes back");
 }
 
 #[test]
@@ -1904,11 +1910,10 @@ fn both_prompts_step_with_arrows_and_control_keys() {
     press(&mut app, "/auth_check");
     assert_eq!(app.filtered_file_indices(), vec![2, 3]);
 
+    // The arrows step; ctrl-p/n is recall, covered separately.
     for (key, expected) in [
         (KeyEvent::from(KeyCode::Up), 2),
         (KeyEvent::from(KeyCode::Down), 3),
-        (ctrl('p'), 2),
-        (ctrl('n'), 3),
     ] {
         send(&mut input, &mut app, key);
         assert_eq!(app.selected_file, expected, "{key:?} steps the filter");
@@ -1922,11 +1927,10 @@ fn both_prompts_step_with_arrows_and_control_keys() {
     let mut input = search_for(&mut app, "cobra");
     let rows: Vec<usize> = found(&app).iter().map(Match::row).collect();
 
+    // The arrows step the hits; ctrl-p/n is recall, covered separately.
     for (key, expected) in [
         (KeyEvent::from(KeyCode::Down), rows[1]),
         (KeyEvent::from(KeyCode::Up), rows[0]),
-        (ctrl('n'), rows[1]),
-        (ctrl('p'), rows[0]),
     ] {
         send(&mut input, &mut app, key);
         assert_eq!(app.cursor, expected, "{key:?} steps the search prompt");
@@ -1935,6 +1939,89 @@ fn both_prompts_step_with_arrows_and_control_keys() {
     send(&mut input, &mut app, ctrl('['));
     assert_eq!(app.mode, Mode::Normal, "ctrl-[ cancels the search prompt");
     assert!(app.search.is_none());
+}
+
+/// Every prompt opens clean, so recall is the only way back to an earlier one.
+/// All three walk the same history path, so one test holds them to it.
+#[test]
+fn every_prompt_recalls_what_was_typed_into_it() {
+    let ctrl = |c| KeyEvent::new(KeyCode::Char(c), Modifiers::CONTROL);
+
+    // (opening key, two entries to run, the pane the prompt belongs to)
+    let prompts: [(char, [&str; 2], Pane); 3] = [
+        ('/', ["cobra", "bundle"], Pane::Diff),
+        ('/', ["auth", "verify"], Pane::Files),
+        (':', ["noh", "7"], Pane::Diff),
+    ];
+
+    for (open, entries, pane) in prompts {
+        let mut app = load();
+        app.pane = pane;
+        let mut input = InputRouter::default();
+
+        for entry in entries {
+            send(
+                &mut input,
+                &mut app,
+                KeyEvent::new(KeyCode::Char(open), Modifiers::NONE),
+            );
+            paste(&mut input, &mut app, entry);
+            send(&mut input, &mut app, KeyCode::Enter.into());
+        }
+
+        send(
+            &mut input,
+            &mut app,
+            KeyEvent::new(KeyCode::Char(open), Modifiers::NONE),
+        );
+        assert_eq!(
+            prompt_text(&app),
+            Some(String::new()),
+            "{open} in {pane:?} opens clean"
+        );
+
+        send(&mut input, &mut app, ctrl('p'));
+        assert_eq!(prompt_text(&app).as_deref(), Some(entries[1]));
+        send(&mut input, &mut app, ctrl('p'));
+        assert_eq!(prompt_text(&app).as_deref(), Some(entries[0]));
+        send(&mut input, &mut app, ctrl('n'));
+        assert_eq!(prompt_text(&app).as_deref(), Some(entries[1]));
+
+        // Typing moves off the recall, so the next one starts from the end.
+        paste(&mut input, &mut app, "x");
+        send(&mut input, &mut app, ctrl('p'));
+        assert_eq!(prompt_text(&app).as_deref(), Some(entries[1]));
+    }
+}
+
+/// Whichever line is open, read as text.
+fn prompt_text(app: &App) -> Option<String> {
+    match app.mode {
+        Mode::Filter => app.filter_query(),
+        Mode::Search => app.search_query().map(str::to_owned),
+        Mode::CommandLine => app.command_line.as_ref().map(CommentEditor::text),
+        _ => None,
+    }
+}
+
+/// Cancelling used to put the previous pattern back, which made `/` feel like
+/// it had not cleared anything.
+#[test]
+fn cancelling_a_search_leaves_no_pattern_behind() {
+    let mut app = load();
+    let mut input = search_for(&mut app, "cobra");
+    send(&mut input, &mut app, KeyCode::Enter.into());
+    assert!(app.search.is_some());
+
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+    );
+    send(&mut input, &mut app, KeyCode::Escape.into());
+
+    assert!(app.search.is_none(), "the old pattern does not come back");
+    assert_eq!(app.mode, Mode::Normal);
 }
 
 /// Each draft is filed against the pending review as it is written, so the
@@ -2709,4 +2796,105 @@ fn the_reference_fits_the_columns_it_is_drawn_in() {
         assert!(name.chars().count() <= 19, "name column: {name}");
         assert!(summary.chars().count() <= 36, "summary column: {summary}");
     }
+}
+
+/// A search stays highlighted while the tree has the focus, and used to be
+/// unclearable from there: escape asked "is a find live", `clear_find` asked
+/// "which pane is this", and the two disagreed until the key did nothing.
+#[test]
+fn escape_clears_the_search_from_either_pane() {
+    for pane in [Pane::Diff, Pane::Files] {
+        let mut app = load();
+        let mut input = search_for(&mut app, "cobra");
+        send(&mut input, &mut app, KeyCode::Enter.into());
+        act(&mut app, &Action::LeaveThread);
+        app.pane = pane;
+        assert!(app.search.is_some());
+
+        send(&mut input, &mut app, KeyCode::Escape.into());
+        assert!(
+            app.search.is_none(),
+            "one escape should clear it in {pane:?}"
+        );
+        assert!(!app.should_quit);
+    }
+}
+
+/// With both live the pane decides the order, so the tree's own filter goes
+/// first and the search survives to be cleared next.
+#[test]
+fn the_focused_pane_picks_which_find_clears_first() {
+    // Filter first: the other order clears the search as the filter opens.
+    let mut app = load();
+    app.pane = Pane::Files;
+    let mut input = InputRouter::default();
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+    );
+    paste(&mut input, &mut app, "auth_check");
+    send(&mut input, &mut app, KeyCode::Enter.into());
+
+    let mut input = search_for(&mut app, "cobra");
+    send(&mut input, &mut app, KeyCode::Enter.into());
+    act(&mut app, &Action::LeaveThread);
+    app.pane = Pane::Files;
+    assert!(app.file_filter.is_some() && app.search.is_some());
+
+    send(&mut input, &mut app, KeyCode::Escape.into());
+    assert!(
+        app.file_filter.is_none(),
+        "the tree's own filter goes first"
+    );
+    assert!(app.search.is_some());
+
+    send(&mut input, &mut app, KeyCode::Escape.into());
+    assert!(app.search.is_none());
+}
+
+/// The diff keeps its highlights while the tree has the focus, so a filter
+/// started after a search used to open over a screen still lit by it.
+#[test]
+fn filtering_the_tree_drops_a_search_left_in_the_diff() {
+    let mut app = load();
+    let mut input = search_for(&mut app, "cobra");
+    send(&mut input, &mut app, KeyCode::Enter.into());
+    act(&mut app, &Action::LeaveThread);
+
+    send(&mut input, &mut app, KeyEvent::from(KeyCode::Tab));
+    assert_eq!(app.pane, Pane::Files);
+    assert!(app.search.is_some(), "tabbing alone leaves it alone");
+
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+    );
+    assert_eq!(app.mode, Mode::Filter);
+    assert!(app.search.is_none(), "`/` in the tree clears the search");
+}
+
+/// The reverse does not hold: a filter is the set of files being reviewed, not
+/// decoration, so searching inside one of them keeps it.
+#[test]
+fn searching_a_file_keeps_the_tree_filtered() {
+    let mut app = load();
+    app.pane = Pane::Files;
+
+    let mut input = InputRouter::default();
+    send(
+        &mut input,
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
+    );
+    paste(&mut input, &mut app, "auth_check");
+    send(&mut input, &mut app, KeyCode::Enter.into());
+    assert!(app.file_filter.is_some());
+
+    let mut input = search_for(&mut app, "cobra");
+    send(&mut input, &mut app, KeyCode::Enter.into());
+
+    assert!(app.file_filter.is_some(), "the filtered set survives");
+    assert!(app.search.is_some());
 }

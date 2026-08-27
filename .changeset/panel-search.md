@@ -2,4 +2,4 @@
 default: minor
 ---
 
-Search the description and the key reference with `/`
+`/` searches the description and the `?` key list

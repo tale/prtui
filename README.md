@@ -84,7 +84,9 @@ swaps the focused pane, `h`/`l` move between them, `<CR>` opens what the cursor
 is on.
 
 **Reading** — `/` searches whatever you are reading: an open panel, the tree,
-or the file. `n`/`N` walk the hits and `:noh` clears them. `za` reveals the
+or the file, and starts clean each time. `n`/`N` walk the hits and `:noh`
+clears them. Inside any prompt — `/` or `:` — the arrows step what is under it
+and `<C-p>`/`<C-n>` recall what you typed there before. `za` reveals the
 hidden lines under the cursor, `zj`/`zk` reveal downward or upward, and `zR`
 opens every gap in the file — the surrounding code is fetched from GitHub on
 demand.
@@ -130,6 +132,10 @@ gives them rather than what it altered. Internal work needs none.
 Keep the entry to one physical line, under 78 columns. knope reads the first
 line as a title and everything after it as a body, so wrapping turns a bullet
 into a heading and splits the sentence wherever the wrap fell.
+
+Write it the way a release note reads, not the way a commit message does: what
+the tool now does, in the words the keys and the panes already go by. `` `o`
+opens the pull request description ``, not `Add an overview overlay`.
 
 ## License
 

@@ -2,4 +2,4 @@
 default: patch
 ---
 
-Use each host's own `gh` token; github.com's is no longer sent elsewhere
+GitHub Enterprise uses its own `gh` login, not your github.com token
