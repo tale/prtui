@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +174,10 @@ pub struct Meta {
     /// The review the viewer has open but not submitted, which every draft is
     /// filed against once the first one has opened it.
     pub pending_review: Option<Arc<str>>,
+    /// Paths the viewer has already read through. A set rather than a flag on
+    /// `ChangedFile`: the patches come from REST and the marks from GraphQL,
+    /// and the two land independently.
+    pub viewed: HashSet<Arc<str>>,
 }
 
 /// `@@ -old,count +new,count @@` — captures the two start line numbers.
@@ -320,6 +325,7 @@ struct WirePullRequest {
     head_ref_name: String,
     head_ref_oid: String,
     body: String,
+    files: Nodes<WireChangedFile>,
     pending_review: Nodes<WireReview>,
     review_threads: Nodes<WireThread>,
     discussion: Nodes<WireDiscussionComment>,
@@ -328,6 +334,15 @@ struct WirePullRequest {
 #[derive(Deserialize)]
 struct WireReview {
     id: String,
+}
+
+/// `DISMISSED` is a file marked read whose diff has changed since, which is
+/// unread again as far as the reviewer is concerned.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireChangedFile {
+    path: String,
+    viewer_viewed_state: String,
 }
 
 #[derive(Deserialize)]
@@ -448,6 +463,13 @@ pub fn parse_meta(val: &serde_json::Value) -> Result<Meta> {
         .context("PR not found in graphql response")?;
 
     Ok(Meta {
+        viewed: pr
+            .files
+            .nodes
+            .into_iter()
+            .filter(|file| file.viewer_viewed_state == "VIEWED")
+            .map(|file| file.path.into())
+            .collect(),
         pending_review: pr
             .pending_review
             .nodes
@@ -553,6 +575,7 @@ mod tests {
             "headRefName": "work",
             "headRefOid": "cafe1234",
             "body": "",
+            "files": { "nodes": [] },
             "pendingReview": { "nodes": [] },
             "reviewThreads": { "nodes": threads },
             "discussion": { "nodes": [] },

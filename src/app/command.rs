@@ -129,6 +129,12 @@ pub const COMMANDS: &[Command] = &[
         build: |_| Action::FocusDiff,
     },
     Command {
+        name: "toggle-viewed",
+        group: "files",
+        summary: "mark read and open the next unread",
+        build: |_| Action::ToggleViewed,
+    },
+    Command {
         name: "activate",
         group: "files",
         summary: "open or expand what the cursor is on",

@@ -230,6 +230,14 @@ fn spawn_request(
                 .await
                 .map(|()| Sent::Resolution(is_resolved))
                 .map_err(|err| Failure::Other(err.to_string())),
+            Request::SetViewed {
+                pr,
+                path,
+                is_viewed,
+            } => gh::set_viewed(&repo, pr, path, is_viewed)
+                .await
+                .map(|()| Sent::Viewed(is_viewed))
+                .map_err(|err| Failure::Other(err.to_string())),
             Request::Blob { path, commit } => {
                 match gh::fetch_blob(&repo, &path, &commit).await {
                     Ok(text) => Ok(Sent::Blob {

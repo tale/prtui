@@ -62,6 +62,7 @@ impl<'a> OpenFile<'a> {
 pub struct TreeRow<'a> {
     pub file: &'a ChangedFile,
     pub is_selected: bool,
+    pub is_viewed: bool,
     pub threads: usize,
     pub unresolved: usize,
 }
@@ -303,6 +304,10 @@ pub struct App {
     /// Comments discarded here but possibly still in a metadata fetch that left
     /// before the discard landed. Without this they come back from the dead.
     retired: HashSet<Arc<str>>,
+    /// Paths GitHub says the reader has already been through, as of the last
+    /// metadata fetch. Owned by the server: a toggle is a write that the
+    /// refetch behind it reads back.
+    viewed: HashSet<Arc<str>>,
     next_draft_id: u64,
 
     pub mode: Mode,
@@ -410,6 +415,7 @@ impl App {
             pending_review: None,
             pending_threads: Vec::new(),
             retired: HashSet::new(),
+            viewed: HashSet::new(),
             next_draft_id: 0,
             mode: Mode::Normal,
             selection: None,
@@ -561,6 +567,7 @@ impl App {
 
         self.threads_by_path = by_path;
         self.pending_threads = pending;
+        self.viewed = meta.viewed;
         self.pending_review = meta.pending_review;
         self.discussion = meta.discussion;
         self.pr = Some(meta.pr);
@@ -687,6 +694,7 @@ impl App {
         Some(TreeRow {
             file,
             is_selected: index == self.selected_file,
+            is_viewed: self.viewed.contains(&file.path),
             threads: threads.len(),
             unresolved: threads.iter().filter(|t| !t.is_resolved).count(),
         })
@@ -1074,6 +1082,7 @@ impl App {
             Action::EditDraft => self.edit_draft(layout),
             Action::DeleteDraft => self.delete_draft(),
             Action::ToggleResolved => self.toggle_resolved(),
+            Action::ToggleViewed => self.toggle_viewed(layout),
             Action::Expand(reveal) => self.expand(reveal),
             Action::ExpandFile => self.expand_file(),
 
@@ -1357,6 +1366,58 @@ impl App {
         };
     }
 
+    /// Marking a file read moves on to the next one, since being done with a
+    /// file and wanting to keep looking at it are not the same intent. Clearing
+    /// the mark stays put: it is asked for by a reader coming back to the file.
+    fn toggle_viewed(&mut self, layout: &Layout) {
+        let Some(path) = self.current_file().map(|file| file.path.clone())
+        else {
+            self.status = "no file open".into();
+            return;
+        };
+        let Some(pr) = self.pr.as_ref().map(|pr| pr.id.clone()) else {
+            return;
+        };
+
+        let is_viewed = !self.viewed.contains(&path);
+        self.send(Request::SetViewed {
+            pr,
+            path,
+            is_viewed,
+        });
+
+        if !is_viewed {
+            self.status = "marking unviewed…".into();
+            return;
+        }
+
+        self.status = match self.next_unread_file(layout) {
+            Some(index) => {
+                self.select_file(index);
+                "marking viewed…".into()
+            }
+            None => "marking viewed… nothing left unread".into(),
+        };
+    }
+
+    /// The next file the reader has not been through, in the order the tree
+    /// lists them.
+    ///
+    /// Files already marked are stepped over rather than landed on. `x` on a
+    /// marked file clears its mark, so stopping there would turn a walk down
+    /// the review into undoing the last session's work.
+    fn next_unread_file(&self, layout: &Layout) -> Option<usize> {
+        let files: Vec<usize> = layout.files.files().collect();
+        let position = files
+            .iter()
+            .position(|&index| index == self.selected_file)?;
+
+        files[position + 1..]
+            .iter()
+            .copied()
+            .find(|&index| !self.viewed.contains(&self.files[index].path))
+    }
+
     fn start_submit(&mut self, layout: &Layout) {
         self.composer = None;
         self.selection = None;
@@ -1487,6 +1548,8 @@ impl App {
             Ok(Sent::Reply) => "reply posted".into(),
             Ok(Sent::Resolution(true)) => "thread resolved".into(),
             Ok(Sent::Resolution(false)) => "thread unresolved".into(),
+            Ok(Sent::Viewed(true)) => "file marked viewed".into(),
+            Ok(Sent::Viewed(false)) => "file marked unviewed".into(),
             Ok(Sent::Blob { path, lines }) => self.blob_loaded(&path, &lines),
             Err(failure) => {
                 let status = format!("error: {}", failure.message());

@@ -2369,6 +2369,90 @@ fn resolving_toggles_the_focused_thread() {
     assert!(app.take_requests().is_empty());
 }
 
+/// The mark is the server's, so a toggle sends the opposite of what the last
+/// metadata fetch reported and waits for the refetch to say it landed.
+///
+/// Marking read also opens the next file, the way `]` would. Clearing the mark
+/// does not: that is a reader coming back to the file, not leaving it.
+#[test]
+fn marking_a_file_viewed_toggles_it_and_steps_on() {
+    let mut app = load();
+    app.selected_file = 0;
+    let path = app.files[0].path.clone();
+
+    press(&mut app, "x");
+    assert_eq!(
+        app.take_requests(),
+        vec![Request::SetViewed {
+            pr: "PR_fixture".into(),
+            path: path.clone(),
+            is_viewed: true,
+        }]
+    );
+    assert_eq!(app.selected_file, 1);
+
+    app.finish(Ok(Sent::Viewed(true)));
+    assert_eq!(app.status, "file marked viewed");
+
+    app.set_meta(meta_marking_viewed(&path));
+    app.selected_file = 0;
+    assert!(app.tree_row(0).unwrap().is_viewed);
+
+    press(&mut app, "x");
+    assert_eq!(
+        app.take_requests(),
+        vec![Request::SetViewed {
+            pr: "PR_fixture".into(),
+            path,
+            is_viewed: false,
+        }]
+    );
+    assert_eq!(app.selected_file, 0);
+}
+
+/// A file already marked is stepped over, not landed on: `x` there would clear
+/// its mark, so walking the review with `x` would undo the last session.
+#[test]
+fn marking_a_file_viewed_steps_over_the_ones_already_read() {
+    let mut app = load();
+    app.set_meta(meta_marking_viewed(&app.files[1].path.clone()));
+    app.selected_file = 0;
+
+    press(&mut app, "x");
+
+    assert_eq!(app.selected_file, 2);
+}
+
+/// Nothing left unread is not a failure, but the reader pressed a key and did
+/// not move, so the bar says why.
+#[test]
+fn marking_the_last_unread_file_stays_on_it_and_says_so() {
+    let mut app = load();
+    let last = app.files.len() - 1;
+    app.selected_file = last;
+
+    press(&mut app, "x");
+
+    assert_eq!(app.take_requests().len(), 1);
+    assert_eq!(app.selected_file, last);
+    assert_eq!(app.status, "marking viewed… nothing left unread");
+}
+
+/// The fixture as GitHub would send it back once `path` has been read through.
+fn meta_marking_viewed(path: &str) -> prtui::model::Meta {
+    let mut meta: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
+    let files = meta["data"]["repository"]["pullRequest"]["files"]["nodes"]
+        .as_array_mut()
+        .unwrap();
+
+    for file in files.iter_mut().filter(|file| file["path"] == path) {
+        file["viewerViewedState"] = "VIEWED".into();
+    }
+
+    parse_meta(&meta).unwrap()
+}
+
 #[test]
 fn e_reopens_the_draft_instead_of_stacking_another() {
     let mut app = load();

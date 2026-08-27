@@ -1689,6 +1689,24 @@ fn the_tree_spends_its_columns_on_names() {
     }
 }
 
+/// A file already read through trades its type icon for a tick, which is the
+/// only column the tree has to spare for one.
+#[test]
+fn a_viewed_file_wears_a_tick_in_the_tree() {
+    let mut app = load();
+    let mut meta: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
+    let files =
+        &mut meta["data"]["repository"]["pullRequest"]["files"]["nodes"];
+    files[0]["viewerViewedState"] = "VIEWED".into();
+    app.set_meta(parse_meta(&meta).unwrap());
+
+    let rendered = draw(&app);
+
+    assert!(rendered.contains("✓ verify.go"), "{rendered}");
+    assert!(!rendered.contains("✓ verify_test.go"), "{rendered}");
+}
+
 /// The tree budgets two columns for an icon and the space after it. A glyph
 /// two columns wide would push everything after it past the pane's edge.
 #[test]

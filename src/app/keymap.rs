@@ -48,6 +48,7 @@ const DEFAULT: &[(&str, &str, &str)] = &[
     ("n", "e", "edit-draft"),
     ("n", "d", "delete-draft"),
     ("n", "R", "toggle-resolved"),
+    ("n", "x", "toggle-viewed"),
     ("n", "s", "submit"),
     ("n", "zk", "expand-up"),
     ("n", "zj", "expand-down"),

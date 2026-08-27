@@ -99,6 +99,13 @@ pub enum Request {
         thread_id: Arc<str>,
         is_resolved: bool,
     },
+    /// The read-through mark on one file. GitHub hangs it off the pull request
+    /// node, so the request carries that rather than the changed file.
+    SetViewed {
+        pr: Arc<str>,
+        path: Arc<str>,
+        is_viewed: bool,
+    },
     /// One file as it stands at head, which is what a diff expands into the
     /// runs of it the patch left out.
     Blob {
@@ -121,6 +128,7 @@ pub enum Sent {
     Review,
     Reply,
     Resolution(bool),
+    Viewed(bool),
     Blob {
         path: Arc<str>,
         lines: Arc<[String]>,

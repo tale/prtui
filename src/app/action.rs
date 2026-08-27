@@ -68,6 +68,8 @@ pub enum Action {
     DeleteDraft,
     /// Resolve the focused thread, or reopen it if it is already resolved.
     ToggleResolved,
+    /// Mark the open file as read through, or clear the mark.
+    ToggleViewed,
     /// Pull part of the run of hidden lines the cursor rests on into the diff.
     Expand(Reveal),
     /// Pull in every run the open file's patch left out, at once.

@@ -14,6 +14,7 @@ query($owner:String!, $repo:String!, $number:Int!) {
       id number title state isDraft additions deletions changedFiles
       author { login }
       baseRefName headRefName headRefOid body
+      files(first:100) { nodes { path viewerViewedState } }
       pendingReview: reviews(first:1, states:[PENDING]) { nodes { id } }
       discussion: comments(first:100) {
         nodes { id fullDatabaseId author { login } body createdAt }
@@ -84,6 +85,18 @@ mutation($id:ID!) {
 const UNRESOLVE_MUTATION: &str = r"
 mutation($id:ID!) {
   unresolveReviewThread(input:{threadId:$id}) { thread { id isResolved } }
+}
+";
+
+const MARK_VIEWED_MUTATION: &str = r"
+mutation($id:ID!, $path:String!) {
+  markFileAsViewed(input:{pullRequestId:$id, path:$path}) { clientMutationId }
+}
+";
+
+const UNMARK_VIEWED_MUTATION: &str = r"
+mutation($id:ID!, $path:String!) {
+  unmarkFileAsViewed(input:{pullRequestId:$id, path:$path}) { clientMutationId }
 }
 ";
 
@@ -711,6 +724,30 @@ pub async fn set_resolved(
     mutate(repo, query, serde_json::json!({ "id": &*thread_id }), what)
         .await
         .map(|_| ())
+}
+
+/// A file's read-through mark, which GitHub keys on the pull request node
+/// rather than on the changed file: a path is all it takes to name one.
+pub async fn set_viewed(
+    repo: &Repo,
+    pr: Arc<str>,
+    path: Arc<str>,
+    is_viewed: bool,
+) -> Result<()> {
+    let (query, what) = if is_viewed {
+        (MARK_VIEWED_MUTATION, "marking the file viewed")
+    } else {
+        (UNMARK_VIEWED_MUTATION, "marking the file unviewed")
+    };
+
+    mutate(
+        repo,
+        query,
+        serde_json::json!({ "id": &*pr, "path": &*path }),
+        what,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Statuspage ranks a component from `operational` up to `major_outage`.

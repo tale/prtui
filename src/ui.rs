@@ -515,6 +515,7 @@ fn file_line<'a>(
     let TreeRow {
         file,
         is_selected,
+        is_viewed,
         threads,
         unresolved,
     } = *row;
@@ -559,11 +560,19 @@ fn file_line<'a>(
     // name alone.
     let name = file.path.rsplit('/').next().unwrap_or(&file.path);
     let name = truncate(name, name_width);
-    let (glyph, glyph_color) = file_icon(&file.path, theme);
-    let status_color = match file.status.as_str() {
-        "added" => theme.success,
-        "removed" => theme.danger,
-        "renamed" => theme.warning,
+    // A file already read through takes a tick in place of its type icon and
+    // loses the color it earned for being added or removed: what it was is no
+    // longer the thing to look at, and the icon column is already there.
+    let (glyph, glyph_color) = if is_viewed {
+        ('✓', theme.success)
+    } else {
+        file_icon(&file.path, theme)
+    };
+    let status_color = match (is_viewed, file.status.as_str()) {
+        (true, _) => theme.dim,
+        (_, "added") => theme.success,
+        (_, "removed") => theme.danger,
+        (_, "renamed") => theme.warning,
         _ => theme.muted,
     };
 
