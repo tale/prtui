@@ -7,6 +7,11 @@ use tokio::process::Command;
 use ureq::http::{HeaderMap, Response, StatusCode};
 use ureq::{Agent, Body};
 
+/// The first page of every connection the review needs.
+///
+/// A connection GitHub caps at 100 arrives short of the whole review, so each
+/// one carries the cursor that reads the rest. Most reviews fit in one page and
+/// pay for exactly this one round trip; see [`complete_meta`] for the overflow.
 const THREADS_QUERY: &str = r"
 query($owner:String!, $repo:String!, $number:Int!) {
   repository(owner:$owner, name:$repo) {
@@ -14,19 +19,92 @@ query($owner:String!, $repo:String!, $number:Int!) {
       id number title state isDraft additions deletions changedFiles
       author { login }
       baseRefName headRefName headRefOid body
-      files(first:100) { nodes { path viewerViewedState } }
+      files(first:100) {
+        pageInfo { hasNextPage endCursor }
+        nodes { path viewerViewedState }
+      }
       pendingReview: reviews(first:1, states:[PENDING]) { nodes { id } }
       discussion: comments(first:100) {
+        pageInfo { hasNextPage endCursor }
         nodes { id fullDatabaseId author { login } body createdAt }
       }
       reviewThreads(first:100) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           id isResolved isOutdated viewerCanResolve path subjectType
           line originalLine diffSide startLine startDiffSide
-          comments(first:50) {
+          comments(first:100) {
+            pageInfo { hasNextPage endCursor }
             nodes { id fullDatabaseId state author { login } body createdAt }
           }
         }
+      }
+    }
+  }
+}
+";
+
+/// The later pages, one query per connection.
+///
+/// Each answers with the same field under the same path as [`THREADS_QUERY`],
+/// so a page merges onto the first one without knowing which query fetched it.
+const MORE_FILES_QUERY: &str = r"
+query($owner:String!, $repo:String!, $number:Int!, $after:String!) {
+  repository(owner:$owner, name:$repo) {
+    pullRequest(number:$number) {
+      files(first:100, after:$after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { path viewerViewedState }
+      }
+    }
+  }
+}
+";
+
+const MORE_DISCUSSION_QUERY: &str = r"
+query($owner:String!, $repo:String!, $number:Int!, $after:String!) {
+  repository(owner:$owner, name:$repo) {
+    pullRequest(number:$number) {
+      discussion: comments(first:100, after:$after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id fullDatabaseId author { login } body createdAt }
+      }
+    }
+  }
+}
+";
+
+/// Later threads arrive with only their first page of comments, the same way
+/// the first page of threads does, so both are drained by the same pass.
+const MORE_THREADS_QUERY: &str = r"
+query($owner:String!, $repo:String!, $number:Int!, $after:String!) {
+  repository(owner:$owner, name:$repo) {
+    pullRequest(number:$number) {
+      reviewThreads(first:100, after:$after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id isResolved isOutdated viewerCanResolve path subjectType
+          line originalLine diffSide startLine startDiffSide
+          comments(first:100) {
+            pageInfo { hasNextPage endCursor }
+            nodes { id fullDatabaseId state author { login } body createdAt }
+          }
+        }
+      }
+    }
+  }
+}
+";
+
+/// A thread's comments are addressed by the thread rather than by the pull
+/// request, since that is the only way to name one connection out of a hundred.
+const MORE_THREAD_COMMENTS_QUERY: &str = r"
+query($id:ID!, $after:String!) {
+  node(id:$id) {
+    ... on PullRequestReviewThread {
+      comments(first:100, after:$after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id fullDatabaseId state author { login } body createdAt }
       }
     }
   }
@@ -514,7 +592,117 @@ pub async fn fetch_files(
     .context("changed-file fetch panicked")?
 }
 
-/// PR metadata plus review threads in a single GraphQL round trip.
+/// Where a connection continues, or `None` when the page in hand is the last.
+fn next_cursor(connection: &serde_json::Value) -> Option<String> {
+    let info = connection.get("pageInfo")?;
+
+    if !info.get("hasNextPage")?.as_bool()? {
+        return None;
+    }
+
+    info.get("endCursor")?.as_str().map(str::to_owned)
+}
+
+/// Reads a connection to its end, appending each later page onto the first.
+///
+/// `fetch` is handed a cursor and answers with the same connection one page
+/// further on. The page's own `pageInfo` replaces the one it continues, which
+/// is what ends the walk.
+fn drain(
+    connection: &mut serde_json::Value,
+    mut fetch: impl FnMut(&str) -> Result<serde_json::Value>,
+) -> Result<()> {
+    while let Some(cursor) = next_cursor(connection) {
+        let mut page = fetch(&cursor)?;
+
+        let serde_json::Value::Array(nodes) = page["nodes"].take() else {
+            bail!("a later page arrived with no nodes");
+        };
+
+        let Some(held) = connection["nodes"].as_array_mut() else {
+            bail!("a connection arrived with no nodes");
+        };
+
+        held.extend(nodes);
+        connection["pageInfo"] = page["pageInfo"].take();
+    }
+
+    Ok(())
+}
+
+/// Fills in every connection [`THREADS_QUERY`] cut short.
+///
+/// GitHub caps a connection at 100 nodes, so a review with more files,
+/// conversations or comments than that arrives truncated and silently
+/// disagrees with what the browser shows. Only the overflow costs a round
+/// trip: a review that fits in one page leaves here untouched.
+fn complete_meta(
+    url: &str,
+    token: Option<&str>,
+    variables: &serde_json::Value,
+    value: &mut serde_json::Value,
+) -> Result<()> {
+    let pr = &mut value["data"]["repository"]["pullRequest"];
+    if pr.is_null() {
+        return Ok(());
+    }
+
+    let page = |query: &'static str, what: &'static str, after: &str| {
+        let mut variables = variables.clone();
+        variables["after"] = after.into();
+
+        graphql(url, token, query, &variables, what, Retry::Transient)
+    };
+
+    for (field, query, what) in [
+        ("files", MORE_FILES_QUERY, "fetching the changed file list"),
+        (
+            "discussion",
+            MORE_DISCUSSION_QUERY,
+            "fetching pull request comments",
+        ),
+        (
+            "reviewThreads",
+            MORE_THREADS_QUERY,
+            "fetching review threads",
+        ),
+    ] {
+        drain(&mut pr[field], |after| {
+            let mut answer = page(query, what, after)?;
+
+            Ok(answer["data"]["repository"]["pullRequest"][field].take())
+        })?;
+    }
+
+    let Some(threads) = pr["reviewThreads"]["nodes"].as_array_mut() else {
+        return Ok(());
+    };
+
+    for thread in threads {
+        let Some(id) = thread["id"].as_str().map(str::to_owned) else {
+            continue;
+        };
+
+        drain(&mut thread["comments"], |after| {
+            let variables = serde_json::json!({ "id": &id, "after": after });
+            let mut answer = graphql(
+                url,
+                token,
+                MORE_THREAD_COMMENTS_QUERY,
+                &variables,
+                "fetching a conversation",
+                Retry::Transient,
+            )?;
+
+            Ok(answer["data"]["node"]["comments"].take())
+        })?;
+    }
+
+    Ok(())
+}
+
+/// PR metadata plus review threads, in one round trip plus whatever the caps
+/// on its connections left behind.
 pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<serde_json::Value> {
     let token = token(repo.host.as_deref()).await;
     let url = repo.graphql_url();
@@ -525,14 +713,18 @@ pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<serde_json::Value> {
     });
 
     tokio::task::spawn_blocking(move || {
-        graphql(
+        let mut value = graphql(
             &url,
             token.as_deref(),
             THREADS_QUERY,
             &variables,
             "fetching pull request metadata",
             Retry::Transient,
-        )
+        )?;
+
+        complete_meta(&url, token.as_deref(), &variables, &mut value)?;
+
+        Ok(value)
     })
     .await
     .context("metadata fetch panicked")?
@@ -996,6 +1188,82 @@ mod tests {
         ]));
         assert_eq!(summarize_outage(&elsewhere), None);
         assert_eq!(summarize_outage(&serde_json::json!({})), None);
+    }
+
+    /// A connection as GitHub sends it: the nodes in hand, and whether more
+    /// of them are waiting behind a cursor.
+    fn connection(nodes: &[u32], after: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "pageInfo": {
+                "hasNextPage": after.is_some(),
+                "endCursor": after,
+            },
+            "nodes": nodes,
+        })
+    }
+
+    fn node_values(connection: &serde_json::Value) -> Vec<u32> {
+        connection["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node.as_u64().unwrap() as u32)
+            .collect()
+    }
+
+    /// The common case, and the one that has to stay free: a review that fits
+    /// inside one page asks GitHub for nothing more.
+    #[test]
+    fn a_connection_that_fits_in_one_page_costs_no_round_trip() {
+        let mut held = connection(&[1, 2, 3], None);
+
+        drain(&mut held, |_| panic!("fetched a page that was not needed"))
+            .unwrap();
+
+        assert_eq!(node_values(&held), [1, 2, 3]);
+    }
+
+    /// Every page after the first is appended in the order it arrives, and the
+    /// cursor each one carries is what says whether to keep going.
+    #[test]
+    fn a_capped_connection_is_read_to_its_end() {
+        let mut held = connection(&[1, 2], Some("one"));
+        let mut asked = Vec::new();
+
+        drain(&mut held, |cursor| {
+            asked.push(cursor.to_owned());
+
+            Ok(match cursor {
+                "one" => connection(&[3, 4], Some("two")),
+                _ => connection(&[5], None),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(asked, ["one", "two"]);
+        assert_eq!(node_values(&held), [1, 2, 3, 4, 5]);
+        assert_eq!(next_cursor(&held), None);
+    }
+
+    /// A page that came back the wrong shape has to say so. Dropping it would
+    /// silently truncate the review, which is the defect being fixed.
+    #[test]
+    fn a_page_that_arrives_malformed_fails_rather_than_truncating() {
+        let mut held = connection(&[1], Some("one"));
+
+        let error = drain(&mut held, |_| Ok(serde_json::json!({})))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("no nodes"), "{error}");
+    }
+
+    /// A connection GitHub answers without a cursor is the whole of it. The
+    /// walk must end rather than read a missing field as another page.
+    #[test]
+    fn a_connection_with_no_page_info_is_taken_as_complete() {
+        assert_eq!(next_cursor(&serde_json::json!({ "nodes": [] })), None);
+        assert_eq!(next_cursor(&serde_json::json!(null)), None);
     }
 
     #[test]
