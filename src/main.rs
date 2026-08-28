@@ -17,7 +17,7 @@ use termina::escape::csi::{
 };
 use termina::event::KeyEventKind;
 use termina::{Event, EventStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 mod selector;
 mod terminal;
@@ -333,8 +333,13 @@ fn highlight_order(count: usize, first: usize) -> impl Iterator<Item = usize> {
 }
 
 enum Launch {
-    Review { repo: gh::Repo, number: u32 },
-    Select(gh::PullRequestList),
+    Review {
+        repo: gh::Repo,
+        number: u32,
+    },
+    /// The scope the listing is read from, which is every pull request the
+    /// user is involved in when the process is outside a repository.
+    Select(Option<gh::Repo>),
 }
 
 #[tokio::main]
@@ -353,10 +358,7 @@ async fn main() -> Result<()> {
                 .context("not inside a GitHub repo; pass -R OWNER/REPO")?,
             number,
         },
-        (None, Some(repo)) => {
-            Launch::Select(gh::repository_pull_requests(repo).await?)
-        }
-        (None, None) => Launch::Select(gh::user_pull_requests().await?),
+        (None, repo) => Launch::Select(repo),
     };
 
     // Resolve the initial palette before entering the alternate screen. In
@@ -394,11 +396,22 @@ async fn run(
                 number,
                 follow_terminal,
             },
-            Launch::Select(pull_requests) => {
+            Launch::Select(repo) => {
+                // The listing is read behind the selector, which spins until
+                // it lands rather than holding the screen back.
+                let (tx, rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    let listed = match repo {
+                        Some(repo) => gh::repository_pull_requests(repo).await,
+                        None => gh::user_pull_requests().await,
+                    };
+                    let _ = tx.send(listed);
+                });
+
                 let Some(target) = selector::select(
                     terminal,
                     events,
-                    pull_requests,
+                    rx,
                     &mut theme,
                     follow_terminal,
                 )

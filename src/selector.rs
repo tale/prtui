@@ -2,6 +2,7 @@ use crate::terminal;
 use anyhow::{Context, Result};
 use prtui::gh::{PullRequestList, PullRequestTarget, ReviewStatus};
 use prtui::renderer::{Theme, ThemeMode};
+use prtui::ui::SPINNER;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Rect};
 use ratatui::style::{Modifier, Style};
@@ -10,31 +11,93 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, HighlightSpacing, Paragraph, Row, Table,
     TableState,
 };
+use std::time::Duration;
 use termina::escape::csi::{
     Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode,
 };
 use termina::event::{KeyCode, KeyEventKind, Modifiers};
 use termina::{Event, EventStream};
+use tokio::sync::oneshot;
 
+/// What the selector has to paint. The listing is read on its own task, and a
+/// failure is shown in the frame rather than tearing the session down.
+enum Listing {
+    Loading,
+    Ready(PullRequestList),
+    Failed(String),
+}
+
+impl Listing {
+    const fn is_loading(&self) -> bool {
+        matches!(self, Self::Loading)
+    }
+
+    fn received(
+        listed: Result<Result<PullRequestList>, oneshot::error::RecvError>,
+    ) -> Self {
+        match listed {
+            Ok(Ok(pull_requests)) => Self::Ready(pull_requests),
+            Ok(Err(err)) => Self::Failed(format!("error: {err}")),
+            Err(_) => Self::Failed("error: the listing task stopped".into()),
+        }
+    }
+
+    fn first_index(&self) -> Option<usize> {
+        match self {
+            Self::Ready(pull_requests) => {
+                (!pull_requests.is_empty()).then_some(0)
+            }
+            _ => None,
+        }
+    }
+
+    const fn last_index(&self) -> usize {
+        match self {
+            Self::Ready(pull_requests) => pull_requests.len().saturating_sub(1),
+            _ => 0,
+        }
+    }
+}
+
+/// Paints the selector immediately and fills it in when the listing lands, so
+/// the wait happens inside the alternate screen rather than in front of it.
 pub async fn select(
     terminal: &mut terminal::AppTerminal,
     events: &mut EventStream,
-    pull_requests: PullRequestList,
+    mut incoming: oneshot::Receiver<Result<PullRequestList>>,
     theme: &mut Theme,
     follow_terminal: bool,
 ) -> Result<Option<PullRequestTarget>> {
-    let mut selected = (!pull_requests.is_empty()).then_some(0);
+    let mut listing = Listing::Loading;
+    let mut selected = None;
+    let mut loading_frame = 0;
+    let mut animation = tokio::time::interval(Duration::from_millis(90));
+    animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         terminal::render(terminal, |frame| {
-            draw(frame, &pull_requests, selected, *theme);
+            draw(frame, &listing, selected, loading_frame, *theme);
         })
         .context("drawing pull request selector")?;
 
-        let event = crate::next_event(events)
-            .await
-            .context("terminal event stream closed")?
-            .context("reading terminal event")?;
+        let event = tokio::select! {
+            _ = animation.tick(), if listing.is_loading() => {
+                loading_frame = loading_frame.wrapping_add(1);
+                continue;
+            }
+            listed = &mut incoming, if listing.is_loading() => {
+                listing = Listing::received(listed);
+                selected = listing.first_index();
+                continue;
+            }
+            event = crate::next_event(events) => {
+                event
+                    .context("terminal event stream closed")?
+                    .context("reading terminal event")?
+            }
+        };
+
+        let last = listing.last_index();
 
         match event {
             Event::Key(key)
@@ -50,7 +113,9 @@ pub async fn select(
                         return Ok(None);
                     }
                     (KeyCode::Enter, Modifiers::NONE) => {
-                        if let Some(selected) = selected {
+                        if let Some(selected) = selected
+                            && let Listing::Ready(pull_requests) = listing
+                        {
                             return Ok(pull_requests.select(selected));
                         }
                     }
@@ -59,21 +124,17 @@ pub async fn select(
                             selected.map(|index| index.saturating_sub(1));
                     }
                     (KeyCode::Down | KeyCode::Char('j'), Modifiers::NONE) => {
-                        selected = selected.map(|index| {
-                            index
-                                .saturating_add(1)
-                                .min(pull_requests.len().saturating_sub(1))
-                        });
+                        selected = selected
+                            .map(|index| index.saturating_add(1).min(last));
                     }
                     (KeyCode::Char('g'), Modifiers::NONE) => {
-                        selected = (!pull_requests.is_empty()).then_some(0);
+                        selected = selected.map(|_| 0);
                     }
                     (
                         KeyCode::Char('G'),
                         Modifiers::NONE | Modifiers::SHIFT,
                     ) => {
-                        selected = (!pull_requests.is_empty())
-                            .then_some(pull_requests.len().saturating_sub(1));
+                        selected = selected.map(|_| last);
                     }
                     _ => {}
                 }
@@ -94,26 +155,52 @@ pub async fn select(
 
 fn draw(
     frame: &mut Frame,
-    pull_requests: &PullRequestList,
+    listing: &Listing,
     selected: Option<usize>,
+    loading_frame: usize,
     theme: Theme,
 ) {
     let area = frame.area();
+    let (title, hint) = match listing {
+        Listing::Ready(pull_requests) => (
+            format!(" Open pull requests · {} ", pull_requests.len()),
+            " j/k select · enter open · esc cancel ",
+        ),
+        _ => (" Open pull requests ".to_string(), " esc cancel "),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.accent))
         .title(Line::styled(
-            format!(" Open pull requests · {} ", pull_requests.len()),
+            title,
             Style::default()
                 .fg(theme.heading)
                 .add_modifier(Modifier::BOLD),
         ))
-        .title_bottom(Line::styled(
-            " j/k select · enter open · esc cancel ",
-            Style::default().fg(theme.dim),
-        ));
+        .title_bottom(Line::styled(hint, Style::default().fg(theme.dim)));
     let inner = block.inner(area);
+
+    let pull_requests = match listing {
+        Listing::Ready(pull_requests) => pull_requests,
+        Listing::Loading => {
+            frame.render_widget(block, area);
+            draw_centered(frame, inner, spinner_line(loading_frame, theme));
+            return;
+        }
+        Listing::Failed(failure) => {
+            frame.render_widget(block, area);
+            draw_centered(
+                frame,
+                inner,
+                Line::styled(
+                    failure.clone(),
+                    Style::default().fg(theme.danger),
+                ),
+            );
+            return;
+        }
+    };
 
     let mut headers = vec![Cell::from("REVIEW")];
     let mut widths = vec![Constraint::Length(18)];
@@ -166,20 +253,43 @@ fn draw(
     let mut table_state = TableState::default().with_selected(selected);
     frame.render_stateful_widget(table, area, &mut table_state);
 
-    if pull_requests.is_empty() && !inner.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::styled(
+    if pull_requests.is_empty() {
+        draw_centered(
+            frame,
+            inner,
+            Line::styled(
                 "no open pull requests",
                 Style::default().fg(theme.dim),
-            ))
-            .alignment(Alignment::Center),
-            Rect {
-                y: inner.y + inner.height.saturating_sub(1) / 2,
-                height: 1,
-                ..inner
-            },
+            ),
         );
     }
+}
+
+fn spinner_line(loading_frame: usize, theme: Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            SPINNER[loading_frame % SPINNER.len()],
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  loading pull requests", Style::default().fg(theme.dim)),
+    ])
+}
+
+fn draw_centered(frame: &mut Frame, area: Rect, line: Line<'static>) {
+    if area.is_empty() {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(line).alignment(Alignment::Center),
+        Rect {
+            y: area.y + area.height.saturating_sub(1) / 2,
+            height: 1,
+            ..area
+        },
+    );
 }
 
 fn review_cell(status: &ReviewStatus, theme: Theme) -> Cell<'static> {
@@ -227,11 +337,15 @@ mod tests {
         }
     }
 
-    fn render(pull_requests: &PullRequestList) -> String {
+    fn render(pull_requests: PullRequestList) -> String {
+        render_listing(&Listing::Ready(pull_requests))
+    }
+
+    fn render_listing(listing: &Listing) -> String {
         let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
         terminal
             .draw(|frame| {
-                draw(frame, pull_requests, Some(0), Theme::dark());
+                draw(frame, listing, Some(0), 0, Theme::dark());
             })
             .unwrap();
 
@@ -249,7 +363,7 @@ mod tests {
                 located(5, "Pending", ReviewStatus::NoDecision),
             ],
         };
-        let rendered = render(&pull_requests);
+        let rendered = render(pull_requests);
 
         assert!(rendered.contains("Open pull requests · 5"));
         assert!(rendered.contains("REVIEW"));
@@ -268,10 +382,29 @@ mod tests {
             repo: Repo::parse("owner/repo").unwrap(),
             pulls: vec![pull(42, "Local change", ReviewStatus::Approved)],
         };
-        let rendered = render(&pull_requests);
+        let rendered = render(pull_requests);
 
         assert!(!rendered.contains("REPOSITORY"));
         assert!(rendered.contains("Local change"));
+    }
+
+    #[test]
+    fn the_dashboard_spins_until_the_listing_lands() {
+        let rendered = render_listing(&Listing::Loading);
+
+        assert!(rendered.contains("Open pull requests"));
+        assert!(!rendered.contains("Open pull requests ·"));
+        assert!(rendered.contains("loading pull requests"));
+        assert!(rendered.contains(SPINNER[0]));
+    }
+
+    #[test]
+    fn a_failed_listing_stays_on_screen() {
+        let rendered =
+            render_listing(&Listing::Failed("error: gh pr list failed".into()));
+
+        assert!(rendered.contains("error: gh pr list failed"));
+        assert!(rendered.contains("esc cancel"));
     }
 
     #[test]

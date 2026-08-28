@@ -34,7 +34,9 @@ const MARKER_WIDTH: usize = 2;
 /// `every_tree_icon_is_one_column` holds to.
 const ICON_WIDTH: usize = 2;
 
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Frames of the wait indicator, shared with the pull request selector.
+pub const SPINNER: [&str; 10] =
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn draw(frame: &mut Frame, app: &App, layout: &Layout) {
     draw_header(frame, app, layout.header);
