@@ -1511,12 +1511,14 @@ fn draw_submit(frame: &mut Frame, app: &App, layout: &Layout) {
     );
 }
 
-fn draw_bottom_bar(frame: &mut Frame, app: &App, layout: &Layout) {
-    let area = layout.status;
-    let pending_hint = app.pending_hint();
-    let theme = app.theme();
-    let bar = Style::default().bg(theme.hunk);
-    let mode_bg = match app.mode {
+/// The status bar's own background, which every span on it is drawn over.
+pub fn bar_style(theme: Theme) -> Style {
+    Style::default().bg(theme.hunk)
+}
+
+/// The mode's name in its own color, which is what opens every status bar.
+pub fn mode_chip(mode: Mode, theme: Theme) -> Span<'static> {
+    let background = match mode {
         Mode::Normal => theme.accent,
         Mode::Visual => theme.orange,
         Mode::Insert => theme.success,
@@ -1525,6 +1527,48 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, layout: &Layout) {
         Mode::CommandLine => theme.muted,
         Mode::Help | Mode::Overview | Mode::Submit => theme.heading,
     };
+
+    Span::styled(
+        mode.label(),
+        Style::default()
+            .bg(background)
+            .fg(theme.ink)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+/// Paints one status bar: what the surface has to say, then as many key hints
+/// as the tail has room for.
+///
+/// `reserved` claims its width before the hints do, so a key that has to stay
+/// reachable survives a narrow terminal that drops the rest.
+pub fn draw_status_bar(
+    frame: &mut Frame,
+    area: Rect,
+    left: Vec<Span<'static>>,
+    hints: &[(&str, &str)],
+    reserved: &[(&str, &str)],
+    theme: Theme,
+) {
+    let bar = bar_style(theme);
+
+    frame.render_widget(
+        Paragraph::new(Span::styled(" ".repeat(area.width as usize), bar)),
+        area,
+    );
+
+    let left = Line::from(left);
+    let left_width = left.width();
+    frame.render_widget(Paragraph::new(left), area);
+
+    draw_hints(frame, area, left_width, hints, reserved, bar, theme);
+}
+
+fn draw_bottom_bar(frame: &mut Frame, app: &App, layout: &Layout) {
+    let area = layout.status;
+    let pending_hint = app.pending_hint();
+    let theme = app.theme();
+    let bar = bar_style(theme);
 
     let pane = match app.pane {
         Pane::Files => " files",
@@ -1563,13 +1607,7 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, layout: &Layout) {
     };
 
     let mut spans = vec![
-        Span::styled(
-            app.mode.label(),
-            Style::default()
-                .bg(mode_bg)
-                .fg(theme.ink)
-                .add_modifier(Modifier::BOLD),
-        ),
+        mode_chip(app.mode, theme),
         Span::styled(pane, bar.fg(theme.dim)),
     ];
 
@@ -1653,33 +1691,6 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, layout: &Layout) {
         ));
     }
 
-    frame.render_widget(
-        Paragraph::new(Span::styled(" ".repeat(area.width as usize), bar)),
-        area,
-    );
-
-    let left = Line::from(spans);
-    let left_width = left.width();
-    frame.render_widget(Paragraph::new(left), area);
-
-    if matches!(app.mode, Mode::Search | Mode::CommandLine)
-        && let Some(column) =
-            prompt_column.filter(|column| *column < area.width as usize)
-    {
-        frame.set_cursor_position((area.x + column as u16, area.y));
-    }
-
-    draw_key_hints(frame, app, area, left_width, bar, theme);
-}
-
-fn draw_key_hints(
-    frame: &mut Frame,
-    app: &App,
-    area: Rect,
-    left_width: usize,
-    bar: Style,
-    theme: Theme,
-) {
     let keys: &[(&str, &str)] = match (app.mode, app.pane) {
         (Mode::Filter, _) => {
             &[("↑↓", "select"), ("↵", "apply"), ("esc", "cancel")]
@@ -1802,6 +1813,26 @@ fn draw_key_hints(
         } else {
             &[("?", "keys")]
         };
+
+    draw_status_bar(frame, area, spans, keys, reserved, theme);
+
+    if matches!(app.mode, Mode::Search | Mode::CommandLine)
+        && let Some(column) =
+            prompt_column.filter(|column| *column < area.width as usize)
+    {
+        frame.set_cursor_position((area.x + column as u16, area.y));
+    }
+}
+
+fn draw_hints(
+    frame: &mut Frame,
+    area: Rect,
+    left_width: usize,
+    keys: &[(&str, &str)],
+    reserved: &[(&str, &str)],
+    bar: Style,
+    theme: Theme,
+) {
     let claimed: usize = reserved.iter().map(|&pair| hint_width(pair)).sum();
 
     let available = (area.width as usize).saturating_sub(left_width + 2);

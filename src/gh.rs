@@ -155,6 +155,46 @@ mutation($input:AddPullRequestReviewInput!) {
 }
 ";
 
+/// Everything the selector's summary panel reads, in one round trip.
+///
+/// Connections are capped at their first page: the panel counts rather than
+/// lists, and a review with more than a hundred threads says `100+` instead of
+/// paying for pages nobody reads.
+const SUMMARY_QUERY: &str = r"
+query($owner:String!, $repo:String!, $number:Int!) {
+  repository(owner:$owner, name:$repo) {
+    pullRequest(number:$number) {
+      additions deletions changedFiles updatedAt
+      author { login }
+      baseRefName headRefName
+      comments { totalCount }
+      reviewRequests { totalCount }
+      latestReviews(first:100) { nodes { state } }
+      reviewThreads(first:100) {
+        totalCount
+        nodes { isResolved }
+      }
+      commits(last:1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first:100) {
+                totalCount
+                nodes {
+                  __typename
+                  ... on CheckRun { status conclusion }
+                  ... on StatusContext { state }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+";
+
 const USER_PULL_REQUESTS_QUERY: &str = r"
 query($endCursor:String) {
   viewer {
@@ -331,6 +371,57 @@ pub struct PullRequestTarget {
     pub number: u32,
 }
 
+/// What one pull request looks like from outside: enough to decide whether it
+/// is worth opening, and nothing that has to be read line by line.
+pub struct Summary {
+    pub author: String,
+    pub base_ref: String,
+    pub head_ref: String,
+    pub additions: u32,
+    pub deletions: u32,
+    pub changed_files: u32,
+    /// The day it last moved, which is the date half of the API timestamp.
+    pub updated_on: String,
+    pub comments: u32,
+    pub checks: Checks,
+    pub reviews: Reviews,
+    pub threads: Threads,
+}
+
+/// The head commit's checks, counted rather than listed.
+#[derive(Default)]
+pub struct Checks {
+    pub passed: u32,
+    pub failed: u32,
+    pub running: u32,
+    /// Skipped and neutral runs, which decide nothing either way.
+    pub skipped: u32,
+}
+
+impl Checks {
+    pub const fn total(&self) -> u32 {
+        self.passed + self.failed + self.running + self.skipped
+    }
+}
+
+/// Where the reviewers stand, one count per verdict.
+#[derive(Default)]
+pub struct Reviews {
+    pub approved: u32,
+    pub changes_requested: u32,
+    pub commented: u32,
+    /// Reviewers who have been asked and have not answered yet.
+    pub requested: u32,
+}
+
+pub struct Threads {
+    pub unresolved: u32,
+    pub total: u32,
+    /// Whether the review holds more threads than the one page that was
+    /// counted, which makes `unresolved` a floor rather than the whole tally.
+    pub is_truncated: bool,
+}
+
 impl PullRequestList {
     pub const fn len(&self) -> usize {
         match self {
@@ -355,6 +446,24 @@ impl PullRequestList {
             Self::User { pulls } => pulls
                 .get(index)
                 .map(|located| located.pull.row(Some(&located.repo))),
+        }
+    }
+
+    /// The same choice `select` returns, without consuming the list, which is
+    /// what the summary panel asks for while the reader is still browsing.
+    pub fn target(&self, index: usize) -> Option<PullRequestTarget> {
+        match self {
+            Self::Repository { repo, pulls } => Some(PullRequestTarget {
+                repo: repo.clone(),
+                number: pulls.get(index)?.number,
+            }),
+            Self::User { pulls } => {
+                let located = pulls.get(index)?;
+                Some(PullRequestTarget {
+                    repo: located.repo.clone(),
+                    number: located.pull.number,
+                })
+            }
         }
     }
 
@@ -450,6 +559,205 @@ struct WireUserPullRequests {
 #[derive(Deserialize)]
 struct WireUserPullRequestConnection {
     nodes: Vec<WireUserPullRequest>,
+}
+
+/// The summary response, deserialized rather than hand-walked so a field the
+/// API stops sending fails the parse instead of counting as zero.
+#[derive(Deserialize)]
+struct WireSummaryResponse {
+    data: WireSummaryData,
+}
+
+#[derive(Deserialize)]
+struct WireSummaryData {
+    repository: Option<WireSummaryRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireSummaryRepository {
+    pull_request: Option<WireSummary>,
+}
+
+#[derive(Deserialize)]
+struct WireNodes<T> {
+    nodes: Vec<T>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireTotal {
+    total_count: u32,
+}
+
+#[derive(Deserialize)]
+struct WireLogin {
+    login: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireSummary {
+    additions: u32,
+    deletions: u32,
+    changed_files: u32,
+    updated_at: String,
+    author: Option<WireLogin>,
+    base_ref_name: String,
+    head_ref_name: String,
+    comments: WireTotal,
+    review_requests: WireTotal,
+    latest_reviews: Option<WireNodes<WireLatestReview>>,
+    review_threads: WireSummaryThreads,
+    commits: WireNodes<WireSummaryCommit>,
+}
+
+#[derive(Deserialize)]
+struct WireLatestReview {
+    state: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireSummaryThreads {
+    total_count: u32,
+    nodes: Vec<WireSummaryThread>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireSummaryThread {
+    is_resolved: bool,
+}
+
+#[derive(Deserialize)]
+struct WireSummaryCommit {
+    commit: WireRollupHolder,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireRollupHolder {
+    status_check_rollup: Option<WireRollup>,
+}
+
+#[derive(Deserialize)]
+struct WireRollup {
+    contexts: WireNodes<WireContext>,
+}
+
+/// A rollup mixes the checks an app reports with the statuses a commit carries,
+/// and the two spell the same verdict differently.
+#[derive(Deserialize)]
+#[serde(tag = "__typename")]
+enum WireContext {
+    CheckRun {
+        status: String,
+        conclusion: Option<String>,
+    },
+    StatusContext {
+        state: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
+fn count_checks(contexts: Vec<WireContext>) -> Checks {
+    let mut checks = Checks::default();
+
+    for context in contexts {
+        let counter = match context {
+            WireContext::CheckRun { status, .. } if status != "COMPLETED" => {
+                &mut checks.running
+            }
+            WireContext::CheckRun { conclusion, .. } => {
+                match conclusion.as_deref() {
+                    Some("SUCCESS") => &mut checks.passed,
+                    Some("SKIPPED" | "NEUTRAL") => &mut checks.skipped,
+                    _ => &mut checks.failed,
+                }
+            }
+            WireContext::StatusContext { state } => match state.as_str() {
+                "SUCCESS" => &mut checks.passed,
+                "PENDING" | "EXPECTED" => &mut checks.running,
+                _ => &mut checks.failed,
+            },
+            WireContext::Other => continue,
+        };
+
+        *counter += 1;
+    }
+
+    checks
+}
+
+fn count_reviews(reviews: Vec<WireLatestReview>, requested: u32) -> Reviews {
+    let mut counts = Reviews {
+        requested,
+        ..Reviews::default()
+    };
+
+    for review in reviews {
+        match review.state.as_str() {
+            "APPROVED" => counts.approved += 1,
+            "CHANGES_REQUESTED" => counts.changes_requested += 1,
+            "COMMENTED" => counts.commented += 1,
+            _ => {}
+        }
+    }
+
+    counts
+}
+
+fn parse_summary(val: &serde_json::Value) -> Result<Summary> {
+    let response = WireSummaryResponse::deserialize(val)
+        .context("unexpected pull request summary response")?;
+    let pr = response
+        .data
+        .repository
+        .and_then(|repository| repository.pull_request)
+        .context("PR not found in graphql response")?;
+
+    let threads = Threads {
+        unresolved: pr
+            .review_threads
+            .nodes
+            .iter()
+            .filter(|thread| !thread.is_resolved)
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX),
+        total: pr.review_threads.total_count,
+        is_truncated: pr.review_threads.total_count as usize
+            > pr.review_threads.nodes.len(),
+    };
+    let checks = pr
+        .commits
+        .nodes
+        .into_iter()
+        .next()
+        .and_then(|node| node.commit.status_check_rollup)
+        .map(|rollup| count_checks(rollup.contexts.nodes))
+        .unwrap_or_default();
+
+    Ok(Summary {
+        author: pr.author.map(|author| author.login).unwrap_or_default(),
+        base_ref: pr.base_ref_name,
+        head_ref: pr.head_ref_name,
+        additions: pr.additions,
+        deletions: pr.deletions,
+        changed_files: pr.changed_files,
+        updated_on: pr.updated_at.get(..10).unwrap_or_default().to_owned(),
+        comments: pr.comments.total_count,
+        checks,
+        reviews: count_reviews(
+            pr.latest_reviews
+                .map(|reviews| reviews.nodes)
+                .unwrap_or_default(),
+            pr.review_requests.total_count,
+        ),
+        threads,
+    })
 }
 
 fn deserialize_cli_review_decision<'de, D>(
@@ -1312,6 +1620,33 @@ pub async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
     parse_repository_pull_requests(repo, &output)
 }
 
+/// The summary panel's one round trip, asked for only when the panel is
+/// opened on a pull request it has not read yet.
+pub async fn fetch_summary(repo: &Repo, number: u32) -> Result<Summary> {
+    let token = token(repo.host.as_deref()).await;
+    let url = repo.graphql_url();
+    let variables = serde_json::json!({
+        "owner": repo.owner,
+        "repo": repo.name,
+        "number": number,
+    });
+
+    tokio::task::spawn_blocking(move || {
+        let val = graphql(
+            &url,
+            token.as_deref(),
+            SUMMARY_QUERY,
+            &variables,
+            "fetching the pull request summary",
+            Retry::Transient,
+        )?;
+
+        parse_summary(&val)
+    })
+    .await
+    .context("summary fetch panicked")?
+}
+
 pub async fn user_pull_requests() -> Result<PullRequestList> {
     let query = format!("query={USER_PULL_REQUESTS_QUERY}");
     let output = gh_output(
@@ -1706,6 +2041,114 @@ mod tests {
         let target = global.select(0).unwrap();
         assert_eq!(target.repo.slug(), "other/repo");
         assert_eq!(target.number, 34);
+    }
+
+    #[test]
+    fn a_summary_counts_the_checks_the_reviewers_and_the_threads() {
+        let val: serde_json::Value = serde_json::from_str(
+            r#"{"data":{"repository":{"pullRequest":{
+                "additions":838,"deletions":55,"changedFiles":4,
+                "updatedAt":"2026-08-28T20:04:55Z",
+                "author":{"login":"tale"},
+                "baseRefName":"main","headRefName":"rows",
+                "comments":{"totalCount":2},
+                "reviewRequests":{"totalCount":3},
+                "latestReviews":{"nodes":[
+                    {"state":"APPROVED"},
+                    {"state":"APPROVED"},
+                    {"state":"CHANGES_REQUESTED"},
+                    {"state":"DISMISSED"}
+                ]},
+                "reviewThreads":{"totalCount":3,"nodes":[
+                    {"isResolved":false},
+                    {"isResolved":true},
+                    {"isResolved":false}
+                ]},
+                "commits":{"nodes":[{"commit":{"statusCheckRollup":{
+                    "contexts":{"totalCount":5,"nodes":[
+                        {"__typename":"CheckRun","status":"COMPLETED",
+                         "conclusion":"SUCCESS"},
+                        {"__typename":"CheckRun","status":"IN_PROGRESS",
+                         "conclusion":null},
+                        {"__typename":"CheckRun","status":"COMPLETED",
+                         "conclusion":"FAILURE"},
+                        {"__typename":"CheckRun","status":"COMPLETED",
+                         "conclusion":"SKIPPED"},
+                        {"__typename":"StatusContext","state":"PENDING"}
+                    ]}
+                }}}]}
+            }}}}"#,
+        )
+        .unwrap();
+
+        let summary = parse_summary(&val).unwrap();
+
+        assert_eq!(summary.author, "tale");
+        assert_eq!(summary.updated_on, "2026-08-28");
+        assert_eq!(summary.checks.passed, 1);
+        assert_eq!(summary.checks.failed, 1);
+        assert_eq!(summary.checks.running, 2);
+        assert_eq!(summary.checks.skipped, 1);
+        assert_eq!(summary.reviews.approved, 2);
+        assert_eq!(summary.reviews.changes_requested, 1);
+        assert_eq!(summary.reviews.requested, 3);
+        assert_eq!(summary.threads.unresolved, 2);
+        assert_eq!(summary.threads.total, 3);
+        assert!(!summary.threads.is_truncated);
+    }
+
+    /// A pull request nothing has run against still has to summarize.
+    #[test]
+    fn a_summary_survives_an_empty_rollup() {
+        let val: serde_json::Value = serde_json::from_str(
+            r#"{"data":{"repository":{"pullRequest":{
+                "additions":1,"deletions":0,"changedFiles":1,
+                "updatedAt":"2026-08-28T20:04:55Z",
+                "author":null,
+                "baseRefName":"main","headRefName":"rows",
+                "comments":{"totalCount":0},
+                "reviewRequests":{"totalCount":0},
+                "latestReviews":{"nodes":[]},
+                "reviewThreads":{"totalCount":0,"nodes":[]},
+                "commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}
+            }}}}"#,
+        )
+        .unwrap();
+
+        let summary = parse_summary(&val).unwrap();
+
+        assert_eq!(summary.checks.total(), 0);
+        assert_eq!(summary.author, "");
+    }
+
+    /// More threads than the one page counted makes the tally a floor, which
+    /// the panel says out loud rather than reporting a wrong number.
+    #[test]
+    fn a_thread_page_short_of_the_total_is_marked_truncated() {
+        let nodes = (0..100)
+            .map(|_| r#"{"isResolved":false}"#)
+            .collect::<Vec<_>>()
+            .join(",");
+        let val: serde_json::Value = serde_json::from_str(&format!(
+            r#"{{"data":{{"repository":{{"pullRequest":{{
+                "additions":1,"deletions":0,"changedFiles":1,
+                "updatedAt":"2026-08-28T20:04:55Z",
+                "author":{{"login":"tale"}},
+                "baseRefName":"main","headRefName":"rows",
+                "comments":{{"totalCount":0}},
+                "reviewRequests":{{"totalCount":0}},
+                "latestReviews":{{"nodes":[]}},
+                "reviewThreads":{{"totalCount":140,"nodes":[{nodes}]}},
+                "commits":{{"nodes":[]}}
+            }}}}}}}}"#
+        ))
+        .unwrap();
+
+        let summary = parse_summary(&val).unwrap();
+
+        assert_eq!(summary.threads.unresolved, 100);
+        assert_eq!(summary.threads.total, 140);
+        assert!(summary.threads.is_truncated);
     }
 
     #[test]

@@ -234,7 +234,7 @@ impl Keymap {
         format!("{count}{}", keys::render(&self.pending))
     }
 
-    pub(super) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.count = None;
         self.pending.clear();
     }

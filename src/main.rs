@@ -17,9 +17,10 @@ use termina::escape::csi::{
 };
 use termina::event::KeyEventKind;
 use termina::{Event, EventStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 mod selector;
+mod summary;
 mod terminal;
 
 #[derive(Parser)]
@@ -397,21 +398,10 @@ async fn run(
                 follow_terminal,
             },
             Launch::Select(repo) => {
-                // The listing is read behind the selector, which spins until
-                // it lands rather than holding the screen back.
-                let (tx, rx) = oneshot::channel();
-                tokio::spawn(async move {
-                    let listed = match repo {
-                        Some(repo) => gh::repository_pull_requests(repo).await,
-                        None => gh::user_pull_requests().await,
-                    };
-                    let _ = tx.send(listed);
-                });
-
                 let Some(target) = selector::select(
                     terminal,
                     events,
-                    rx,
+                    repo,
                     &mut theme,
                     follow_terminal,
                 )

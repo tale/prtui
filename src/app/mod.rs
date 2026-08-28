@@ -19,6 +19,7 @@ use crate::model::{
     ChangedFile, Comment, DiffLine, Meta, PullRequest, ReviewThread,
 };
 use crate::renderer::{Segment, Theme, ThemeMode};
+use crate::vim::{step, step_hit};
 use action::{Action, Motion};
 use draft::{Anchor, Attachment, Draft, Parent, Sync};
 use editor::CommentEditor;
@@ -2084,15 +2085,8 @@ impl App {
             return;
         }
 
-        for _ in 0..count {
-            let next = match self.overlay_match {
-                Some(index) if direction > 0 => (index + 1) % matches.len(),
-                Some(index) => (index + matches.len() - 1) % matches.len(),
-                None if direction > 0 => 0,
-                None => matches.len() - 1,
-            };
-            self.overlay_match = Some(next);
-        }
+        self.overlay_match =
+            step_hit(self.overlay_match, matches.len(), direction, count);
 
         self.show_overlay_match(&matches, layout);
     }
@@ -3003,20 +2997,5 @@ impl App {
         if row > bottom {
             self.diff_scroll = (row + margin + 1).saturating_sub(viewport);
         }
-    }
-}
-
-/// Resolves a motion to an absolute position in a list of `len` items.
-fn step(motion: Motion, current: usize, len: usize, viewport: usize) -> usize {
-    let last = len.saturating_sub(1);
-
-    match motion {
-        Motion::Down(n) => current.saturating_add(n).min(last),
-        Motion::Up(n) => current.saturating_sub(n),
-        Motion::HalfPageDown => current.saturating_add(viewport / 2).min(last),
-        Motion::HalfPageUp => current.saturating_sub(viewport / 2),
-        Motion::Top => 0,
-        Motion::Bottom => last,
-        Motion::Line(number) => number.saturating_sub(1).min(last),
     }
 }

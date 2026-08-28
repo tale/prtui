@@ -9,8 +9,9 @@ most comfortable in the terminal with Vim motions and a command line.
 
 Run `prtui` inside a GitHub repository to choose one of its open pull requests,
 or outside a Git repository to choose from your open pull requests. The
-full-screen selector shows each pull request's current review decision. A
-number opens that pull request directly:
+full-screen selector shows each pull request's current review decision, and
+`K` summarizes the one under the cursor without opening it. A number opens that
+pull request directly:
 
 ```sh
 prtui 123
@@ -84,6 +85,13 @@ Options:
 Press `?` for the same list in the app, or `:` for a command line. Every key
 below is a named command, so anything bound to a key is also reachable as
 `:name` — and `:42` jumps to line 42.
+
+**The selector** — the list `prtui` opens on takes the same motions as the
+rest of the app: `j`/`k`, `<C-d>`/`<C-u>`, `gg`/`G`, and a count like `12G`.
+`/` narrows the list as you type, over titles and repositories: `<CR>` keeps
+the narrowing, `esc` puts back the list and the row you opened it on. `K`
+summarizes the pull request under the cursor — its checks, where its reviewers stand, and how many
+conversations are still unresolved — and `<CR>` opens it.
 
 **The pull request** — `o` opens the description and the discussion over the
 panes, and `?` opens the key reference. Both scroll with the same keys the rest

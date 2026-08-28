@@ -1,18 +1,6 @@
 use crate::expand::Reveal;
 
-/// Cursor movements, expressed independently of which pane owns the cursor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Motion {
-    Down(usize),
-    Up(usize),
-    HalfPageDown,
-    HalfPageUp,
-    Top,
-    Bottom,
-    /// A line by the number the gutter shows, which is the new side of the
-    /// diff, or a row of the tree when the files pane has the cursor.
-    Line(usize),
-}
+pub use crate::vim::Motion;
 
 /// The application's verb vocabulary.
 ///
