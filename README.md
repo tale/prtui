@@ -5,6 +5,19 @@ most comfortable in the terminal with Vim motions and a command line.
 
 ![prtui reviewing a pull request](https://raw.githubusercontent.com/tale/prtui/main/docs/demo.gif)
 
+## Usage
+
+Run `prtui` inside a GitHub repository to choose one of its open pull requests,
+or outside a Git repository to choose from your open pull requests. The
+full-screen selector shows each pull request's current review decision. A
+number opens that pull request directly:
+
+```sh
+prtui 123
+prtui -R owner/repo 123
+prtui -R owner/repo
+```
+
 ## Install
 
 Any of these work. All of them need the [GitHub CLI][gh] on your `PATH`, which
