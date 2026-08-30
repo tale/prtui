@@ -2469,8 +2469,7 @@ impl App {
         for index in queued {
             let request = Request::AddThread {
                 draft: self.drafts[index].id,
-                parent: parent.clone(),
-                input: self.drafts[index].to_input(&parent),
+                thread: self.drafts[index].new_thread(parent.clone()),
             };
 
             self.drafts[index].sync = Sync::Creating { is_dirty: false };

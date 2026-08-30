@@ -1,5 +1,3 @@
-use anyhow::{Context, Result};
-use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -20,21 +18,6 @@ pub enum Side {
 }
 
 impl Side {
-    pub fn from_api(value: &str) -> Option<Self> {
-        match value {
-            "LEFT" => Some(Self::Left),
-            "RIGHT" => Some(Self::Right),
-            _ => None,
-        }
-    }
-
-    pub const fn as_api(self) -> &'static str {
-        match self {
-            Self::Left => "LEFT",
-            Self::Right => "RIGHT",
-        }
-    }
-
     /// What the side is called to a reader rather than to the API. A diff has
     /// an old file and a new one; which way round `LEFT` and `RIGHT` go is
     /// GitHub's business, not the reviewer's.
@@ -43,6 +26,94 @@ impl Side {
             Self::Left => "old",
             Self::Right => "new",
         }
+    }
+}
+
+/// Where a comment lands in GitHub's diff coordinate system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Anchor {
+    pub start_line: u32,
+    pub start_side: Side,
+    pub end_line: u32,
+    pub side: Side,
+}
+
+impl Anchor {
+    pub(crate) const fn spanning(
+        start_line: u32,
+        end_line: u32,
+        side: Side,
+    ) -> Self {
+        Self {
+            start_line,
+            start_side: side,
+            end_line,
+            side,
+        }
+    }
+
+    /// A span crossing sides remains multi-line even when both sides use the
+    /// same line number.
+    pub fn is_multiline(self) -> bool {
+        self.start_line != self.end_line || self.start_side != self.side
+    }
+}
+
+/// What a new draft hangs off. The first draft opens a review against the pull
+/// request; later drafts join the review that first response named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Parent {
+    Review(Arc<str>),
+    PullRequest(Arc<str>),
+}
+
+/// A draft ready to leave the application boundary.
+///
+/// `anchor` is absent for a file-level note. GitHub field names and enum
+/// spellings are derived only by the wire layer.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NewThread {
+    pub parent: Parent,
+    pub path: Arc<str>,
+    pub body: String,
+    pub anchor: Option<Anchor>,
+}
+
+/// The verdict a submitted review carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReviewEvent {
+    #[default]
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+impl ReviewEvent {
+    pub const ALL: [Self; 3] =
+        [Self::Comment, Self::Approve, Self::RequestChanges];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Comment => "comment",
+            Self::Approve => "approve",
+            Self::RequestChanges => "request changes",
+        }
+    }
+
+    /// GitHub rejects a comment or change request with no summary.
+    pub const fn requires_body(self) -> bool {
+        matches!(self, Self::Comment | Self::RequestChanges)
+    }
+
+    #[must_use]
+    pub fn step(self, direction: isize) -> Self {
+        let count = Self::ALL.len();
+        let position = Self::ALL
+            .iter()
+            .position(|event| *event == self)
+            .unwrap_or(0);
+
+        Self::ALL[(position + count).saturating_add_signed(direction) % count]
     }
 }
 
@@ -63,15 +134,6 @@ pub struct ChangedFile {
     pub additions: u32,
     pub deletions: u32,
     pub lines: Vec<DiffLine>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawFile {
-    filename: String,
-    status: String,
-    additions: u32,
-    deletions: u32,
-    patch: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,481 +254,10 @@ pub(crate) fn parse_hunk_header(header: &str) -> Option<(u32, u32)> {
     Some((start(old)?, start(new)?))
 }
 
-fn parse_patch(patch: &str) -> Vec<DiffLine> {
-    let mut lines = Vec::new();
-    let mut old_line = 0;
-    let mut new_line = 0;
-
-    for raw in patch.lines() {
-        if raw.starts_with("@@") {
-            let Some((old, new)) = parse_hunk_header(raw) else {
-                continue;
-            };
-
-            old_line = old;
-            new_line = new;
-            lines.push(DiffLine {
-                kind: LineKind::Hunk,
-                text: raw.to_string(),
-                old_line: None,
-                new_line: None,
-            });
-            continue;
-        }
-
-        let (kind, text) = match raw.as_bytes().first() {
-            Some(b'+') => (LineKind::Added, &raw[1..]),
-            Some(b'-') => (LineKind::Removed, &raw[1..]),
-            Some(b' ') => (LineKind::Context, &raw[1..]),
-            _ => continue,
-        };
-
-        let (old, new) = match kind {
-            LineKind::Added => (None, Some(new_line)),
-            LineKind::Removed => (Some(old_line), None),
-            _ => (Some(old_line), Some(new_line)),
-        };
-
-        if kind != LineKind::Added {
-            old_line += 1;
-        }
-        if kind != LineKind::Removed {
-            new_line += 1;
-        }
-
-        lines.push(DiffLine {
-            kind,
-            text: text.to_string(),
-            old_line: old,
-            new_line: new,
-        });
-    }
-
-    lines
-}
-
-/// `gh api --paginate --slurp` returns an array of pages, each an array of files.
-pub fn parse_files(val: &serde_json::Value) -> Result<Vec<ChangedFile>> {
-    let pages = val
-        .as_array()
-        .context("expected array of pages from /files")?;
-
-    let mut files = Vec::new();
-    for page in pages {
-        let raws: Vec<RawFile> = serde_json::from_value(page.clone())
-            .context("unexpected /files page shape")?;
-
-        for raw in raws {
-            let lines =
-                raw.patch.as_deref().map(parse_patch).unwrap_or_default();
-
-            files.push(ChangedFile {
-                path: raw.filename.into(),
-                status: raw.status,
-                additions: raw.additions,
-                deletions: raw.deletions,
-                lines,
-            });
-        }
-    }
-
-    Ok(files)
-}
-
-/// The GraphQL response, shaped exactly as GitHub sends it.
-///
-/// Everything below is `#[serde]` rather than hand-walked, so a field the API
-/// stops sending fails the parse instead of silently defaulting to zero or an
-/// empty string. Only what the schema declares nullable is `Option` here.
-#[derive(Deserialize)]
-struct Response {
-    data: ResponseData,
-}
-
-#[derive(Deserialize)]
-struct ResponseData {
-    repository: Option<WireRepository>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WireRepository {
-    pull_request: Option<WirePullRequest>,
-}
-
-/// A GraphQL connection, of which only the nodes are ever wanted.
-#[derive(Deserialize)]
-struct Nodes<T> {
-    nodes: Vec<T>,
-}
-
-#[derive(Deserialize)]
-struct WireAuthor {
-    login: String,
-}
-
-impl WireAuthor {
-    /// An account that has since been deleted comes back as a null author.
-    fn login(author: Option<Self>) -> String {
-        author.map(|author| author.login).unwrap_or_default()
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WirePullRequest {
-    id: String,
-    number: u32,
-    title: String,
-    state: String,
-    is_draft: bool,
-    author: Option<WireAuthor>,
-    base_ref_name: String,
-    head_ref_name: String,
-    head_ref_oid: String,
-    body: String,
-    files: Nodes<WireChangedFile>,
-    pending_review: Nodes<WireReview>,
-    review_threads: Nodes<WireThread>,
-    discussion: Nodes<WireDiscussionComment>,
-}
-
-#[derive(Deserialize)]
-struct WireReview {
-    id: String,
-}
-
-/// `DISMISSED` is a file marked read whose diff has changed since, which is
-/// unread again as far as the reviewer is concerned.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WireChangedFile {
-    path: String,
-    viewer_viewed_state: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WireThread {
-    id: String,
-    path: String,
-    subject_type: String,
-    line: Option<u32>,
-    original_line: Option<u32>,
-    start_line: Option<u32>,
-    diff_side: String,
-    start_diff_side: Option<String>,
-    is_resolved: bool,
-    is_outdated: bool,
-    viewer_can_resolve: bool,
-    comments: Nodes<WireComment>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WireComment {
-    id: String,
-    full_database_id: Option<RestId>,
-    state: String,
-    author: Option<WireAuthor>,
-    body: String,
-    created_at: String,
-}
-
-/// `fullDatabaseId` is a `BigInt`, which GitHub serializes as a string; older
-/// deployments hand back a plain number for the same field.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RestId {
-    Text(String),
-    Number(u64),
-}
-
-impl RestId {
-    fn value(self) -> Option<u64> {
-        match self {
-            Self::Text(text) => text.parse().ok(),
-            Self::Number(id) => Some(id),
-        }
-    }
-}
-
-/// A pull request comment carries no review state: there is no pending review
-/// for it to be held inside, so it is visible the moment it is written.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WireDiscussionComment {
-    id: String,
-    full_database_id: Option<RestId>,
-    author: Option<WireAuthor>,
-    body: String,
-    created_at: String,
-}
-
-impl From<WireDiscussionComment> for Comment {
-    fn from(wire: WireDiscussionComment) -> Self {
-        Self {
-            id: wire.id.into(),
-            rest_id: wire.full_database_id.and_then(RestId::value),
-            author: WireAuthor::login(wire.author),
-            body: wire.body,
-            created_at: wire.created_at,
-            is_pending: false,
-        }
-    }
-}
-
-impl From<WireComment> for Comment {
-    fn from(wire: WireComment) -> Self {
-        Self {
-            id: wire.id.into(),
-            rest_id: wire.full_database_id.and_then(RestId::value),
-            author: WireAuthor::login(wire.author),
-            body: wire.body,
-            created_at: wire.created_at,
-            is_pending: wire.state == "PENDING",
-        }
-    }
-}
-
-impl From<WireThread> for ReviewThread {
-    fn from(wire: WireThread) -> Self {
-        Self {
-            id: wire.id.into(),
-            path: wire.path.into(),
-            line: wire.line,
-            original_line: wire.original_line,
-            start_line: wire.start_line,
-            // A side the app does not recognize is treated as the new file,
-            // which is where all but deletions live.
-            side: Side::from_api(&wire.diff_side).unwrap_or(Side::Right),
-            start_side: wire
-                .start_diff_side
-                .as_deref()
-                .and_then(Side::from_api),
-            is_file_level: wire.subject_type == "FILE",
-            is_resolved: wire.is_resolved,
-            is_outdated: wire.is_outdated,
-            can_resolve: wire.viewer_can_resolve,
-            comments: wire.comments.nodes.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-pub fn parse_meta(val: &serde_json::Value) -> Result<Meta> {
-    let response =
-        Response::deserialize(val).context("unexpected graphql response")?;
-    let pr = response
-        .data
-        .repository
-        .and_then(|repository| repository.pull_request)
-        .context("PR not found in graphql response")?;
-
-    Ok(Meta {
-        viewed: pr
-            .files
-            .nodes
-            .into_iter()
-            .filter(|file| file.viewer_viewed_state == "VIEWED")
-            .map(|file| file.path.into())
-            .collect(),
-        pending_review: pr
-            .pending_review
-            .nodes
-            .into_iter()
-            .next()
-            .map(|review| review.id.into()),
-        pr: PullRequest {
-            id: pr.id.into(),
-            number: pr.number,
-            title: pr.title,
-            state: pr.state,
-            is_draft: pr.is_draft,
-            author: WireAuthor::login(pr.author),
-            base_ref: pr.base_ref_name,
-            head_ref: pr.head_ref_name,
-            head_oid: pr.head_ref_oid.into(),
-            body: pr.body,
-        },
-        threads: pr
-            .review_threads
-            .nodes
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-        discussion: pr.discussion.nodes.into_iter().map(Into::into).collect(),
-    })
-}
-
 /// What filing a draft comment hands back: the comment to address later edits
 /// to, and the review it was filed against, which the next draft reuses.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AddedThread {
     pub review: Arc<str>,
     pub comment: Arc<str>,
-}
-
-#[derive(Deserialize)]
-struct AddThreadResponse {
-    data: AddThreadData,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AddThreadData {
-    add_pull_request_review_thread: AddThreadPayload,
-}
-
-#[derive(Deserialize)]
-struct AddThreadPayload {
-    thread: WireAddedThread,
-}
-
-#[derive(Deserialize)]
-struct WireAddedThread {
-    comments: Nodes<WireAddedComment>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WireAddedComment {
-    id: String,
-    pull_request_review: WireReview,
-}
-
-pub fn parse_added_thread(val: &serde_json::Value) -> Result<AddedThread> {
-    let payload = AddThreadResponse::deserialize(val)
-        .context("unexpected addPullRequestReviewThread response")?;
-    let comment = payload
-        .data
-        .add_pull_request_review_thread
-        .thread
-        .comments
-        .nodes
-        .into_iter()
-        .next()
-        .context("draft came back with no comment")?;
-
-    Ok(AddedThread {
-        review: comment.pull_request_review.id.into(),
-        comment: comment.id.into(),
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn response(pull_request: &serde_json::Value) -> serde_json::Value {
-        serde_json::json!({
-            "data": { "repository": { "pullRequest": pull_request } }
-        })
-    }
-
-    fn pull_request(threads: &serde_json::Value) -> serde_json::Value {
-        serde_json::json!({
-            "id": "PR_1",
-            "number": 9000,
-            "title": "A change",
-            "state": "OPEN",
-            "isDraft": false,
-            "author": { "login": "tale" },
-            "baseRefName": "trunk",
-            "headRefName": "work",
-            "headRefOid": "cafe1234",
-            "body": "",
-            "files": { "nodes": [] },
-            "pendingReview": { "nodes": [] },
-            "reviewThreads": { "nodes": threads },
-            "discussion": { "nodes": [] },
-        })
-    }
-
-    /// The hand-walked parser defaulted every field it could not find, so a
-    /// renamed one showed up as an empty title rather than as an error.
-    #[test]
-    fn a_field_the_api_stops_sending_fails_the_parse() {
-        let mut pr = pull_request(&serde_json::json!([]));
-        pr.as_object_mut().unwrap().remove("state");
-
-        assert!(parse_meta(&response(&pr)).is_err());
-        assert!(parse_meta(&serde_json::json!({ "data": {} })).is_err());
-    }
-
-    #[test]
-    fn a_repository_that_is_not_there_says_so() {
-        let empty = serde_json::json!({ "data": { "repository": null } });
-        let error = parse_meta(&empty).unwrap_err().to_string();
-
-        assert!(error.contains("PR not found"), "{error}");
-    }
-
-    #[test]
-    fn what_the_schema_allows_to_be_null_still_parses() {
-        let threads = serde_json::json!([{
-            "id": "PRRT_1",
-            "path": "src/main.rs",
-            "subjectType": "LINE",
-            // An outdated thread loses its line, and a deleted account its login.
-            "line": null,
-            "originalLine": 12,
-            "startLine": null,
-            "diffSide": "LEFT",
-            // Null on a thread covering one line, where there is only one side.
-            "startDiffSide": null,
-            "isResolved": false,
-            "isOutdated": true,
-            "viewerCanResolve": true,
-            "comments": { "nodes": [
-                { "id": "PRRC_1", "state": "SUBMITTED", "fullDatabaseId": "1234", "author": null, "body": "hi", "createdAt": "now" },
-                { "id": "PRRC_2", "state": "SUBMITTED", "fullDatabaseId": 5678, "author": { "login": "tale" }, "body": "ho", "createdAt": "now" },
-            ] },
-        }]);
-
-        let meta = parse_meta(&response(&pull_request(&threads))).unwrap();
-        let thread = &meta.threads[0];
-
-        assert_eq!(thread.side, Side::Left);
-        assert_eq!(thread.start_side, None);
-        assert_eq!(thread.anchor_line(), Some(12));
-        assert_eq!(thread.comments[0].author, "");
-        assert!(!thread.is_pending());
-        // A BigInt arrives as a string, but older deployments send a number.
-        assert_eq!(thread.reply_target(), Some(1234));
-        assert_eq!(thread.comments[1].rest_id, Some(5678));
-    }
-
-    /// An unsubmitted comment is this session's own draft. It comes back on
-    /// every fetch, so telling it apart is what keeps it off the diff as a
-    /// conversation.
-    #[test]
-    fn a_pending_thread_names_itself_and_its_review() {
-        let threads = serde_json::json!([{
-            "id": "PRRT_2",
-            "path": "src/main.rs",
-            "subjectType": "FILE",
-            "line": null,
-            "originalLine": null,
-            "startLine": null,
-            "diffSide": "RIGHT",
-            "startDiffSide": null,
-            "isResolved": false,
-            "isOutdated": false,
-            "viewerCanResolve": false,
-            "comments": { "nodes": [
-                { "id": "PRRC_3", "state": "PENDING", "fullDatabaseId": null, "author": { "login": "tale" }, "body": "wip", "createdAt": "now" },
-            ] },
-        }]);
-
-        let mut pr = pull_request(&threads);
-        pr["pendingReview"] =
-            serde_json::json!({ "nodes": [{ "id": "PRR_1" }] });
-
-        let meta = parse_meta(&response(&pr)).unwrap();
-
-        assert_eq!(meta.pending_review.as_deref(), Some("PRR_1"));
-        assert!(meta.threads[0].is_pending());
-        assert!(meta.threads[0].is_file_level);
-        assert_eq!(&*meta.threads[0].comments[0].id, "PRRC_3");
-    }
 }

@@ -1,9 +1,9 @@
 # Architecture
 
-Where code lives, what the boundaries are, and which of them exist yet. Steps A
-and B of the order of work have landed and describe the tree as it stands; C
-through E are planned, so parts of what follows are a target rather than a
-description. Every section marks which is which.
+Where code lives, what the boundaries are, and which of them exist yet. Steps A,
+B and D of the order of work have landed; C and E remain planned, so parts of
+what follows are a target rather than a description. Every section marks which
+is which.
 
 **Rules** is the contract, **Tree** is the map, and **Why** is the reasoning —
 a record of the boundary problems that motivated the work, with the resolved
@@ -47,9 +47,9 @@ constraints.
 ### Three effect channels, three shapes
 
 `app.take_requests()` is the right pattern. But images carry a parallel
-mini-outbox (`images.take_pending()`), highlighting is spawned directly from
-`main` on a raw thread, and refetch-after-write is decided inside a `select!`
-arm rather than by the app. Nothing arbitrates between them.
+mini-outbox (`images.take_pending()`), highlighting owns a dedicated worker and
+result path, and refetch-after-write is decided inside a `select!` arm rather
+than by the app. Nothing arbitrates between them yet.
 
 That last one used to be a live race: every successful write spawned a metadata
 fetch, so resolving two threads quickly put two in flight and the older response
@@ -58,13 +58,12 @@ refetch to one in flight and reissues it when a write arrives mid-flight, so the
 hazard is closed — but the arbitration still lives in `main`'s locals, out of
 reach of the tests, which is what C moves.
 
-### `serde_json::Value` as the inter-layer transport
+### `serde_json::Value` as the inter-layer transport — *resolved (D)*
 
-`gh::fetch_files` hands back a `Value` for `model::parse_files` to walk.
-`Draft::to_api() -> Value` and `Request::Review { comments: Vec<Value> }` put
-wire format inside app state. `parse_meta` is 60 lines of hand-rolled
-`pointer()` / `and_then` / `unwrap_or_default` that silently defaults every
-field, where derived `Deserialize` would be shorter and fail loudly.
+The old boundary handed fetch results back as `Value` for `main` to parse and
+stored pre-serialized draft JSON inside `Request`. `gh::wire` now owns the
+derived response schemas and outbound field names; fetches return domain models
+and application requests carry typed draft data.
 
 ### One traversal, three implementations — *resolved (A)*
 
@@ -109,9 +108,10 @@ is not mistaken for one the code already keeps.
    every result arrives as one `Msg`; the loop is the only thing that spawns.
    Requests carry a generation so a stale response drops instead of
    clobbering.
-4. **Domain types at boundaries.** *(Planned, D.)* `serde_json::Value` never
-   leaves `github/wire.rs`. `github` returns `PullRequest` /
-   `Vec<ChangedFile>`; drafts serialize at the edge, never inside `app`.
+4. **Domain types at boundaries.** *(Live since D.)* `serde_json::Value` never
+   leaves `gh`; `gh::wire` owns review schemas and serialization. GitHub
+   fetches return `Meta` / `Vec<ChangedFile>` and drafts serialize at the edge,
+   never inside `app`.
 5. **Grouped private state.** *(Planned, E.)* `App` owns sub-structs (`Focus`,
    `Drafts`, `Find`, `Loading`) that keep their own invariants, rather than 25
    public fields any caller can desynchronize.
@@ -149,10 +149,11 @@ Net effect: `app/` shrinks as logic moves to `layout/`, `ui.rs` splits about
 five ways, `main.rs` loses ~400 lines, and `model.rs` splits into `model/` plus
 `github/wire.rs`.
 
-Where it stands: `layout/` exists as drawn. `ui.rs` is read-only and
-row-driven but is still one file, so `view/` is the shape it splits into.
-`cli.rs`, `model/`, `github/`, `runtime/`, and the `app/` split are steps C
-through E.
+Where it stands: `layout/` exists as drawn. `gh/wire.rs` now owns review wire
+types, though the rest of `gh.rs` has not yet split into `client` and `api`.
+`ui.rs` is read-only and row-driven but is still one file, so `view/` is the
+shape it splits into. `cli.rs`, `model/`, `runtime/`, and the remaining splits
+are steps C and E.
 
 ## The virtual row model
 
@@ -199,8 +200,9 @@ independent and can lead if the refetch race needs fixing first.
 - **C. Unified `Effect` / `Msg` with generations.** Moves the load and error
   state machine out of `main`'s locals into `App`, where tests can reach it.
   Fixes the refetch race.
-- **D. `model/` + `github/wire.rs`.** `Value` out of `app`, derived
-  deserialization, loud parse failures.
+- **D. `model/` + `github/wire.rs`** — **done at the boundary.** `Value` is out
+  of `app` and `model`; derived deserialization fails loudly. Splitting the
+  remaining single-file modules is deferred to E.
 - **E. Split `ui.rs`, extract `measure.rs`, collapse `travel`.** Mostly
   mechanical once A through C land.
 

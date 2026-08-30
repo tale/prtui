@@ -1,53 +1,8 @@
-use super::draft::Parent;
 use super::editor::CommentEditor;
+use crate::model::{NewThread, Parent};
 use std::sync::Arc;
 
-/// The verdict a submitted review carries, matching GitHub's review events.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReviewEvent {
-    #[default]
-    Comment,
-    Approve,
-    RequestChanges,
-}
-
-impl ReviewEvent {
-    pub const ALL: [Self; 3] =
-        [Self::Comment, Self::Approve, Self::RequestChanges];
-
-    pub const fn as_api(self) -> &'static str {
-        match self {
-            Self::Comment => "COMMENT",
-            Self::Approve => "APPROVE",
-            Self::RequestChanges => "REQUEST_CHANGES",
-        }
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Comment => "comment",
-            Self::Approve => "approve",
-            Self::RequestChanges => "request changes",
-        }
-    }
-
-    /// GitHub rejects a comment or a change request that carries no summary,
-    /// however many inline comments ride along with it.
-    pub const fn requires_body(self) -> bool {
-        matches!(self, Self::Comment | Self::RequestChanges)
-    }
-
-    #[must_use]
-    pub fn step(self, direction: isize) -> Self {
-        let count = Self::ALL.len();
-        let position = Self::ALL
-            .iter()
-            .position(|event| *event == self)
-            .unwrap_or(0);
-
-        Self::ALL[(position + count).saturating_add_signed(direction) % count]
-    }
-}
+pub use crate::model::ReviewEvent;
 
 /// The submit overlay: the verdict plus the summary that accompanies it.
 ///
@@ -70,12 +25,11 @@ pub struct Submission {
 ///
 /// Every draft request names the draft by its local id, since the answer has to
 /// find its way back to a draft that was already on screen before it left.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Request {
     AddThread {
         draft: u64,
-        parent: Parent,
-        input: serde_json::Value,
+        thread: NewThread,
     },
     UpdateComment {
         draft: u64,

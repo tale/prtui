@@ -1,35 +1,8 @@
-use crate::model::{ChangedFile, DiffLine, LineKind};
+use crate::model::{ChangedFile, DiffLine, LineKind, NewThread};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
-pub use crate::model::Side;
-
-/// Where a comment lands in the file, in GitHub's terms: a start and an end,
-/// each on its own side of the diff.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Anchor {
-    pub start_line: u32,
-    pub start_side: Side,
-    pub end_line: u32,
-    pub side: Side,
-}
-
-impl Anchor {
-    const fn spanning(start_line: u32, end_line: u32, side: Side) -> Self {
-        Self {
-            start_line,
-            start_side: side,
-            end_line,
-            side,
-        }
-    }
-
-    /// A span that crosses sides is multi-line even when the two line numbers
-    /// happen to match, since they count in different files.
-    pub fn is_multiline(&self) -> bool {
-        self.start_line != self.end_line || self.start_side != self.side
-    }
-}
+pub use crate::model::{Anchor, Parent, Side};
 
 /// What a draft comment is attached to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,40 +77,15 @@ pub struct Draft {
 }
 
 impl Draft {
-    /// The `addPullRequestReviewThread` input. `parent` names the pending
-    /// review when one is already open and the pull request when none is, which
-    /// is what opens it.
-    pub fn to_input(&self, parent: &Parent) -> serde_json::Value {
-        let mut input = match parent {
-            Parent::Review(id) => {
-                serde_json::json!({ "pullRequestReviewId": &**id })
-            }
-            Parent::PullRequest(id) => {
-                serde_json::json!({ "pullRequestId": &**id })
-            }
-        };
-
-        input["path"] = (&*self.path).into();
-        input["body"] = self.body.as_str().into();
-
-        let Attachment::Lines { anchor, .. } = &self.attachment else {
-            input["subjectType"] = "FILE".into();
-            return input;
-        };
-
-        input["subjectType"] = "LINE".into();
-        input["line"] = anchor.end_line.into();
-        input["side"] = anchor.side.as_api().into();
-
-        // GitHub anchors a span at its last line and takes the first as
-        // `startLine`, which is only sent when the comment really covers more
-        // than one.
-        if anchor.is_multiline() {
-            input["startLine"] = anchor.start_line.into();
-            input["startSide"] = anchor.start_side.as_api().into();
+    /// Takes the stable fields a network task needs while the on-screen draft
+    /// remains available for further edits.
+    pub fn new_thread(&self, parent: Parent) -> NewThread {
+        NewThread {
+            parent,
+            path: self.path.clone(),
+            body: self.body.clone(),
+            anchor: self.anchor().copied(),
         }
-
-        input
     }
 
     pub const fn is_file_level(&self) -> bool {
@@ -169,14 +117,6 @@ impl Draft {
                 own.start() <= rows.end() && rows.start() <= own.end()
             })
     }
-}
-
-/// What a new draft hangs off. A pull request with no pending review gets one
-/// opened by the first draft filed against it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Parent {
-    Review(Arc<str>),
-    PullRequest(Arc<str>),
 }
 
 /// Resolves a span of diff rows to the anchor GitHub understands.

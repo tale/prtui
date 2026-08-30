@@ -2,12 +2,11 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use futures_core::Stream;
 use prtui::app::App;
-use prtui::app::draft::Parent;
 use prtui::app::input::InputRouter;
 use prtui::app::link::{Errand, Origin};
 use prtui::app::review::{Failure, Request, Sent};
 use prtui::layout::Layout;
-use prtui::model::{self, ChangedFile, Meta};
+use prtui::model::{ChangedFile, Meta};
 use prtui::renderer::{self, Theme, ThemeMode};
 use prtui::{gh, ui};
 use std::{future::poll_fn, pin::Pin, process::Stdio, time::Duration};
@@ -64,11 +63,9 @@ impl ThemeChoice {
 }
 
 enum Message {
-    Meta(Box<Meta>),
-    Files(Vec<ChangedFile>),
+    Meta(Result<Box<Meta>, String>),
+    Files(Result<Vec<ChangedFile>, String>),
     Highlight(highlighter::Output),
-    MetaFailed(String),
-    FilesFailed(String),
     /// GitHub is having an incident that explains a failure already shown.
     Outage(String),
     /// One outbound request finished, successfully or not.
@@ -83,14 +80,11 @@ fn spawn_meta_fetch(
     tx: mpsc::UnboundedSender<Message>,
 ) {
     tokio::spawn(async move {
-        let msg = match gh::fetch_meta(&repo, number).await {
-            Ok(val) => match model::parse_meta(&val) {
-                Ok(meta) => Message::Meta(Box::new(meta)),
-                Err(err) => Message::MetaFailed(err.to_string()),
-            },
-            Err(err) => Message::MetaFailed(err.to_string()),
-        };
-        let _ = tx.send(msg);
+        let outcome = gh::fetch_meta(&repo, number)
+            .await
+            .map(Box::new)
+            .map_err(|err| err.to_string());
+        let _ = tx.send(Message::Meta(outcome));
     });
 }
 
@@ -184,10 +178,9 @@ fn spawn_request(
 ) {
     tokio::spawn(async move {
         let outcome = match request {
-            Request::AddThread { draft, input, .. } => {
-                gh::add_thread(&repo, input)
+            Request::AddThread { draft, thread } => {
+                gh::add_thread(&repo, thread)
                     .await
-                    .and_then(|val| model::parse_added_thread(&val))
                     .map(|added| Sent::ThreadAdded {
                         draft,
                         review: added.review,
@@ -213,21 +206,10 @@ fn spawn_request(
                 parent,
                 event,
                 body,
-            } => {
-                let submitted = match parent {
-                    Parent::Review(review) => {
-                        gh::submit_review(&repo, review, event.as_api(), body)
-                            .await
-                    }
-                    Parent::PullRequest(pr) => {
-                        gh::create_review(&repo, pr, event.as_api(), body).await
-                    }
-                };
-
-                submitted
-                    .map(|()| Sent::Review)
-                    .map_err(|err| Failure::Review(err.to_string()))
-            }
+            } => gh::submit_review(&repo, parent, event, body)
+                .await
+                .map(|()| Sent::Review)
+                .map_err(|err| Failure::Review(err.to_string())),
             Request::Reply { in_reply_to, body } => {
                 gh::reply(&repo, number, in_reply_to, body)
                     .await
@@ -379,14 +361,10 @@ async fn run(
         let files_repo = session.repo.clone();
         let files_tx = tx.clone();
         tokio::spawn(async move {
-            let msg = match gh::fetch_files(&files_repo, session.number).await {
-                Ok(val) => match model::parse_files(&val) {
-                    Ok(files) => Message::Files(files),
-                    Err(err) => Message::FilesFailed(err.to_string()),
-                },
-                Err(err) => Message::FilesFailed(err.to_string()),
-            };
-            let _ = files_tx.send(msg);
+            let outcome = gh::fetch_files(&files_repo, session.number)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = files_tx.send(Message::Files(outcome));
         });
 
         // Syntax assets deserialize while the initial requests are in flight.
@@ -472,8 +450,7 @@ async fn event_loop(
                 };
 
                 let pending_before = pending;
-                let is_meta_result =
-                    matches!(message, Message::Meta(_) | Message::MetaFailed(_));
+                let is_meta_result = matches!(&message, Message::Meta(_));
                 let affects_display = match message {
                     // A result colored under the previous palette is dropped:
                     // the pass that replaces it is already running.
@@ -489,12 +466,12 @@ async fn event_loop(
                         app.set_highlight(output.path, output.styled);
                         is_open
                     }
-                    Message::Meta(meta) => {
+                    Message::Meta(Ok(meta)) => {
                         app.set_meta(*meta);
                         pending = pending.saturating_sub(1);
                         true
                     }
-                    Message::Files(files) => {
+                    Message::Files(Ok(files)) => {
                         app.set_files(files);
                         highlighter.all(
                             &app.files,
@@ -506,16 +483,16 @@ async fn event_loop(
                     }
                     // Only the first fetch is fatal; a refresh that fails
                     // leaves the review usable with stale threads.
-                    Message::MetaFailed(err) if pending > 0 => {
+                    Message::Meta(Err(err)) if pending > 0 => {
                         failure = Some(err);
                         pending -= 1;
                         true
                     }
-                    Message::MetaFailed(err) => {
+                    Message::Meta(Err(err)) => {
                         app.status = format!("error: refreshing comments: {err}");
                         true
                     }
-                    Message::FilesFailed(err) => {
+                    Message::Files(Err(err)) => {
                         app.fail_files();
                         failure = Some(err);
                         app.status =

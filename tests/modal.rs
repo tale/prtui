@@ -9,8 +9,8 @@ use prtui::app::review::{Failure, Request, ReviewEvent, Sent};
 use prtui::app::search::Match;
 use prtui::app::{App, Card, Pane};
 use prtui::expand::{Reveal, STEP};
+use prtui::gh::{parse_files, parse_meta};
 use prtui::layout::Layout;
-use prtui::model::{parse_files, parse_meta};
 use ratatui::layout::Rect;
 use std::fmt::Write;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
@@ -61,10 +61,9 @@ fn summary(app: &App) -> (usize, usize) {
 /// The fixture's threads in wire order. The app files them by path, so a test
 /// that wants one as a template reaches for the fixture rather than the app.
 fn fixture_threads() -> Vec<prtui::model::ReviewThread> {
-    let meta: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
-
-    parse_meta(&meta).unwrap().threads
+    parse_meta(include_bytes!("fixtures/meta.json"))
+        .unwrap()
+        .threads
 }
 
 /// Answers every draft request the way GitHub would.
@@ -102,14 +101,9 @@ fn settle(app: &mut App) {
 }
 
 fn load() -> App {
-    let files: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
-    let meta: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
-
     let mut app = App::new();
-    app.set_files(parse_files(&files).unwrap());
-    app.set_meta(parse_meta(&meta).unwrap());
+    app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
+    app.set_meta(parse_meta(include_bytes!("fixtures/meta.json")).unwrap());
     app.set_origin(Origin {
         repo_url: "https://github.com/cli/cli".to_owned(),
         number: 9000,
@@ -171,7 +165,9 @@ fn file_from(patch: &str) -> prtui::model::ChangedFile {
         "patch": patch,
     }]]);
 
-    parse_files(&page).unwrap().remove(0)
+    parse_files(&serde_json::to_vec(&page).unwrap())
+        .unwrap()
+        .remove(0)
 }
 
 /// Sets the verdict the open submit form carries. Reaching it by tab is a
@@ -1014,14 +1010,6 @@ fn a_selection_across_both_sides_keeps_the_whole_block() {
     assert_eq!(anchor.side, Side::Right, "ends on the addition");
     assert_eq!(anchor.end_line, 2, "the added line");
     assert!(anchor.is_multiline(), "a cross-side span is never one line");
-
-    let input = app.drafts[0].to_input(&Parent::Review("PRR_1".into()));
-    assert_eq!(input["pullRequestReviewId"], "PRR_1");
-    assert_eq!(input["subjectType"], "LINE");
-    assert_eq!(input["startLine"], 2);
-    assert_eq!(input["startSide"], "LEFT");
-    assert_eq!(input["line"], 2);
-    assert_eq!(input["side"], "RIGHT");
 }
 
 /// Ending back on a deletion has no cross-side form, so it stays on the left
@@ -1045,8 +1033,6 @@ fn a_selection_ending_in_deletions_stays_on_the_old_side() {
     assert_eq!(anchor.start_side, Side::Left);
     assert_eq!(anchor.side, Side::Left);
     assert_eq!((anchor.start_line, anchor.end_line), (2, 3));
-    let input = app.drafts[0].to_input(&Parent::Review("PRR_1".into()));
-    assert_eq!(input["startSide"], "LEFT");
 }
 
 #[test]
@@ -2043,26 +2029,21 @@ fn every_draft_is_filed_against_one_pending_review() {
     act(&mut app, &Action::CommitComment);
 
     let opening = app.take_requests();
-    let Request::AddThread {
-        draft,
-        parent,
-        input,
-    } = opening[0].clone()
-    else {
+    let Request::AddThread { draft, thread } = &opening[0] else {
         panic!("expected a draft request, got {:?}", opening[0]);
     };
 
-    assert_eq!(parent, Parent::PullRequest("PR_fixture".into()));
-    assert_eq!(input["body"], "first");
-    assert_eq!(input["subjectType"], "LINE");
-    assert_eq!(input["side"], "RIGHT");
+    assert_eq!(thread.parent, Parent::PullRequest("PR_fixture".into()));
+    assert_eq!(thread.body, "first");
+    let anchor = thread.anchor.expect("line comment has an anchor");
+    assert_eq!(anchor.side, Side::Right);
     assert!(
-        input.get("startLine").is_none(),
+        !anchor.is_multiline(),
         "a single-line comment sends no span"
     );
 
     app.finish(Ok(Sent::ThreadAdded {
-        draft,
+        draft: *draft,
         review: "PRR_1".into(),
         comment: "PRRC_1".into(),
     }));
@@ -2075,13 +2056,18 @@ fn every_draft_is_filed_against_one_pending_review() {
     act(&mut app, &Action::CommitComment);
 
     let joining = app.take_requests();
-    let Request::AddThread { parent, input, .. } = joining[0].clone() else {
+    let Request::AddThread { thread, .. } = &joining[0] else {
         panic!("expected a draft request, got {:?}", joining[0]);
     };
 
-    assert_eq!(parent, Parent::Review("PRR_1".into()), "joins the review");
-    assert!(input["startLine"].as_u64() < input["line"].as_u64());
-    assert_eq!(input["startSide"], "RIGHT");
+    assert_eq!(
+        thread.parent,
+        Parent::Review("PRR_1".into()),
+        "joins the review"
+    );
+    let anchor = thread.anchor.expect("line comment has an anchor");
+    assert!(anchor.start_line < anchor.end_line);
+    assert_eq!(anchor.start_side, Side::Right);
 }
 
 /// Everything the review carries is already on GitHub, so submitting sends a
@@ -2454,7 +2440,7 @@ fn meta_marking_viewed(path: &str) -> prtui::model::Meta {
         file["viewerViewedState"] = "VIEWED".into();
     }
 
-    parse_meta(&meta).unwrap()
+    parse_meta(&serde_json::to_vec(&meta).unwrap()).unwrap()
 }
 
 #[test]
@@ -2645,10 +2631,8 @@ fn drafts_written_together_share_one_review() {
     let joining = app.take_requests();
     assert!(matches!(
         joining.as_slice(),
-        [Request::AddThread {
-            parent: Parent::Review(_),
-            ..
-        }]
+        [Request::AddThread { thread, .. }]
+            if matches!(&thread.parent, Parent::Review(_))
     ));
 }
 
@@ -2860,7 +2844,7 @@ fn meta_with_pending(comment: &str, body: &str) -> prtui::model::Meta {
     }]);
     pr["reviewThreads"]["nodes"] = serde_json::json!([thread]);
 
-    parse_meta(&meta).unwrap()
+    parse_meta(&serde_json::to_vec(&meta).unwrap()).unwrap()
 }
 
 /// The reference is a fixed-column table, so the columns have to be wide

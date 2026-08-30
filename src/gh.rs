@@ -1,3 +1,6 @@
+use crate::model::{
+    AddedThread, ChangedFile, Meta, NewThread, Parent, ReviewEvent,
+};
 use crate::text::url::escape_path;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -7,6 +10,8 @@ use std::time::Duration;
 use tokio::process::Command;
 use ureq::http::{HeaderMap, Response, StatusCode, Uri};
 use ureq::{Agent, Body};
+
+mod wire;
 
 /// The first page of every connection the review needs.
 ///
@@ -1270,12 +1275,23 @@ async fn write_token(repo: &Repo) -> Result<String> {
     })
 }
 
+/// Decodes pages in the same shape as `gh api --paginate --slurp`.
+///
+/// The byte-oriented entry point keeps `serde_json::Value` inside the GitHub
+/// boundary while allowing captured API responses to exercise the real wire
+/// decoder.
+pub fn parse_files(bytes: &[u8]) -> Result<Vec<ChangedFile>> {
+    wire::files(bytes)
+}
+
+/// Decodes a captured metadata response through the production wire schema.
+pub fn parse_meta(bytes: &[u8]) -> Result<Meta> {
+    wire::meta_bytes(bytes)
+}
+
 /// Changed files with their unified-diff patches. Measured faster than the
 /// `Accept: v3.diff` endpoint, and arrives pre-split per file.
-pub async fn fetch_files(
-    repo: &Repo,
-    number: u32,
-) -> Result<serde_json::Value> {
+pub async fn fetch_files(repo: &Repo, number: u32) -> Result<Vec<ChangedFile>> {
     let token = token(repo.host.as_deref()).await;
     let first = repo.rest_url(&format!(
         "/repos/{}/{}/pulls/{number}/files?per_page=100",
@@ -1284,7 +1300,7 @@ pub async fn fetch_files(
     let origin: Uri = first.parse().context("invalid GitHub API URL")?;
 
     tokio::task::spawn_blocking(move || {
-        let mut pages = Vec::new();
+        let mut files = Vec::with_capacity(100);
         let mut next = Some(first);
 
         while let Some(url) = next {
@@ -1292,17 +1308,17 @@ pub async fn fetch_files(
             check(&mut response, "fetching changed files")?;
             next = next_page(response.headers(), &origin)?;
 
-            let page: serde_json::Value = response
+            let bytes = response
                 .body_mut()
                 .with_config()
                 .limit(API_LIMIT)
-                .read_json()
-                .context("failed to parse /files response")?;
+                .read_to_vec()
+                .context("failed to read /files response")?;
 
-            pages.push(page);
+            files.extend(wire::file_page(&bytes)?);
         }
 
-        Ok(serde_json::Value::Array(pages))
+        Ok(files)
     })
     .await
     .context("changed-file fetch panicked")?
@@ -1419,7 +1435,7 @@ fn complete_meta(
 
 /// PR metadata plus review threads, in one round trip plus whatever the caps
 /// on its connections left behind.
-pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<serde_json::Value> {
+pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<Meta> {
     let token = token(repo.host.as_deref()).await;
     let url = repo.graphql_url();
     let variables = serde_json::json!({
@@ -1440,7 +1456,7 @@ pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<serde_json::Value> {
 
         complete_meta(&url, token.as_deref(), &variables, &mut value)?;
 
-        Ok(value)
+        wire::meta(value)
     })
     .await
     .context("metadata fetch panicked")?
@@ -1498,19 +1514,18 @@ async fn mutate(
 }
 
 /// Files one draft comment against the pending review, opening that review when
-/// `input` names only the pull request. Answers with the payload the two new
-/// node ids are read out of.
-pub async fn add_thread(
-    repo: &Repo,
-    input: serde_json::Value,
-) -> Result<serde_json::Value> {
-    mutate(
+/// its typed target is the pull request. The wire response is decoded before
+/// it crosses back into the runtime.
+pub async fn add_thread(repo: &Repo, thread: NewThread) -> Result<AddedThread> {
+    let value = mutate(
         repo,
         ADD_THREAD_MUTATION,
-        serde_json::json!({ "input": input }),
+        wire::thread_variables(thread),
         "saving draft",
     )
-    .await
+    .await?;
+
+    wire::added_thread(value)
 }
 
 pub async fn update_comment(
@@ -1539,59 +1554,23 @@ pub async fn delete_comment(repo: &Repo, comment: Arc<str>) -> Result<()> {
     .map(|_| ())
 }
 
-/// An approval carries no summary, and GitHub reads an empty string as one
-/// rather than as its absence, so the field goes out only when it has text.
-fn verdict(
-    mut input: serde_json::Value,
-    event: &str,
-    body: String,
-) -> serde_json::Value {
-    input["event"] = event.into();
-    if !body.is_empty() {
-        input["body"] = body.into();
-    }
-
-    serde_json::json!({ "input": input })
-}
-
-/// Publishes the pending review the drafts were filed against. Everything it
-/// carries is already on GitHub, so this sends a verdict and a summary only.
+/// Publishes an existing pending review or creates a verdict-only review when
+/// no draft opened one. The target determines the mutation and wire field.
 pub async fn submit_review(
     repo: &Repo,
-    review: Arc<str>,
-    event: &str,
+    parent: Parent,
+    event: ReviewEvent,
     body: String,
 ) -> Result<()> {
-    let input = serde_json::json!({ "pullRequestReviewId": &*review });
+    let query = match parent {
+        Parent::Review(_) => SUBMIT_REVIEW_MUTATION,
+        Parent::PullRequest(_) => CREATE_REVIEW_MUTATION,
+    };
+    let variables = wire::review_variables(parent, event, body);
 
-    mutate(
-        repo,
-        SUBMIT_REVIEW_MUTATION,
-        verdict(input, event, body),
-        "submitting review",
-    )
-    .await
-    .map(|_| ())
-}
-
-/// Files and publishes a review in one call, for a verdict that carries no
-/// drafts and so has no pending review waiting for it.
-pub async fn create_review(
-    repo: &Repo,
-    pull_request: Arc<str>,
-    event: &str,
-    body: String,
-) -> Result<()> {
-    let input = serde_json::json!({ "pullRequestId": &*pull_request });
-
-    mutate(
-        repo,
-        CREATE_REVIEW_MUTATION,
-        verdict(input, event, body),
-        "submitting review",
-    )
-    .await
-    .map(|_| ())
+    mutate(repo, query, variables, "submitting review")
+        .await
+        .map(|_| ())
 }
 
 /// A reply is a standalone comment addressed to the thread's first comment; it

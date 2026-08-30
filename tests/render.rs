@@ -5,9 +5,10 @@ use prtui::app::input::InputRouter;
 use prtui::app::review::{Failure, Request, Sent};
 use prtui::app::{App, Card, Pane};
 use prtui::expand::{Place, Reveal, STEP};
+use prtui::gh::{parse_files, parse_meta};
 use prtui::layout::Layout;
 use prtui::layout::rows::{GUTTER, Row};
-use prtui::model::{LineKind, Side, parse_files, parse_meta};
+use prtui::model::{LineKind, Side};
 use prtui::renderer::ThemeMode;
 use prtui::ui;
 use ratatui::Frame;
@@ -148,21 +149,15 @@ fn highlight(app: &mut App) {
 /// The fixture's threads in wire order. The app files them by path, so a test
 /// that wants one as a template reaches for the fixture rather than the app.
 fn fixture_threads() -> Vec<prtui::model::ReviewThread> {
-    let meta: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
-
-    parse_meta(&meta).unwrap().threads
+    parse_meta(include_bytes!("fixtures/meta.json"))
+        .unwrap()
+        .threads
 }
 
 fn load() -> App {
-    let files: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
-    let meta: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
-
     let mut app = App::new();
-    app.set_files(parse_files(&files).unwrap());
-    app.set_meta(parse_meta(&meta).unwrap());
+    app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
+    app.set_meta(parse_meta(include_bytes!("fixtures/meta.json")).unwrap());
     app
 }
 
@@ -980,10 +975,8 @@ fn loading_state_is_centered_once_and_animates() {
 
 #[test]
 fn files_release_the_loading_gate_without_metadata() {
-    let files: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
     let mut app = App::new();
-    app.set_files(parse_files(&files).unwrap());
+    app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
 
     let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
     terminal
@@ -999,10 +992,8 @@ fn files_release_the_loading_gate_without_metadata() {
 
 #[test]
 fn metadata_can_arrive_while_the_file_loader_continues() {
-    let meta: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
     let mut app = App::new();
-    app.set_meta(parse_meta(&meta).unwrap());
+    app.set_meta(parse_meta(include_bytes!("fixtures/meta.json")).unwrap());
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
@@ -1112,9 +1103,7 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
     use prtui::renderer::{Theme, ThemeMode};
 
     let mut app = App::with_theme(Theme::for_mode(ThemeMode::Light));
-    let files: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
-    app.set_files(parse_files(&files).unwrap());
+    app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
     app.is_files_visible = false;
     highlight(&mut app);
 
@@ -1701,7 +1690,7 @@ fn a_viewed_file_wears_a_tick_in_the_tree() {
     let files =
         &mut meta["data"]["repository"]["pullRequest"]["files"]["nodes"];
     files[0]["viewerViewedState"] = "VIEWED".into();
-    app.set_meta(parse_meta(&meta).unwrap());
+    app.set_meta(parse_meta(&serde_json::to_vec(&meta).unwrap()).unwrap());
 
     let rendered = draw(&app);
 
@@ -1865,9 +1854,7 @@ fn a_fold_survives_a_refetch() {
     press(&mut app, "gg");
     act(&mut app, &Action::Activate);
 
-    let files: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/files.json")).unwrap();
-    app.set_files(parse_files(&files).unwrap());
+    app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
 
     assert!(
         !draw(&app).contains("verify_test.go"),
@@ -2326,12 +2313,10 @@ fn a_file_note_ships_without_a_line() {
     paste(&mut InputRouter::default(), &mut app, "whole-file remark");
     act(&mut app, &Action::CommitComment);
 
-    let input = app.drafts[0].to_input(&Parent::Review("PRR_1".into()));
+    let thread = app.drafts[0].new_thread(Parent::Review("PRR_1".into()));
 
-    assert_eq!(input["subjectType"], "FILE");
-    assert!(input.get("line").is_none(), "no line to point at");
-    assert!(input.get("side").is_none());
-    assert_eq!(input["body"], "whole-file remark");
+    assert!(thread.anchor.is_none(), "no line to point at");
+    assert_eq!(thread.body, "whole-file remark");
 }
 
 /// A patch whose every line names itself, so a test can assert on the exact
@@ -2350,7 +2335,9 @@ fn numbered_file(count: usize) -> prtui::model::ChangedFile {
         "patch": patch.trim_end(),
     }]]);
 
-    parse_files(&page).unwrap().remove(0)
+    parse_files(&serde_json::to_vec(&page).unwrap())
+        .unwrap()
+        .remove(0)
 }
 
 #[test]
@@ -2414,7 +2401,9 @@ fn single_line_file(text: &str) -> prtui::model::ChangedFile {
         "patch": format!("@@ -1,1 +1,1 @@\n+{text}"),
     }]]);
 
-    parse_files(&page).unwrap().remove(0)
+    parse_files(&serde_json::to_vec(&page).unwrap())
+        .unwrap()
+        .remove(0)
 }
 
 /// Rows the open file's line `source` folds across.
@@ -2566,8 +2555,8 @@ fn pending_threads_come_back_as_drafts() {
     pr["reviewThreads"]["nodes"] = serde_json::json!([submitted, pending]);
 
     let mut app = App::new();
-    app.set_files(parse_files(&files).unwrap());
-    app.set_meta(parse_meta(&meta).unwrap());
+    app.set_files(parse_files(&serde_json::to_vec(&files).unwrap()).unwrap());
+    app.set_meta(parse_meta(&serde_json::to_vec(&meta).unwrap()).unwrap());
 
     assert_eq!(app.drafts.len(), 1, "the pending thread is a draft");
     assert_eq!(app.drafts[0].body, "not sent yet");
