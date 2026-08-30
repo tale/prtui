@@ -25,6 +25,25 @@ impl CommentEditor {
         self.lines.join("\n")
     }
 
+    /// Joins the buffer and trims it in place, retaining the join allocation.
+    pub fn trimmed_text(&self) -> String {
+        let mut text = self.text();
+        let (start, end) = {
+            let trimmed = text.trim();
+            let start = text.len() - text.trim_start().len();
+            (start, start + trimmed.len())
+        };
+
+        if start == end {
+            text.clear();
+            return text;
+        }
+
+        text.truncate(end);
+        text.drain(..start);
+        text
+    }
+
     pub fn set_text(&mut self, text: impl AsRef<str>) {
         self.lines = normalized_lines(text.as_ref());
         self.row = self.lines.len().saturating_sub(1);
