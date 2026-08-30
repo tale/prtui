@@ -193,7 +193,9 @@ pub(crate) fn parse_hunk_header(header: &str) -> Option<(u32, u32)> {
 }
 
 fn parse_patch(patch: &str) -> Vec<DiffLine> {
-    let mut lines = Vec::new();
+    // Every patch row can produce at most one diff line. Counting first keeps
+    // large patches from repeatedly growing this buffer while they are parsed.
+    let mut lines = Vec::with_capacity(patch.lines().count());
     let mut old_line = 0;
     let mut new_line = 0;
 
@@ -251,9 +253,16 @@ pub fn parse_files(val: &serde_json::Value) -> Result<Vec<ChangedFile>> {
         .as_array()
         .context("expected array of pages from /files")?;
 
-    let mut files = Vec::new();
+    let capacity = pages
+        .iter()
+        .filter_map(serde_json::Value::as_array)
+        .map(Vec::len)
+        .sum();
+    let mut files = Vec::with_capacity(capacity);
     for page in pages {
-        let raws: Vec<RawFile> = serde_json::from_value(page.clone())
+        // `&Value` is itself a serde deserializer. Deserializing through the
+        // reference avoids cloning every filename and patch in the page.
+        let raws = Vec::<RawFile>::deserialize(page)
             .context("unexpected /files page shape")?;
 
         for raw in raws {

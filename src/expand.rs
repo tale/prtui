@@ -81,7 +81,11 @@ struct Hunk {
 }
 
 fn hunks(lines: &[DiffLine]) -> Vec<Hunk> {
-    let mut hunks: Vec<Hunk> = Vec::new();
+    let capacity = lines
+        .iter()
+        .filter(|line| line.kind == LineKind::Hunk)
+        .count();
+    let mut hunks = Vec::with_capacity(capacity);
 
     for (index, line) in lines.iter().enumerate() {
         if line.kind == LineKind::Hunk {
