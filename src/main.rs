@@ -2,11 +2,11 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use futures_core::Stream;
 use prtui::app::App;
+use prtui::app::effect::{Effect, Message as AppMessage};
 use prtui::app::input::InputRouter;
 use prtui::app::link::{Errand, Origin};
 use prtui::app::review::{Failure, Request, Sent};
 use prtui::layout::Layout;
-use prtui::model::{ChangedFile, Meta};
 use prtui::renderer::{self, Theme, ThemeMode};
 use prtui::{gh, ui};
 use std::{future::poll_fn, pin::Pin, process::Stdio, time::Duration};
@@ -63,13 +63,8 @@ impl ThemeChoice {
 }
 
 enum Message {
-    Meta(Result<Box<Meta>, String>),
-    Files(Result<Vec<ChangedFile>, String>),
+    App(AppMessage),
     Highlight(highlighter::Output),
-    /// GitHub is having an incident that explains a failure already shown.
-    Outage(String),
-    /// One outbound request finished, successfully or not.
-    Sent(Result<Sent, Failure>),
 }
 
 /// Pull metadata again so a posted reply or a resolved thread shows up in the
@@ -77,6 +72,7 @@ enum Message {
 fn spawn_meta_fetch(
     repo: gh::Repo,
     number: u32,
+    generation: u64,
     tx: mpsc::UnboundedSender<Message>,
 ) {
     tokio::spawn(async move {
@@ -84,64 +80,24 @@ fn spawn_meta_fetch(
             .await
             .map(Box::new)
             .map_err(|err| err.to_string());
-        let _ = tx.send(Message::Meta(outcome));
+        let _ = tx.send(Message::App(AppMessage::Meta {
+            generation,
+            outcome,
+        }));
     });
 }
 
-/// Keeps one metadata fetch in flight at a time.
-///
-/// Every write has to be read back before it shows in the diff, but two
-/// responses out together can land in either order, and the older one restores
-/// the threads the newer one already replaced. A write that arrives while a
-/// fetch is out therefore marks the result stale instead of racing it, and the
-/// fetch is reissued once the first one returns.
-struct MetaFetch {
-    is_in_flight: bool,
-    is_stale: bool,
-}
-
-impl MetaFetch {
-    /// The first fetch leaves before the loop starts, so the tracker opens
-    /// with that one already outstanding.
-    const fn started() -> Self {
-        Self {
-            is_in_flight: true,
-            is_stale: false,
-        }
-    }
-
-    /// Whether the caller spawns the fetch now.
-    const fn request(&mut self) -> bool {
-        if self.is_in_flight {
-            self.is_stale = true;
-            return false;
-        }
-
-        self.is_in_flight = true;
-        true
-    }
-
-    /// A write whose result the app already holds. Nothing has to be fetched
-    /// for it, but a fetch in flight left before the write and answers with the
-    /// state it replaced, so that one is reissued rather than believed.
-    const fn invalidate(&mut self) {
-        if self.is_in_flight {
-            self.is_stale = true;
-        }
-    }
-
-    /// Whether a reissue has to go out, which it does when a write landed
-    /// while the finished fetch was reading the old state.
-    const fn finish(&mut self) -> bool {
-        self.is_in_flight = false;
-
-        if !self.is_stale {
-            return false;
-        }
-
-        self.is_stale = false;
-        self.request()
-    }
+fn spawn_files_fetch(
+    repo: gh::Repo,
+    number: u32,
+    tx: mpsc::UnboundedSender<Message>,
+) {
+    tokio::spawn(async move {
+        let outcome = gh::fetch_files(&repo, number)
+            .await
+            .map_err(|err| err.to_string());
+        let _ = tx.send(Message::App(AppMessage::Files(outcome)));
+    });
 }
 
 /// Asked only after something has already failed, so a healthy session never
@@ -150,22 +106,9 @@ impl MetaFetch {
 fn spawn_outage_probe(repo: gh::Repo, tx: mpsc::UnboundedSender<Message>) {
     tokio::spawn(async move {
         if let Some(summary) = gh::fetch_outage(&repo).await {
-            let _ = tx.send(Message::Outage(summary));
+            let _ = tx.send(Message::App(AppMessage::Outage(summary)));
         }
     });
-}
-
-/// A known incident replaces the failure rather than prefixing it: during an
-/// outage the HTTP status is noise, and a bare 404 reads like the PR is gone.
-fn failure_status(outage: Option<&String>, failure: Option<&String>) -> String {
-    if let Some(outage) = outage {
-        return outage.clone();
-    }
-
-    match failure {
-        Some(failure) => format!("error: {failure}"),
-        None => String::new(),
-    }
 }
 
 /// Writes go out on their own task so a slow round trip never freezes the
@@ -242,7 +185,7 @@ fn spawn_request(
             }
         };
 
-        let _ = tx.send(Message::Sent(outcome));
+        let _ = tx.send(Message::App(AppMessage::Request(outcome)));
     });
 }
 
@@ -356,17 +299,6 @@ async fn run(
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        // Both round trips leave immediately; whichever lands first paints.
-        spawn_meta_fetch(session.repo.clone(), session.number, tx.clone());
-        let files_repo = session.repo.clone();
-        let files_tx = tx.clone();
-        tokio::spawn(async move {
-            let outcome = gh::fetch_files(&files_repo, session.number)
-                .await
-                .map_err(|err| err.to_string());
-            let _ = files_tx.send(Message::Files(outcome));
-        });
-
         // Syntax assets deserialize while the initial requests are in flight.
         std::thread::spawn(move || renderer::preload(theme.mode));
 
@@ -386,6 +318,7 @@ async fn event_loop(
     let follow_terminal = session.follow_terminal;
     let mut app = App::with_theme(theme);
     app.set_origin(session.origin.clone());
+    app.start();
     let mut input = InputRouter::default();
     let highlighter = highlighter::Highlighter::new({
         let tx = tx.clone();
@@ -393,11 +326,6 @@ async fn event_loop(
             let _ = tx.send(Message::Highlight(output));
         }
     });
-    let mut pending: u8 = 2;
-    let mut failure: Option<String> = None;
-    let mut outage: Option<String> = None;
-    let mut is_outage_probed = false;
-    let mut meta_fetch = MetaFetch::started();
     let mut is_dirty = true;
     // Replaced by the first frame's own layout before any input is routed
     // against it, since the loop draws before it reads.
@@ -406,31 +334,49 @@ async fn event_loop(
     animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     while !app.should_quit {
-        for request in app.take_requests() {
-            spawn_request(
-                request,
-                session.repo.clone(),
-                session.number,
-                tx.clone(),
-            );
-        }
-
-        for path in app.take_recolor() {
-            if let Some(file) = app.files.iter().find(|file| file.path == path)
-            {
-                highlighter.one(file, app.theme().mode);
-            }
-        }
-
-        for errand in app.take_errands() {
-            match errand {
-                Errand::Open(url) => {
+        for effect in app.take_effects() {
+            match effect {
+                Effect::FetchFiles => spawn_files_fetch(
+                    session.repo.clone(),
+                    session.number,
+                    tx.clone(),
+                ),
+                Effect::FetchMeta { generation } => spawn_meta_fetch(
+                    session.repo.clone(),
+                    session.number,
+                    generation,
+                    tx.clone(),
+                ),
+                Effect::ProbeOutage => {
+                    spawn_outage_probe(session.repo.clone(), tx.clone());
+                }
+                Effect::Request(request) => spawn_request(
+                    request,
+                    session.repo.clone(),
+                    session.number,
+                    tx.clone(),
+                ),
+                Effect::HighlightAll => highlighter.all(
+                    &app.files,
+                    app.selected_file,
+                    app.theme().mode,
+                ),
+                Effect::Highlight(path) => {
+                    if let Some(file) =
+                        app.files.iter().find(|file| file.path == path)
+                    {
+                        highlighter.one(file, app.theme().mode);
+                    }
+                }
+                Effect::Errand(Errand::Open(url)) => {
                     if let Err(err) = open_url(&url) {
                         app.status = format!("error: {err}");
                     }
                 }
-                Errand::Copy(text) => terminal::copy(terminal, &text)
-                    .context("copying to the clipboard")?,
+                Effect::Errand(Errand::Copy(text)) => {
+                    terminal::copy(terminal, &text)
+                        .context("copying to the clipboard")?;
+                }
             }
         }
 
@@ -449,8 +395,6 @@ async fn event_loop(
                     bail!("application message channel closed");
                 };
 
-                let pending_before = pending;
-                let is_meta_result = matches!(&message, Message::Meta(_));
                 let affects_display = match message {
                     // A result colored under the previous palette is dropped:
                     // the pass that replaces it is already running.
@@ -466,92 +410,8 @@ async fn event_loop(
                         app.set_highlight(output.path, output.styled);
                         is_open
                     }
-                    Message::Meta(Ok(meta)) => {
-                        app.set_meta(*meta);
-                        pending = pending.saturating_sub(1);
-                        true
-                    }
-                    Message::Files(Ok(files)) => {
-                        app.set_files(files);
-                        highlighter.all(
-                            &app.files,
-                            app.selected_file,
-                            app.theme().mode,
-                        );
-                        pending = pending.saturating_sub(1);
-                        true
-                    }
-                    // Only the first fetch is fatal; a refresh that fails
-                    // leaves the review usable with stale threads.
-                    Message::Meta(Err(err)) if pending > 0 => {
-                        failure = Some(err);
-                        pending -= 1;
-                        true
-                    }
-                    Message::Meta(Err(err)) => {
-                        app.status = format!("error: refreshing comments: {err}");
-                        true
-                    }
-                    Message::Files(Err(err)) => {
-                        app.fail_files();
-                        failure = Some(err);
-                        app.status =
-                            failure_status(outage.as_ref(), failure.as_ref());
-                        pending = pending.saturating_sub(1);
-                        true
-                    }
-                    // Lands after the failure it explains, so it rewrites the
-                    // line rather than setting one of its own.
-                    Message::Outage(summary) => {
-                        outage = Some(summary);
-                        app.status =
-                            failure_status(outage.as_ref(), failure.as_ref());
-                        true
-                    }
-                    // A write only shows up in the diff once the threads are
-                    // read back, so a success pulls metadata again. A mark the
-                    // app already holds skips the fetch but still unseats one
-                    // in flight, which left before the write.
-                    Message::Sent(outcome) => {
-                        let sent = outcome.as_ref().ok();
-                        let needs_refetch =
-                            sent.is_some_and(Sent::needs_refetch);
-                        let invalidates =
-                            sent.is_some_and(Sent::invalidates_fetch);
-                        app.finish(outcome);
-
-                        if invalidates {
-                            meta_fetch.invalidate();
-                        }
-
-                        if needs_refetch && meta_fetch.request() {
-                            spawn_meta_fetch(
-                                session.repo.clone(),
-                                session.number,
-                                tx.clone(),
-                            );
-                        }
-                        true
-                    }
+                    Message::App(message) => app.receive(message),
                 };
-
-                if is_meta_result && meta_fetch.finish() {
-                    spawn_meta_fetch(
-                        session.repo.clone(),
-                        session.number,
-                        tx.clone(),
-                    );
-                }
-
-                if pending_before != 0 && pending == 0 {
-                    app.status =
-                        failure_status(outage.as_ref(), failure.as_ref());
-                }
-
-                if failure.is_some() && !is_outage_probed {
-                    is_outage_probed = true;
-                    spawn_outage_probe(session.repo.clone(), tx.clone());
-                }
 
                 is_dirty |= affects_display;
             }
@@ -580,11 +440,6 @@ async fn event_loop(
                             TerminalThemeMode::Light => ThemeMode::Light,
                         };
                         if app.set_theme_mode(mode) {
-                            highlighter.all(
-                                &app.files,
-                                app.selected_file,
-                                mode,
-                            );
                             is_dirty = true;
                         }
                     }
@@ -594,7 +449,7 @@ async fn event_loop(
         }
     }
 
-    if let Some(err) = failure {
+    if let Some(err) = app.take_failure() {
         bail!(err);
     }
 
@@ -635,51 +490,6 @@ mod tests {
             Args::try_parse_from(["prtui", "42"]).unwrap().number,
             Some(42)
         );
-    }
-
-    /// Two writes finishing back to back used to put two fetches in flight,
-    /// and the older response restored the threads the newer one replaced.
-    #[test]
-    fn a_write_during_a_fetch_reissues_it_rather_than_racing_it() {
-        let mut meta = MetaFetch::started();
-
-        assert!(!meta.request());
-        assert!(!meta.request());
-
-        assert!(meta.finish());
-        assert!(!meta.finish());
-    }
-
-    /// A viewed mark needs no fetch of its own, but one already in flight left
-    /// before it and reports the file as unread. Believing that answer takes
-    /// the tick straight back off a file the reader has finished.
-    #[test]
-    fn a_mark_the_app_holds_still_unseats_a_fetch_in_flight() {
-        let mut meta = MetaFetch::started();
-
-        meta.invalidate();
-        assert!(meta.finish());
-    }
-
-    /// With nothing in flight there is no stale answer to guard against, so a
-    /// mark costs no round trip and queues none behind the next fetch.
-    #[test]
-    fn a_mark_between_fetches_costs_no_round_trip() {
-        let mut meta = MetaFetch::started();
-        assert!(!meta.finish());
-
-        meta.invalidate();
-        assert!(meta.request());
-        assert!(!meta.finish());
-    }
-
-    #[test]
-    fn a_write_between_fetches_goes_out_at_once() {
-        let mut meta = MetaFetch::started();
-
-        assert!(!meta.finish());
-        assert!(meta.request());
-        assert!(!meta.finish());
     }
 
     #[test]

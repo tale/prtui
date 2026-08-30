@@ -1,9 +1,8 @@
 # Architecture
 
-Where code lives, what the boundaries are, and which of them exist yet. Steps A,
-B and D of the order of work have landed; C and E remain planned, so parts of
-what follows are a target rather than a description. Every section marks which
-is which.
+Where code lives, what the boundaries are, and which of them exist yet. Steps A
+through D have landed; E remains planned, so parts of what follows are a target
+rather than a description. Every section marks which is which.
 
 **Rules** is the contract, **Tree** is the map, and **Why** is the reasoning —
 a record of the boundary problems that motivated the work, with the resolved
@@ -44,19 +43,16 @@ action down the call chain. `main.rs` independently hardcodes the chrome height
 as `area.height - 3`, duplicating knowledge that lives in `ui::draw`'s layout
 constraints.
 
-### Three effect channels, three shapes
+### Three effect channels, three shapes — *resolved (C)*
 
-`app.take_requests()` is the right pattern. But images carry a parallel
-mini-outbox (`images.take_pending()`), highlighting owns a dedicated worker and
-result path, and refetch-after-write is decided inside a `select!` arm rather
-than by the app. Nothing arbitrates between them yet.
+The old app exposed separate request, highlighting, and external-errand
+outboxes, while refetch-after-write was decided inside a `select!` arm.
+`app::effect` now owns one `Effect` queue and the typed `Message` transitions;
+the loop only executes effects and returns their results.
 
-That last one used to be a live race: every successful write spawned a metadata
-fetch, so resolving two threads quickly put two in flight and the older response
-could land last, restoring stale state. `MetaFetch` in `main` now holds the
-refetch to one in flight and reissues it when a write arrives mid-flight, so the
-hazard is closed — but the arbitration still lives in `main`'s locals, out of
-reach of the tests, which is what C moves.
+Metadata reads are generation-tagged and limited to one in flight. A write
+marks the active generation stale; its completion is discarded and queues one
+new generation. The arbitration is unit-tested without the runtime.
 
 ### `serde_json::Value` as the inter-layer transport — *resolved (D)*
 
@@ -104,10 +100,10 @@ is not mistaken for one the code already keeps.
    and the virtual row list. The loop computes it and hands the same value to
    both `apply` and `draw`. This is what removes the `viewport_height`
    parameter and the `- 3`.
-3. **One effect channel.** *(Planned, C.)* `App::apply` queues an `Effect`;
-   every result arrives as one `Msg`; the loop is the only thing that spawns.
-   Requests carry a generation so a stale response drops instead of
-   clobbering.
+3. **One effect channel.** *(Live since C.)* `App::apply` queues an `Effect`;
+   every result arrives as one message; the loop is the only thing that spawns.
+   Metadata requests carry a generation so a stale response drops instead of
+   clobbering state.
 4. **Domain types at boundaries.** *(Live since D.)* `serde_json::Value` never
    leaves `gh`; `gh::wire` owns review schemas and serialization. GitHub
    fetches return `Meta` / `Vec<ChangedFile>` and drafts serialize at the edge,
@@ -149,11 +145,10 @@ Net effect: `app/` shrinks as logic moves to `layout/`, `ui.rs` splits about
 five ways, `main.rs` loses ~400 lines, and `model.rs` splits into `model/` plus
 `github/wire.rs`.
 
-Where it stands: `layout/` exists as drawn. `gh/wire.rs` now owns review wire
-types, though the rest of `gh.rs` has not yet split into `client` and `api`.
-`ui.rs` is read-only and row-driven but is still one file, so `view/` is the
-shape it splits into. `cli.rs`, `model/`, `runtime/`, and the remaining splits
-are steps C and E.
+Where it stands: `layout/` and `app/effect.rs` exist as drawn. `gh/wire.rs` owns
+review wire types, though the rest of `gh.rs` has not yet split into `client`
+and `api`. `ui.rs` is read-only and row-driven but is still one file, so
+`view/` is the shape it splits into. The remaining physical splits are step E.
 
 ## The virtual row model
 
@@ -197,9 +192,9 @@ independent and can lead if the refetch race needs fixing first.
   double measurement, `thread_scroll_limit` out of `App`.
 - **B. Layout as a value** (`layout/mod.rs`) — **done.** `viewport_height` gone
   from every call site, and the `- 3` with it.
-- **C. Unified `Effect` / `Msg` with generations.** Moves the load and error
-  state machine out of `main`'s locals into `App`, where tests can reach it.
-  Fixes the refetch race.
+- **C. Unified `Effect` / `Msg` with generations** — **done.** Load/error state
+  and metadata arbitration live in `App`; stale generations are discarded and
+  covered directly by unit tests.
 - **D. `model/` + `github/wire.rs`** — **done at the boundary.** `Value` is out
   of `app` and `model`; derived deserialization fails loudly. Splitting the
   remaining single-file modules is deferred to E.

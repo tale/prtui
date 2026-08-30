@@ -2,6 +2,7 @@ pub mod action;
 pub mod command;
 pub mod draft;
 pub mod editor;
+pub mod effect;
 pub mod ex;
 pub mod input;
 pub mod keymap;
@@ -23,6 +24,7 @@ use crate::vim::{step, step_hit};
 use action::{Action, Motion};
 use draft::{Anchor, Attachment, Draft, Parent, Sync};
 use editor::CommentEditor;
+use effect::{Effect, FilesState, Loading, Message};
 use keymap::{Keymap, Resolution};
 use link::{Errand, Origin};
 use mode::{Mode, Selection};
@@ -252,14 +254,6 @@ fn wanted_gaps(file: &ChangedFile, wanted: Wanted) -> Vec<(Gap, Reveal)> {
     }
 }
 
-/// The patches drive the whole review surface, so what the file pane shows
-/// when it is empty depends on why it is empty.
-enum FilesState {
-    Loading,
-    Loaded,
-    Failed,
-}
-
 /// Where a pending thread sits in the diff, in the terms a draft is held in.
 ///
 /// A thread whose line no longer exists in the patch — outdated, or against a
@@ -355,9 +349,10 @@ pub struct App {
     /// Requests handed to the event loop but not yet answered.
     pub in_flight: usize,
 
-    outbox: Vec<Request>,
-    /// Links handed to the event loop, which owns the browser and the terminal.
-    errands: Vec<Errand>,
+    /// The single boundary for work leaving the model. The event loop drains
+    /// and executes it without owning any of the ordering policy.
+    effects: Vec<Effect>,
+    loading: Loading,
     /// Where the pull request lives on the web. Absent only in a test that
     /// never asked for a link.
     origin: Option<Origin>,
@@ -377,9 +372,6 @@ pub struct App {
     /// The expansion waiting on a file's contents. One at a time: a gap is
     /// named by where it sits in the patch, and revealing one moves the rest.
     deferred: Option<(Arc<str>, Wanted)>,
-    /// Paths whose patch has grown since it was colored. Drained by the event
-    /// loop, which owns the syntax pass.
-    recolor: Vec<Arc<str>>,
     filter_snapshot: Option<FileFilterSnapshot>,
     search_origin: Option<SearchOrigin>,
     /// Every `:` line run this session, oldest first.
@@ -394,7 +386,6 @@ pub struct App {
     pub overlay_scroll: usize,
     /// Which of the panel's hits `n` last landed on, as an index into them.
     overlay_match: Option<usize>,
-    files_state: FilesState,
 }
 
 impl Default for App {
@@ -442,8 +433,8 @@ impl App {
             loading_frame: 0,
             should_quit: false,
             in_flight: 0,
-            outbox: Vec::new(),
-            errands: Vec::new(),
+            effects: Vec::new(),
+            loading: Loading::default(),
             origin: None,
             theme,
             keymap: Keymap::default(),
@@ -451,7 +442,6 @@ impl App {
             blobs: HashMap::new(),
             fetching: HashSet::new(),
             deferred: None,
-            recolor: Vec::new(),
             filter_snapshot: None,
             search_origin: None,
             command_history: Vec::new(),
@@ -460,7 +450,6 @@ impl App {
             history_cursor: None,
             overlay_scroll: 0,
             overlay_match: None,
-            files_state: FilesState::Loading,
         }
     }
 
@@ -488,11 +477,136 @@ impl App {
     }
 
     pub const fn is_loading(&self) -> bool {
-        matches!(self.files_state, FilesState::Loading)
+        self.loading.is_files_pending()
     }
 
     pub const fn advance_loading(&mut self) {
         self.loading_frame = self.loading_frame.wrapping_add(1);
+    }
+
+    /// Starts the two independent initial reads exactly once.
+    pub fn start(&mut self) {
+        let Some(generation) = self.loading.start() else {
+            return;
+        };
+
+        self.effects.reserve(2);
+        self.effects.push(Effect::FetchFiles);
+        self.effects.push(Effect::FetchMeta { generation });
+    }
+
+    /// The event loop is the only executor; all policy has already happened by
+    /// the time it drains this list.
+    pub fn take_effects(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.effects)
+    }
+
+    fn take_selected<T>(
+        &mut self,
+        mut select: impl FnMut(Effect) -> Result<T, Effect>,
+    ) -> Vec<T> {
+        let held = std::mem::take(&mut self.effects);
+        let mut retained = Vec::with_capacity(held.len());
+        let mut selected = Vec::with_capacity(held.len());
+
+        for effect in held {
+            match select(effect) {
+                Ok(value) => selected.push(value),
+                Err(effect) => retained.push(effect),
+            }
+        }
+
+        self.effects = retained;
+        selected
+    }
+
+    fn record_initial_failure(&mut self, failure: String) {
+        if self.loading.fail(failure) {
+            self.effects.push(Effect::ProbeOutage);
+        }
+    }
+
+    /// Applies one completed effect and queues any follow-up it requires.
+    /// Returns whether a visible value changed.
+    pub fn receive(&mut self, message: Message) -> bool {
+        match message {
+            Message::Files(outcome) => {
+                let pending_before = self.loading.pending();
+
+                match outcome {
+                    Ok(files) => {
+                        self.set_files(files);
+                        self.effects.push(Effect::HighlightAll);
+                    }
+                    Err(error) => {
+                        self.fail_files();
+                        self.record_initial_failure(error);
+                        self.status = self.loading.status();
+                    }
+                }
+
+                if pending_before != 0 && self.loading.pending() == 0 {
+                    self.status = self.loading.status();
+                }
+                true
+            }
+            Message::Meta {
+                generation,
+                outcome,
+            } => match self.loading.complete_meta(generation) {
+                effect::MetaCompletion::Ignore => false,
+                effect::MetaCompletion::Retry(generation) => {
+                    self.effects.push(Effect::FetchMeta { generation });
+                    false
+                }
+                effect::MetaCompletion::Accept => {
+                    let pending_before = self.loading.pending();
+                    let is_initial = self.loading.is_meta_pending();
+                    self.loading.meta_ready();
+
+                    match outcome {
+                        Ok(meta) => self.set_meta(*meta),
+                        Err(error) if is_initial => {
+                            self.record_initial_failure(error);
+                        }
+                        Err(error) => {
+                            self.status =
+                                format!("error: refreshing comments: {error}");
+                        }
+                    }
+
+                    if pending_before != 0 && self.loading.pending() == 0 {
+                        self.status = self.loading.status();
+                    }
+                    true
+                }
+            },
+            Message::Request(outcome) => {
+                let sent = outcome.as_ref().ok();
+                let needs_refetch = sent.is_some_and(Sent::needs_refetch);
+                let invalidates = sent.is_some_and(Sent::invalidates_fetch);
+                self.finish(outcome);
+
+                if invalidates {
+                    self.loading.invalidate_meta();
+                }
+                if needs_refetch
+                    && let Some(generation) = self.loading.request_meta()
+                {
+                    self.effects.push(Effect::FetchMeta { generation });
+                }
+                true
+            }
+            Message::Outage(summary) => {
+                self.loading.set_outage(summary);
+                self.status = self.loading.status();
+                true
+            }
+        }
+    }
+
+    pub const fn take_failure(&mut self) -> Option<String> {
+        self.loading.take_failure()
     }
 
     /// File patches are the only data required to make the main review surface
@@ -505,7 +619,7 @@ impl App {
         // A path that comes back with a new patch cannot keep its old colors.
         self.highlights.clear();
         self.files = files.into_iter().map(Into::into).collect();
-        self.files_state = FilesState::Loaded;
+        self.loading.files = FilesState::Loaded;
         self.reseed_drafts();
     }
 
@@ -514,7 +628,7 @@ impl App {
     /// surface worth showing — as long as it does not claim the PR is empty.
     pub fn fail_files(&mut self) {
         self.files.clear();
-        self.files_state = FilesState::Failed;
+        self.loading.files = FilesState::Failed;
     }
 
     /// The bar paints trouble red. A failure carries the `error:` label; a
@@ -525,7 +639,7 @@ impl App {
     }
 
     pub const fn files_placeholder(&self) -> &'static str {
-        match self.files_state {
+        match self.loading.files {
             FilesState::Failed => "diff unavailable",
             _ => "no changed files",
         }
@@ -540,6 +654,7 @@ impl App {
 
         self.theme = Theme::for_mode(mode);
         self.highlights.clear();
+        self.effects.push(Effect::HighlightAll);
         true
     }
 
@@ -837,7 +952,10 @@ impl App {
     /// Drained by the event loop, which owns the syntax pass. A patch that has
     /// grown has to be colored again: the colors are held one list per line.
     pub fn take_recolor(&mut self) -> Vec<Arc<str>> {
-        std::mem::take(&mut self.recolor)
+        self.take_selected(|effect| match effect {
+            Effect::Highlight(path) => Ok(path),
+            effect => Err(effect),
+        })
     }
 
     /// Where the pull request lives on the web. Session configuration the app
@@ -847,7 +965,10 @@ impl App {
     }
 
     pub fn take_errands(&mut self) -> Vec<Errand> {
-        std::mem::take(&mut self.errands)
+        self.take_selected(|effect| match effect {
+            Effect::Errand(errand) => Ok(errand),
+            effect => Err(effect),
+        })
     }
 
     /// What the cursor is on, addressed on the web.
@@ -913,7 +1034,8 @@ impl App {
         };
 
         self.status = "opening the pull request".into();
-        self.errands.push(Errand::Open(origin.pull_url()));
+        self.effects
+            .push(Effect::Errand(Errand::Open(origin.pull_url())));
     }
 
     fn yank_link(&mut self) {
@@ -923,7 +1045,7 @@ impl App {
         };
 
         self.status = format!("yanked {url}");
-        self.errands.push(Errand::Copy(url));
+        self.effects.push(Effect::Errand(Errand::Copy(url)));
 
         if self.mode == Mode::Visual {
             self.mode = Mode::Normal;
@@ -995,7 +1117,7 @@ impl App {
         // Colors are held per line and drafts are anchored by line number, so
         // both are stale from the reveal downward.
         self.highlights.remove(path);
-        self.recolor.push(path.clone());
+        self.effects.push(Effect::Highlight(path.clone()));
         self.reanchor_drafts();
 
         format!("expanded {count} lines")
@@ -1531,13 +1653,17 @@ impl App {
     }
 
     fn send(&mut self, request: Request) {
-        self.outbox.push(request);
+        self.effects.push(Effect::Request(request));
         self.in_flight += 1;
     }
 
-    /// Drained by the event loop, which owns the network.
+    /// Compatibility view for model-level tests that inspect only requests.
+    /// Runtime code drains [`Self::take_effects`] instead.
     pub fn take_requests(&mut self) -> Vec<Request> {
-        std::mem::take(&mut self.outbox)
+        self.take_selected(|effect| match effect {
+            Effect::Request(request) => Ok(request),
+            effect => Err(effect),
+        })
     }
 
     /// Reports one request's outcome. Drafts survive a failed submission so the
