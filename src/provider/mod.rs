@@ -2,202 +2,118 @@
 //!
 //! The application speaks only in these domain types and operations. A host
 //! such as GitHub or GitLab owns authentication, URLs, pagination and wire
-//! formats behind one branch of [`Provider`].
+//! formats behind an implementation of [`Provider`].
 
 use crate::model::{
     AddedThread, ChangedFile, Meta, NewThread, Parent, ReviewEvent,
 };
 use anyhow::Result;
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 pub mod github;
 
 /// Everything the application needs from a code-review host.
 ///
-/// This is concrete dispatch rather than a trait object: provider calls do not
-/// box a future or allocate a vtable. Adding a host means adding one variant
-/// and forwarding each operation to its client.
-#[derive(Clone, Copy, Debug)]
-pub enum Provider {
-    GitHub(github::GitHub),
-}
+/// The returned futures stay concrete and `Send`, so generic consumers get
+/// static dispatch without boxing. A runtime-selected host can be represented
+/// by an enum that implements this trait at the selection boundary.
+pub trait Provider: Copy + Send + 'static {
+    fn parse_repo(self, slug: &str) -> Result<Repo>;
 
-impl Provider {
-    pub const fn github() -> Self {
-        Self::GitHub(github::GitHub)
-    }
+    fn repo_url(self, repo: &Repo) -> String;
 
-    pub fn parse_repo(self, slug: &str) -> Result<Repo> {
-        match self {
-            Self::GitHub(_) => github::GitHub::parse_repo(slug),
-        }
-    }
+    fn current_repo_if_present(
+        self,
+    ) -> impl Future<Output = Result<Option<Repo>>> + Send;
 
-    pub fn repo_url(self, repo: &Repo) -> String {
-        match self {
-            Self::GitHub(_) => github::GitHub::repo_url(repo),
-        }
-    }
-
-    pub async fn current_repo_if_present(self) -> Result<Option<Repo>> {
-        match self {
-            Self::GitHub(provider) => provider.current_repo_if_present().await,
-        }
-    }
-
-    pub async fn repository_pull_requests(
+    fn repository_pull_requests(
         self,
         repo: Repo,
-    ) -> Result<PullRequestList> {
-        match self {
-            Self::GitHub(provider) => {
-                provider.repository_pull_requests(repo).await
-            }
-        }
-    }
+    ) -> impl Future<Output = Result<PullRequestList>> + Send;
 
-    pub async fn user_pull_requests(self) -> Result<PullRequestList> {
-        match self {
-            Self::GitHub(provider) => provider.user_pull_requests().await,
-        }
-    }
+    fn user_pull_requests(
+        self,
+    ) -> impl Future<Output = Result<PullRequestList>> + Send;
 
-    pub async fn fetch_summary(
+    fn fetch_summary(
         self,
         repo: &Repo,
         number: u32,
-    ) -> Result<Summary> {
-        match self {
-            Self::GitHub(provider) => {
-                provider.fetch_summary(repo, number).await
-            }
-        }
-    }
+    ) -> impl Future<Output = Result<Summary>> + Send;
 
-    pub async fn fetch_files(
+    fn fetch_files(
         self,
         repo: &Repo,
         number: u32,
-    ) -> Result<Vec<ChangedFile>> {
-        match self {
-            Self::GitHub(provider) => provider.fetch_files(repo, number).await,
-        }
-    }
+    ) -> impl Future<Output = Result<Vec<ChangedFile>>> + Send;
 
-    pub async fn fetch_meta(self, repo: &Repo, number: u32) -> Result<Meta> {
-        match self {
-            Self::GitHub(provider) => provider.fetch_meta(repo, number).await,
-        }
-    }
+    fn fetch_meta(
+        self,
+        repo: &Repo,
+        number: u32,
+    ) -> impl Future<Output = Result<Meta>> + Send;
 
-    pub async fn fetch_blob(
+    fn fetch_blob(
         self,
         repo: &Repo,
         path: &str,
         commit: &str,
-    ) -> Result<String> {
-        match self {
-            Self::GitHub(provider) => {
-                provider.fetch_blob(repo, path, commit).await
-            }
-        }
-    }
+    ) -> impl Future<Output = Result<String>> + Send;
 
-    pub async fn add_thread(
+    fn add_thread(
         self,
         repo: &Repo,
         thread: NewThread,
-    ) -> Result<AddedThread> {
-        match self {
-            Self::GitHub(provider) => provider.add_thread(repo, thread).await,
-        }
-    }
+    ) -> impl Future<Output = Result<AddedThread>> + Send;
 
-    pub async fn update_comment(
+    fn update_comment(
         self,
         repo: &Repo,
         comment: Arc<str>,
         body: String,
-    ) -> Result<()> {
-        match self {
-            Self::GitHub(provider) => {
-                provider.update_comment(repo, comment, body).await
-            }
-        }
-    }
+    ) -> impl Future<Output = Result<()>> + Send;
 
-    pub async fn delete_comment(
+    fn delete_comment(
         self,
         repo: &Repo,
         comment: Arc<str>,
-    ) -> Result<()> {
-        match self {
-            Self::GitHub(provider) => {
-                provider.delete_comment(repo, comment).await
-            }
-        }
-    }
+    ) -> impl Future<Output = Result<()>> + Send;
 
-    pub async fn submit_review(
+    fn submit_review(
         self,
         repo: &Repo,
         parent: Parent,
         event: ReviewEvent,
         body: String,
-    ) -> Result<()> {
-        match self {
-            Self::GitHub(provider) => {
-                provider.submit_review(repo, parent, event, body).await
-            }
-        }
-    }
+    ) -> impl Future<Output = Result<()>> + Send;
 
-    pub async fn reply(
+    fn reply(
         self,
         repo: &Repo,
         number: u32,
         in_reply_to: u64,
         body: String,
-    ) -> Result<()> {
-        match self {
-            Self::GitHub(provider) => {
-                provider.reply(repo, number, in_reply_to, body).await
-            }
-        }
-    }
+    ) -> impl Future<Output = Result<()>> + Send;
 
-    pub async fn set_resolved(
+    fn set_resolved(
         self,
         repo: &Repo,
         thread_id: Arc<str>,
         is_resolved: bool,
-    ) -> Result<()> {
-        match self {
-            Self::GitHub(provider) => {
-                provider.set_resolved(repo, thread_id, is_resolved).await
-            }
-        }
-    }
+    ) -> impl Future<Output = Result<()>> + Send;
 
-    pub async fn set_viewed(
+    fn set_viewed(
         self,
         repo: &Repo,
         pr: Arc<str>,
         path: &str,
         is_viewed: bool,
-    ) -> Result<()> {
-        match self {
-            Self::GitHub(provider) => {
-                provider.set_viewed(repo, pr, path, is_viewed).await
-            }
-        }
-    }
+    ) -> impl Future<Output = Result<()>> + Send;
 
-    pub async fn fetch_outage(self, repo: &Repo) -> Option<String> {
-        match self {
-            Self::GitHub(provider) => provider.fetch_outage(repo).await,
-        }
-    }
+    fn fetch_outage(
+        self,
+        repo: &Repo,
+    ) -> impl Future<Output = Option<String>> + Send;
 }
 
 #[derive(Clone)]

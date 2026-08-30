@@ -2,8 +2,8 @@ use crate::model::{
     AddedThread, ChangedFile, Meta, NewThread, Parent, ReviewEvent,
 };
 use crate::provider::{
-    Check, CheckState, LocatedPullRequest, PullRequest, PullRequestList, Repo,
-    ReviewStatus, Reviewer, Summary, Threads, Verdict,
+    Check, CheckState, LocatedPullRequest, Provider, PullRequest,
+    PullRequestList, Repo, ReviewStatus, Reviewer, Summary, Threads, Verdict,
 };
 use crate::text::url::escape_path;
 use anyhow::{Context, Result, bail};
@@ -1310,39 +1310,35 @@ async fn current_repo() -> Result<Repo> {
     Repo::from_url(String::from_utf8_lossy(&output).trim())
 }
 
-impl GitHub {
-    pub(super) fn parse_repo(slug: &str) -> Result<Repo> {
+impl Provider for GitHub {
+    fn parse_repo(self, slug: &str) -> Result<Repo> {
         Repo::parse(slug)
     }
 
-    pub(super) fn repo_url(repo: &Repo) -> String {
+    fn repo_url(self, repo: &Repo) -> String {
         repo.web_url()
     }
 
-    pub(super) async fn current_repo_if_present(self) -> Result<Option<Repo>> {
+    async fn current_repo_if_present(self) -> Result<Option<Repo>> {
         current_repo_if_present().await
     }
 
-    pub(super) async fn repository_pull_requests(
+    async fn repository_pull_requests(
         self,
         repo: Repo,
     ) -> Result<PullRequestList> {
         repository_pull_requests(repo).await
     }
 
-    pub(super) async fn user_pull_requests(self) -> Result<PullRequestList> {
+    async fn user_pull_requests(self) -> Result<PullRequestList> {
         user_pull_requests().await
     }
 
-    pub(super) async fn fetch_summary(
-        self,
-        repo: &Repo,
-        number: u32,
-    ) -> Result<Summary> {
+    async fn fetch_summary(self, repo: &Repo, number: u32) -> Result<Summary> {
         fetch_summary(repo, number).await
     }
 
-    pub(super) async fn fetch_files(
+    async fn fetch_files(
         self,
         repo: &Repo,
         number: u32,
@@ -1350,15 +1346,11 @@ impl GitHub {
         fetch_files(repo, number).await
     }
 
-    pub(super) async fn fetch_meta(
-        self,
-        repo: &Repo,
-        number: u32,
-    ) -> Result<Meta> {
+    async fn fetch_meta(self, repo: &Repo, number: u32) -> Result<Meta> {
         fetch_meta(repo, number).await
     }
 
-    pub(super) async fn fetch_blob(
+    async fn fetch_blob(
         self,
         repo: &Repo,
         path: &str,
@@ -1367,7 +1359,7 @@ impl GitHub {
         fetch_blob(repo, path, commit).await
     }
 
-    pub(super) async fn add_thread(
+    async fn add_thread(
         self,
         repo: &Repo,
         thread: NewThread,
@@ -1375,7 +1367,7 @@ impl GitHub {
         add_thread(repo, thread).await
     }
 
-    pub(super) async fn update_comment(
+    async fn update_comment(
         self,
         repo: &Repo,
         comment: Arc<str>,
@@ -1384,7 +1376,7 @@ impl GitHub {
         update_comment(repo, comment, body).await
     }
 
-    pub(super) async fn delete_comment(
+    async fn delete_comment(
         self,
         repo: &Repo,
         comment: Arc<str>,
@@ -1392,7 +1384,7 @@ impl GitHub {
         delete_comment(repo, comment).await
     }
 
-    pub(super) async fn submit_review(
+    async fn submit_review(
         self,
         repo: &Repo,
         parent: Parent,
@@ -1402,7 +1394,7 @@ impl GitHub {
         submit_review(repo, parent, event, body).await
     }
 
-    pub(super) async fn reply(
+    async fn reply(
         self,
         repo: &Repo,
         number: u32,
@@ -1412,7 +1404,7 @@ impl GitHub {
         reply(repo, number, in_reply_to, body).await
     }
 
-    pub(super) async fn set_resolved(
+    async fn set_resolved(
         self,
         repo: &Repo,
         thread_id: Arc<str>,
@@ -1421,7 +1413,7 @@ impl GitHub {
         set_resolved(repo, thread_id, is_resolved).await
     }
 
-    pub(super) async fn set_viewed(
+    async fn set_viewed(
         self,
         repo: &Repo,
         pr: Arc<str>,
@@ -1431,7 +1423,7 @@ impl GitHub {
         set_viewed(repo, pr, path, is_viewed).await
     }
 
-    pub(super) async fn fetch_outage(self, repo: &Repo) -> Option<String> {
+    async fn fetch_outage(self, repo: &Repo) -> Option<String> {
         fetch_outage(repo).await
     }
 }
@@ -1442,7 +1434,7 @@ mod tests {
 
     #[test]
     fn github_is_usable_through_the_provider_boundary() {
-        let provider = crate::provider::Provider::github();
+        let provider = GitHub;
         let repo = provider.parse_repo("owner/repo").unwrap();
 
         assert_eq!(repo.slug(), "owner/repo");

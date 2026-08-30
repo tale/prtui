@@ -106,8 +106,8 @@ is not mistaken for one the code already keeps.
    clobbering state.
 4. **Domain types at boundaries.** *(Live since D.)* `serde_json::Value` never
    leaves `provider::github`; its `wire` module owns review schemas and
-   serialization. The runtime talks to the concrete `provider::Provider`
-   dispatcher; host clients return `Meta` / `Vec<ChangedFile>` and serialize
+   serialization. The runtime is generic over the `provider::Provider` trait;
+   host clients return `Meta` / `Vec<ChangedFile>` and serialize
    drafts at the edge, never inside `app`.
 5. **Grouped private state.** *(Planned, E.)* `App` owns sub-structs (`Focus`,
    `Drafts`, `Find`, `Loading`) that keep their own invariants, rather than 25
@@ -121,7 +121,7 @@ src/
   cli.rs            Args, ThemeChoice, ImageChoice
   model/            PullRequest, ChangedFile, DiffLine, ReviewThread, Draft, Anchor
   provider/
-    mod.rs          shared types + concrete host dispatch
+    mod.rs          shared types + host trait
     github/
       mod.rs        GitHub client and API operations
       transport.rs  agent, token, HTTP, pagination, error detail
@@ -149,7 +149,7 @@ five ways, `main.rs` loses ~400 lines, and `model.rs` splits into `model/` plus
 the provider wire modules.
 
 Where it stands: `layout/` and `app/effect.rs` exist as drawn. `provider/mod.rs`
-owns the host-neutral types and concrete dispatcher; `provider/github/` owns
+owns the host-neutral types and trait; `provider/github/` owns
 the GitHub client, transport, and wire types. `ui.rs` is read-only and
 row-driven but is still one file, so `view/` is the shape it splits into. The
 remaining physical splits are step E.
