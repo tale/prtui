@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::process::Command;
-use ureq::http::{HeaderMap, Response, StatusCode};
+use ureq::http::{HeaderMap, Response, StatusCode, Uri};
 use ureq::{Agent, Body};
 
 /// The first page of every connection the review needs.
@@ -1093,16 +1093,36 @@ fn check(response: &mut Response<Body>, what: &str) -> Result<()> {
 }
 
 /// `Link: <url>; rel="next", <url>; rel="last"` — the cursor for the next page.
-fn next_page(headers: &HeaderMap) -> Option<String> {
-    let link = headers.get("link")?.to_str().ok()?;
+///
+/// Pagination is followed manually, so the agent's redirect policy cannot keep
+/// the authorization header on its original host for us. A server-provided
+/// cursor must therefore stay on the API origin that received the first page.
+fn next_page(headers: &HeaderMap, origin: &Uri) -> Result<Option<String>> {
+    let Some(link) = headers.get("link") else {
+        return Ok(None);
+    };
+    let link = link.to_str().context("invalid pagination link header")?;
 
-    link.split(',')
+    let next = link
+        .split(',')
         .filter(|part| part.contains("rel=\"next\""))
         .find_map(|part| {
             let start = part.find('<')? + 1;
             let end = part[start..].find('>')? + start;
             Some(part[start..end].to_string())
-        })
+        });
+    let Some(next) = next else {
+        return Ok(None);
+    };
+
+    let cursor: Uri = next.parse().context("invalid pagination URL")?;
+    if cursor.scheme() != origin.scheme()
+        || cursor.authority() != origin.authority()
+    {
+        bail!("refusing a cross-origin pagination URL");
+    }
+
+    Ok(Some(next))
 }
 
 /// Which failures a request may be sent through again.
@@ -1261,6 +1281,7 @@ pub async fn fetch_files(
         "/repos/{}/{}/pulls/{number}/files?per_page=100",
         repo.owner, repo.name
     ));
+    let origin: Uri = first.parse().context("invalid GitHub API URL")?;
 
     tokio::task::spawn_blocking(move || {
         let mut pages = Vec::new();
@@ -1269,7 +1290,7 @@ pub async fn fetch_files(
         while let Some(url) = next {
             let mut response = get(&url, JSON_ACCEPT, token.as_deref())?;
             check(&mut response, "fetching changed files")?;
-            next = next_page(response.headers());
+            next = next_page(response.headers(), &origin)?;
 
             let page: serde_json::Value = response
                 .body_mut()
@@ -1867,13 +1888,14 @@ mod tests {
 
     #[test]
     fn follows_only_the_next_pagination_cursor() {
+        let origin: Uri = "https://api.github.com/first".parse().unwrap();
         let middle = headers(
             "<https://api.github.com/repos/o/r/pulls/1/files?page=1>; rel=\"prev\", \
              <https://api.github.com/repos/o/r/pulls/1/files?page=3>; rel=\"next\", \
              <https://api.github.com/repos/o/r/pulls/1/files?page=9>; rel=\"last\"",
         );
         assert_eq!(
-            next_page(&middle).as_deref(),
+            next_page(&middle, &origin).unwrap().as_deref(),
             Some("https://api.github.com/repos/o/r/pulls/1/files?page=3")
         );
 
@@ -1882,8 +1904,23 @@ mod tests {
             "<https://api.github.com/repos/o/r/pulls/1/files?page=8>; rel=\"prev\", \
              <https://api.github.com/repos/o/r/pulls/1/files?page=1>; rel=\"first\"",
         );
-        assert_eq!(next_page(&last), None);
-        assert_eq!(next_page(&HeaderMap::new()), None);
+        assert_eq!(next_page(&last, &origin).unwrap(), None);
+        assert_eq!(next_page(&HeaderMap::new(), &origin).unwrap(), None);
+    }
+
+    #[test]
+    fn pagination_cannot_carry_a_token_to_another_origin() {
+        let origin: Uri = "https://api.github.com/first".parse().unwrap();
+
+        for cursor in [
+            "http://api.github.com/page/2",
+            "https://github.example.com/page/2",
+        ] {
+            let links = headers(&format!("<{cursor}>; rel=\"next\""));
+            let error = next_page(&links, &origin).unwrap_err().to_string();
+
+            assert!(error.contains("cross-origin"), "{error}");
+        }
     }
 
     /// A write that timed out may already have been filed. Sending it again
