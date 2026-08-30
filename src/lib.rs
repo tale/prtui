@@ -1,8 +1,8 @@
 pub mod app;
 pub mod expand;
-pub mod gh;
 pub mod layout;
 pub mod model;
+pub mod provider;
 pub mod renderer;
 pub mod text;
 pub mod ui;

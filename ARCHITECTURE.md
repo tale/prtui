@@ -57,9 +57,9 @@ new generation. The arbitration is unit-tested without the runtime.
 ### `serde_json::Value` as the inter-layer transport — *resolved (D)*
 
 The old boundary handed fetch results back as `Value` for `main` to parse and
-stored pre-serialized draft JSON inside `Request`. `gh::wire` now owns the
-derived response schemas and outbound field names; fetches return domain models
-and application requests carry typed draft data.
+stored pre-serialized draft JSON inside `Request`. `provider::github::wire` now
+owns the derived response schemas and outbound field names; fetches return
+domain models and application requests carry typed draft data.
 
 ### One traversal, three implementations — *resolved (A)*
 
@@ -105,9 +105,10 @@ is not mistaken for one the code already keeps.
    Metadata requests carry a generation so a stale response drops instead of
    clobbering state.
 4. **Domain types at boundaries.** *(Live since D.)* `serde_json::Value` never
-   leaves `gh`; `gh::wire` owns review schemas and serialization. GitHub
-   fetches return `Meta` / `Vec<ChangedFile>` and drafts serialize at the edge,
-   never inside `app`.
+   leaves `provider::github`; its `wire` module owns review schemas and
+   serialization. The runtime talks to the concrete `provider::Provider`
+   dispatcher; host clients return `Meta` / `Vec<ChangedFile>` and serialize
+   drafts at the edge, never inside `app`.
 5. **Grouped private state.** *(Planned, E.)* `App` owns sub-structs (`Focus`,
    `Drafts`, `Find`, `Loading`) that keep their own invariants, rather than 25
    public fields any caller can desynchronize.
@@ -119,10 +120,12 @@ src/
   main.rs           args -> session -> run          (~60 lines)
   cli.rs            Args, ThemeChoice, ImageChoice
   model/            PullRequest, ChangedFile, DiffLine, ReviewThread, Draft, Anchor
-  github/
-    client.rs       agent, token, get/post/graphql, pagination, error detail
-    api.rs          the six calls, returning model types
-    wire.rs         Deserialize structs + patch parsing   <- only serde_json here
+  provider/
+    mod.rs          shared types + concrete host dispatch
+    github/
+      mod.rs        GitHub client and API operations
+      transport.rs  agent, token, HTTP, pagination, error detail
+      wire.rs       Deserialize structs + patch parsing
   app/
     mod.rs          App: state + apply(Action | Msg) -> Effect
     effect.rs       one Effect enum
@@ -143,12 +146,13 @@ src/
 
 Net effect: `app/` shrinks as logic moves to `layout/`, `ui.rs` splits about
 five ways, `main.rs` loses ~400 lines, and `model.rs` splits into `model/` plus
-`github/wire.rs`.
+the provider wire modules.
 
-Where it stands: `layout/` and `app/effect.rs` exist as drawn. `gh/wire.rs` owns
-review wire types, though the rest of `gh.rs` has not yet split into `client`
-and `api`. `ui.rs` is read-only and row-driven but is still one file, so
-`view/` is the shape it splits into. The remaining physical splits are step E.
+Where it stands: `layout/` and `app/effect.rs` exist as drawn. `provider/mod.rs`
+owns the host-neutral types and concrete dispatcher; `provider/github/` owns
+the GitHub client, transport, and wire types. `ui.rs` is read-only and
+row-driven but is still one file, so `view/` is the shape it splits into. The
+remaining physical splits are step E.
 
 ## The virtual row model
 

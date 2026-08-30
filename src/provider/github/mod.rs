@@ -1,6 +1,10 @@
 use crate::model::{
     AddedThread, ChangedFile, Meta, NewThread, Parent, ReviewEvent,
 };
+use crate::provider::{
+    Check, CheckState, LocatedPullRequest, PullRequest, PullRequestList, Repo,
+    ReviewStatus, Reviewer, Summary, Threads, Verdict,
+};
 use crate::text::url::escape_path;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -269,12 +273,9 @@ const STATUS_URL: &str = "https://www.githubstatus.com/api/v2/components.json";
 /// nothing about why a diff would not load, and naming it would only mislead.
 const STATUS_COMPONENTS: [&str; 2] = ["API Requests", "Pull Requests"];
 
-#[derive(Clone)]
-pub struct Repo {
-    pub host: Option<String>,
-    pub owner: String,
-    pub name: String,
-}
+/// GitHub's implementation of the code-review provider boundary.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GitHub;
 
 impl Repo {
     /// Accepts `OWNER/REPO` or `HOST/OWNER/REPO`, matching `gh -R`.
@@ -290,7 +291,7 @@ impl Repo {
 
         Ok(Self {
             host,
-            owner: owner.to_string(),
+            namespace: owner.to_string(),
             name: name.to_string(),
         })
     }
@@ -305,13 +306,6 @@ impl Repo {
             .unwrap_or(url);
 
         Self::parse(rest.trim_end_matches(".git"))
-    }
-
-    pub fn slug(&self) -> String {
-        match &self.host {
-            Some(host) => format!("{host}/{}/{}", self.owner, self.name),
-            None => format!("{}/{}", self.owner, self.name),
-        }
     }
 
     /// Enterprise installations serve the same API under `/api/v3`, so an
@@ -331,10 +325,10 @@ impl Repo {
 
     /// Where the repository is read by a person rather than by the API, which
     /// is what a permalink names and what the browser is handed.
-    pub fn web_url(&self) -> String {
+    fn web_url(&self) -> String {
         let host = self.host.as_deref().unwrap_or("github.com");
 
-        format!("https://{host}/{}/{}", self.owner, self.name)
+        format!("https://{host}/{}/{}", self.namespace, self.name)
     }
 
     fn graphql_url(&self) -> String {
@@ -343,193 +337,6 @@ impl Repo {
             None => "https://api.github.com/graphql".to_string(),
         }
     }
-}
-
-pub struct PullRequest {
-    pub number: u32,
-    pub title: String,
-    pub review_status: ReviewStatus,
-}
-
-pub struct LocatedPullRequest {
-    pub repo: Repo,
-    pub pull: PullRequest,
-}
-
-/// Keeps repository scope and rows together so one local repository is owned
-/// once rather than cloned into every result.
-pub enum PullRequestList {
-    Repository { repo: Repo, pulls: Vec<PullRequest> },
-    User { pulls: Vec<LocatedPullRequest> },
-}
-
-pub struct PullRequestRow<'a> {
-    pub repository: Option<&'a Repo>,
-    pub number: u32,
-    pub title: &'a str,
-    pub review_status: &'a ReviewStatus,
-}
-
-pub struct PullRequestTarget {
-    pub repo: Repo,
-    pub number: u32,
-}
-
-/// What one pull request looks like from outside: enough to decide whether it
-/// is worth opening, and nothing that has to be read line by line.
-pub struct Summary {
-    pub author: String,
-    pub base_ref: String,
-    pub head_ref: String,
-    pub additions: u32,
-    pub deletions: u32,
-    pub changed_files: u32,
-    /// The day it last moved, which is the date half of the API timestamp.
-    pub updated_on: String,
-    pub comments: u32,
-    /// Most blocking first: what is failing, then what is still running.
-    pub checks: Vec<Check>,
-    /// Most blocking first as well: changes requested, then who is still
-    /// being waited on.
-    pub reviewers: Vec<Reviewer>,
-    pub threads: Threads,
-}
-
-/// One check on the head commit, whichever app reported it.
-pub struct Check {
-    pub name: String,
-    pub state: CheckState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum CheckState {
-    /// Ordered by how much it wants a reader's attention, which is the order
-    /// the panel lists them in.
-    Failed,
-    Running,
-    Passed,
-    /// Skipped and neutral runs, which decide nothing either way.
-    Skipped,
-}
-
-/// One reviewer and where they stand: someone who has answered, or someone
-/// the pull request is still waiting on.
-pub struct Reviewer {
-    /// A login, or `owner/team` for a team that was asked as a team.
-    pub name: String,
-    pub is_team: bool,
-    pub verdict: Verdict,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Verdict {
-    ChangesRequested,
-    Waiting,
-    Commented,
-    Approved,
-}
-
-impl Verdict {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::ChangesRequested => "changes requested",
-            Self::Waiting => "waiting",
-            Self::Commented => "commented",
-            Self::Approved => "approved",
-        }
-    }
-}
-
-pub struct Threads {
-    pub unresolved: u32,
-    pub total: u32,
-    /// Whether the review holds more threads than the one page that was
-    /// counted, which makes `unresolved` a floor rather than the whole tally.
-    pub is_truncated: bool,
-}
-
-impl PullRequestList {
-    pub const fn len(&self) -> usize {
-        match self {
-            Self::Repository { pulls, .. } => pulls.len(),
-            Self::User { pulls } => pulls.len(),
-        }
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub const fn shows_repositories(&self) -> bool {
-        matches!(self, Self::User { .. })
-    }
-
-    pub fn row(&self, index: usize) -> Option<PullRequestRow<'_>> {
-        match self {
-            Self::Repository { pulls, .. } => {
-                pulls.get(index).map(|pull| pull.row(None))
-            }
-            Self::User { pulls } => pulls
-                .get(index)
-                .map(|located| located.pull.row(Some(&located.repo))),
-        }
-    }
-
-    /// The same choice `select` returns, without consuming the list, which is
-    /// what the summary panel asks for while the reader is still browsing.
-    pub fn target(&self, index: usize) -> Option<PullRequestTarget> {
-        match self {
-            Self::Repository { repo, pulls } => Some(PullRequestTarget {
-                repo: repo.clone(),
-                number: pulls.get(index)?.number,
-            }),
-            Self::User { pulls } => {
-                let located = pulls.get(index)?;
-                Some(PullRequestTarget {
-                    repo: located.repo.clone(),
-                    number: located.pull.number,
-                })
-            }
-        }
-    }
-
-    pub fn select(self, index: usize) -> Option<PullRequestTarget> {
-        match self {
-            Self::Repository { repo, pulls } => {
-                let number = pulls.get(index)?.number;
-                Some(PullRequestTarget { repo, number })
-            }
-            Self::User { mut pulls } => {
-                if index >= pulls.len() {
-                    return None;
-                }
-                let selected = pulls.swap_remove(index);
-                Some(PullRequestTarget {
-                    repo: selected.repo,
-                    number: selected.pull.number,
-                })
-            }
-        }
-    }
-}
-
-impl PullRequest {
-    fn row<'a>(&'a self, repository: Option<&'a Repo>) -> PullRequestRow<'a> {
-        PullRequestRow {
-            repository,
-            number: self.number,
-            title: &self.title,
-            review_status: &self.review_status,
-        }
-    }
-}
-
-pub enum ReviewStatus {
-    Draft,
-    ChangesRequested,
-    ReviewRequired,
-    Approved,
-    NoDecision,
 }
 
 #[derive(Deserialize)]
@@ -980,11 +787,11 @@ pub fn parse_meta(bytes: &[u8]) -> Result<Meta> {
 
 /// Changed files with their unified-diff patches. Measured faster than the
 /// `Accept: v3.diff` endpoint, and arrives pre-split per file.
-pub async fn fetch_files(repo: &Repo, number: u32) -> Result<Vec<ChangedFile>> {
+async fn fetch_files(repo: &Repo, number: u32) -> Result<Vec<ChangedFile>> {
     let token = token(repo.host.as_deref()).await;
     let first = repo.rest_url(&format!(
         "/repos/{}/{}/pulls/{number}/files?per_page=100",
-        repo.owner, repo.name
+        repo.namespace, repo.name
     ));
     let origin: Uri = first.parse().context("invalid GitHub API URL")?;
 
@@ -1124,11 +931,11 @@ fn complete_meta(
 
 /// PR metadata plus review threads, in one round trip plus whatever the caps
 /// on its connections left behind.
-pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<Meta> {
+async fn fetch_meta(repo: &Repo, number: u32) -> Result<Meta> {
     let token = token(repo.host.as_deref()).await;
     let url = repo.graphql_url();
     let variables = serde_json::json!({
-        "owner": repo.owner,
+        "owner": repo.namespace,
         "repo": repo.name,
         "number": number,
     });
@@ -1155,15 +962,11 @@ pub async fn fetch_meta(repo: &Repo, number: u32) -> Result<Meta> {
 ///
 /// The contents endpoint serves the blob directly under the raw media type, so
 /// nothing has to be pulled back out of a JSON envelope on the way in.
-pub async fn fetch_blob(
-    repo: &Repo,
-    path: &str,
-    commit: &str,
-) -> Result<String> {
+async fn fetch_blob(repo: &Repo, path: &str, commit: &str) -> Result<String> {
     let token = token(repo.host.as_deref()).await;
     let url = repo.rest_url(&format!(
         "/repos/{}/{}/contents/{}?ref={commit}",
-        repo.owner,
+        repo.namespace,
         repo.name,
         escape_path(path)
     ));
@@ -1212,7 +1015,7 @@ async fn mutate(
 /// Files one draft comment against the pending review, opening that review when
 /// its typed target is the pull request. The wire response is decoded before
 /// it crosses back into the runtime.
-pub async fn add_thread(repo: &Repo, thread: NewThread) -> Result<AddedThread> {
+async fn add_thread(repo: &Repo, thread: NewThread) -> Result<AddedThread> {
     let value = mutate(
         repo,
         ADD_THREAD_MUTATION,
@@ -1224,7 +1027,7 @@ pub async fn add_thread(repo: &Repo, thread: NewThread) -> Result<AddedThread> {
     wire::added_thread(value)
 }
 
-pub async fn update_comment(
+async fn update_comment(
     repo: &Repo,
     comment: Arc<str>,
     body: String,
@@ -1239,7 +1042,7 @@ pub async fn update_comment(
     .map(|_| ())
 }
 
-pub async fn delete_comment(repo: &Repo, comment: Arc<str>) -> Result<()> {
+async fn delete_comment(repo: &Repo, comment: Arc<str>) -> Result<()> {
     mutate(
         repo,
         DELETE_COMMENT_MUTATION,
@@ -1252,7 +1055,7 @@ pub async fn delete_comment(repo: &Repo, comment: Arc<str>) -> Result<()> {
 
 /// Publishes an existing pending review or creates a verdict-only review when
 /// no draft opened one. The target determines the mutation and wire field.
-pub async fn submit_review(
+async fn submit_review(
     repo: &Repo,
     parent: Parent,
     event: ReviewEvent,
@@ -1271,7 +1074,7 @@ pub async fn submit_review(
 
 /// A reply is a standalone comment addressed to the thread's first comment; it
 /// posts immediately rather than waiting for a review to be submitted.
-pub async fn reply(
+async fn reply(
     repo: &Repo,
     number: u32,
     in_reply_to: u64,
@@ -1280,7 +1083,7 @@ pub async fn reply(
     let token = write_token(repo).await?;
     let url = repo.rest_url(&format!(
         "/repos/{}/{}/pulls/{number}/comments",
-        repo.owner, repo.name
+        repo.namespace, repo.name
     ));
     let payload =
         serde_json::json!({ "body": body, "in_reply_to": in_reply_to });
@@ -1294,7 +1097,7 @@ pub async fn reply(
     .context("reply panicked")?
 }
 
-pub async fn set_resolved(
+async fn set_resolved(
     repo: &Repo,
     thread_id: Arc<str>,
     is_resolved: bool,
@@ -1312,7 +1115,7 @@ pub async fn set_resolved(
 
 /// A file's read-through mark, which GitHub keys on the pull request node
 /// rather than on the changed file: a path is all it takes to name one.
-pub async fn set_viewed(
+async fn set_viewed(
     repo: &Repo,
     pr: Arc<str>,
     path: &str,
@@ -1368,7 +1171,7 @@ fn summarize_outage(val: &serde_json::Value) -> Option<String> {
 /// Statuspage runs on its own infrastructure, so it stays up through the
 /// outages it reports. Only consulted once a request has already failed, which
 /// keeps the healthy path free of it.
-pub async fn fetch_outage(repo: &Repo) -> Option<String> {
+async fn fetch_outage(repo: &Repo) -> Option<String> {
     // githubstatus.com describes github.com. An enterprise host being down is
     // not something it has ever heard of.
     if repo.enterprise_host().is_some() {
@@ -1407,7 +1210,7 @@ async fn gh_output(args: &[&str], failure: &str) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-pub async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
+async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
     let slug = repo.slug();
     let output = gh_output(
         &[
@@ -1431,11 +1234,11 @@ pub async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
 
 /// The summary panel's one round trip, asked for only when the panel is
 /// opened on a pull request it has not read yet.
-pub async fn fetch_summary(repo: &Repo, number: u32) -> Result<Summary> {
+async fn fetch_summary(repo: &Repo, number: u32) -> Result<Summary> {
     let token = token(repo.host.as_deref()).await;
     let url = repo.graphql_url();
     let variables = serde_json::json!({
-        "owner": repo.owner,
+        "owner": repo.namespace,
         "repo": repo.name,
         "number": number,
     });
@@ -1456,7 +1259,7 @@ pub async fn fetch_summary(repo: &Repo, number: u32) -> Result<Summary> {
     .context("summary fetch panicked")?
 }
 
-pub async fn user_pull_requests() -> Result<PullRequestList> {
+async fn user_pull_requests() -> Result<PullRequestList> {
     let query = format!("query={USER_PULL_REQUESTS_QUERY}");
     let output = gh_output(
         &[
@@ -1476,7 +1279,7 @@ pub async fn user_pull_requests() -> Result<PullRequestList> {
 
 /// Returns the current GitHub repository when the process is inside a Git
 /// worktree.
-pub async fn current_repo_if_present() -> Result<Option<Repo>> {
+async fn current_repo_if_present() -> Result<Option<Repo>> {
     let git = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
@@ -1494,7 +1297,7 @@ pub async fn current_repo_if_present() -> Result<Option<Repo>> {
 
 /// Resolved from the local git remotes, which is the CLI's job rather than an
 /// API call.
-pub async fn current_repo() -> Result<Repo> {
+async fn current_repo() -> Result<Repo> {
     // The web URL rather than `nameWithOwner`, which names the repository but
     // not the host it lives on. Dropping the host sent an enterprise checkout
     // to github.com.
@@ -1507,9 +1310,144 @@ pub async fn current_repo() -> Result<Repo> {
     Repo::from_url(String::from_utf8_lossy(&output).trim())
 }
 
+impl GitHub {
+    pub(super) fn parse_repo(slug: &str) -> Result<Repo> {
+        Repo::parse(slug)
+    }
+
+    pub(super) fn repo_url(repo: &Repo) -> String {
+        repo.web_url()
+    }
+
+    pub(super) async fn current_repo_if_present(self) -> Result<Option<Repo>> {
+        current_repo_if_present().await
+    }
+
+    pub(super) async fn repository_pull_requests(
+        self,
+        repo: Repo,
+    ) -> Result<PullRequestList> {
+        repository_pull_requests(repo).await
+    }
+
+    pub(super) async fn user_pull_requests(self) -> Result<PullRequestList> {
+        user_pull_requests().await
+    }
+
+    pub(super) async fn fetch_summary(
+        self,
+        repo: &Repo,
+        number: u32,
+    ) -> Result<Summary> {
+        fetch_summary(repo, number).await
+    }
+
+    pub(super) async fn fetch_files(
+        self,
+        repo: &Repo,
+        number: u32,
+    ) -> Result<Vec<ChangedFile>> {
+        fetch_files(repo, number).await
+    }
+
+    pub(super) async fn fetch_meta(
+        self,
+        repo: &Repo,
+        number: u32,
+    ) -> Result<Meta> {
+        fetch_meta(repo, number).await
+    }
+
+    pub(super) async fn fetch_blob(
+        self,
+        repo: &Repo,
+        path: &str,
+        commit: &str,
+    ) -> Result<String> {
+        fetch_blob(repo, path, commit).await
+    }
+
+    pub(super) async fn add_thread(
+        self,
+        repo: &Repo,
+        thread: NewThread,
+    ) -> Result<AddedThread> {
+        add_thread(repo, thread).await
+    }
+
+    pub(super) async fn update_comment(
+        self,
+        repo: &Repo,
+        comment: Arc<str>,
+        body: String,
+    ) -> Result<()> {
+        update_comment(repo, comment, body).await
+    }
+
+    pub(super) async fn delete_comment(
+        self,
+        repo: &Repo,
+        comment: Arc<str>,
+    ) -> Result<()> {
+        delete_comment(repo, comment).await
+    }
+
+    pub(super) async fn submit_review(
+        self,
+        repo: &Repo,
+        parent: Parent,
+        event: ReviewEvent,
+        body: String,
+    ) -> Result<()> {
+        submit_review(repo, parent, event, body).await
+    }
+
+    pub(super) async fn reply(
+        self,
+        repo: &Repo,
+        number: u32,
+        in_reply_to: u64,
+        body: String,
+    ) -> Result<()> {
+        reply(repo, number, in_reply_to, body).await
+    }
+
+    pub(super) async fn set_resolved(
+        self,
+        repo: &Repo,
+        thread_id: Arc<str>,
+        is_resolved: bool,
+    ) -> Result<()> {
+        set_resolved(repo, thread_id, is_resolved).await
+    }
+
+    pub(super) async fn set_viewed(
+        self,
+        repo: &Repo,
+        pr: Arc<str>,
+        path: &str,
+        is_viewed: bool,
+    ) -> Result<()> {
+        set_viewed(repo, pr, path, is_viewed).await
+    }
+
+    pub(super) async fn fetch_outage(self, repo: &Repo) -> Option<String> {
+        fetch_outage(repo).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_is_usable_through_the_provider_boundary() {
+        let provider = crate::provider::Provider::github();
+        let repo = provider.parse_repo("owner/repo").unwrap();
+
+        assert_eq!(repo.slug(), "owner/repo");
+        assert_eq!(provider.repo_url(&repo), "https://github.com/owner/repo");
+    }
 
     /// `gh repo view` used to be asked for `nameWithOwner`, which named the
     /// repository but not the host, so an enterprise checkout resolved to
@@ -1528,7 +1466,7 @@ mod tests {
         // The public host is named the same way but is not an enterprise one,
         // so it still resolves to the public API.
         let public = Repo::from_url("https://github.com/cli/cli").unwrap();
-        assert_eq!(public.owner, "cli");
+        assert_eq!(public.namespace, "cli");
         assert_eq!(public.enterprise_host(), None);
         assert_eq!(public.rest_url("/x"), "https://api.github.com/x");
 

@@ -12,8 +12,9 @@ use prtui::app::keymap::{Keymap, Resolution};
 use prtui::app::link::Origin;
 use prtui::app::mode::Mode;
 use prtui::app::search::Query;
-use prtui::gh::{
-    self, PullRequestList, PullRequestTarget, ReviewStatus, Summary,
+use prtui::provider::{
+    self, Provider, PullRequestList, PullRequestTarget, Repo, ReviewStatus,
+    Summary,
 };
 use prtui::renderer::{Theme, ThemeMode};
 use prtui::ui::{self, SPINNER};
@@ -83,7 +84,7 @@ enum Message {
 
 enum Effect {
     Summarize(Arc<PullRequestTarget>),
-    Open(String),
+    Open(PullRequestTarget),
 }
 
 /// What the selector has to paint. The listing is read on its own task, and a
@@ -324,13 +325,7 @@ impl Selector {
             }
             Action::OpenInBrowser => {
                 let target = self.target()?;
-                return Some(Effect::Open(
-                    Origin {
-                        repo_url: target.repo.web_url(),
-                        number: target.number,
-                    }
-                    .pull_url(),
-                ));
+                return Some(Effect::Open(target));
             }
             Action::CloseOverlay => self.close_panel(),
             Action::Expand(_) => self.toggle_checks(),
@@ -450,17 +445,19 @@ impl Selector {
 /// back does not throw away the reader's filter or place in the list.
 pub struct Dashboard {
     selector: Selector,
+    provider: Provider,
     tx: mpsc::UnboundedSender<Message>,
     rx: mpsc::UnboundedReceiver<Message>,
 }
 
 impl Dashboard {
-    pub fn new(repo: Option<gh::Repo>) -> Self {
+    pub fn new(repo: Option<Repo>, provider: Provider) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        spawn_listing(repo, tx.clone());
+        spawn_listing(repo, provider, tx.clone());
 
         Self {
             selector: Selector::new(),
+            provider,
             tx,
             rx,
         }
@@ -516,9 +513,18 @@ impl Dashboard {
                 {
                     match self.selector.press(key, viewport) {
                         Some(Effect::Summarize(target)) => {
-                            spawn_summary(target, self.tx.clone());
+                            spawn_summary(
+                                target,
+                                self.provider,
+                                self.tx.clone(),
+                            );
                         }
-                        Some(Effect::Open(url)) => {
+                        Some(Effect::Open(target)) => {
+                            let url = Origin {
+                                repo_url: self.provider.repo_url(&target.repo),
+                                number: target.number,
+                            }
+                            .pull_url();
                             if let Err(err) = crate::open_url(&url) {
                                 self.selector.status = format!("error: {err}");
                             }
@@ -553,19 +559,23 @@ fn panel_len(panel: &Panel) -> usize {
 }
 
 /// What a search runs against: everything the row shows.
-fn row_text(row: &gh::PullRequestRow<'_>) -> String {
-    let repository = row.repository.map(gh::Repo::slug).unwrap_or_default();
+fn row_text(row: &provider::PullRequestRow<'_>) -> String {
+    let repository = row.repository.map(Repo::slug).unwrap_or_default();
 
     format!("{repository} #{} {}", row.number, row.title)
 }
 
 /// Reads the listing behind the selector so the wait is spent in the alternate
 /// screen rather than in front of it.
-fn spawn_listing(repo: Option<gh::Repo>, tx: mpsc::UnboundedSender<Message>) {
+fn spawn_listing(
+    repo: Option<Repo>,
+    provider: Provider,
+    tx: mpsc::UnboundedSender<Message>,
+) {
     tokio::spawn(async move {
         let listed = match repo {
-            Some(repo) => gh::repository_pull_requests(repo).await,
-            None => gh::user_pull_requests().await,
+            Some(repo) => provider.repository_pull_requests(repo).await,
+            None => provider.user_pull_requests().await,
         };
 
         let _ = tx.send(Message::Listed(listed));
@@ -574,10 +584,12 @@ fn spawn_listing(repo: Option<gh::Repo>, tx: mpsc::UnboundedSender<Message>) {
 
 fn spawn_summary(
     target: Arc<PullRequestTarget>,
+    provider: Provider,
     tx: mpsc::UnboundedSender<Message>,
 ) {
     tokio::spawn(async move {
-        let summarized = gh::fetch_summary(&target.repo, target.number).await;
+        let summarized =
+            provider.fetch_summary(&target.repo, target.number).await;
         let _ = tx.send(Message::Summarized(target, summarized));
     });
 }
@@ -704,9 +716,8 @@ fn draw_table(
         let choice = pull_requests.row(*index)?;
         let mut cells = vec![review_cell(choice.review_status, theme)];
         if pull_requests.shows_repositories() {
-            let repository = choice
-                .repository
-                .map_or_else(String::new, prtui::gh::Repo::slug);
+            let repository =
+                choice.repository.map_or_else(String::new, Repo::slug);
             cells.push(
                 Cell::from(repository).style(Style::default().fg(theme.muted)),
             );
@@ -1015,7 +1026,7 @@ fn review_cell(status: &ReviewStatus, theme: Theme) -> Cell<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prtui::gh::{LocatedPullRequest, PullRequest, Repo};
+    use prtui::provider::{LocatedPullRequest, PullRequest, Repo};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1308,28 +1319,28 @@ mod tests {
             updated_on: "2026-08-20".into(),
             comments: 3,
             checks: vec![
-                gh::Check {
+                provider::Check {
                     name: "clippy".into(),
-                    state: gh::CheckState::Failed,
+                    state: provider::CheckState::Failed,
                 },
-                gh::Check {
+                provider::Check {
                     name: "build".into(),
-                    state: gh::CheckState::Passed,
+                    state: provider::CheckState::Passed,
                 },
             ],
             reviewers: vec![
-                gh::Reviewer {
+                provider::Reviewer {
                     name: "bob".into(),
                     is_team: false,
-                    verdict: gh::Verdict::ChangesRequested,
+                    verdict: provider::Verdict::ChangesRequested,
                 },
-                gh::Reviewer {
+                provider::Reviewer {
                     name: "owner/backend".into(),
                     is_team: true,
-                    verdict: gh::Verdict::Waiting,
+                    verdict: provider::Verdict::Waiting,
                 },
             ],
-            threads: gh::Threads {
+            threads: provider::Threads {
                 unresolved: 4,
                 total: 11,
                 is_truncated: false,
@@ -1440,10 +1451,11 @@ mod tests {
         let effect = selector
             .press(KeyEvent::new(KeyCode::Char('x'), Modifiers::NONE), 10);
 
-        let Some(Effect::Open(url)) = effect else {
+        let Some(Effect::Open(target)) = effect else {
             panic!("gx did not produce a browser action");
         };
-        assert_eq!(url, "https://github.com/owner/repo/pull/1");
+        assert_eq!(target.repo.slug(), "owner/repo");
+        assert_eq!(target.number, 1);
     }
 
     #[test]

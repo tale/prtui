@@ -7,8 +7,9 @@ use prtui::app::input::InputRouter;
 use prtui::app::link::{Errand, Origin};
 use prtui::app::review::{Failure, Request, Sent};
 use prtui::layout::Layout;
+use prtui::provider::{Provider, PullRequestTarget, Repo};
 use prtui::renderer::{self, Theme, ThemeMode};
-use prtui::{gh, ui};
+use prtui::ui;
 use std::{
     future::poll_fn, pin::Pin, process::Stdio, sync::Arc, time::Duration,
 };
@@ -72,13 +73,15 @@ enum Message {
 /// Pull metadata again so a posted reply or a resolved thread shows up in the
 /// diff without a restart.
 fn spawn_meta_fetch(
-    repo: Arc<gh::Repo>,
+    provider: Provider,
+    repo: Arc<Repo>,
     number: u32,
     generation: u64,
     tx: mpsc::UnboundedSender<Message>,
 ) {
     tokio::spawn(async move {
-        let outcome = gh::fetch_meta(&repo, number)
+        let outcome = provider
+            .fetch_meta(&repo, number)
             .await
             .map(Box::new)
             .map_err(|err| err.to_string());
@@ -90,12 +93,14 @@ fn spawn_meta_fetch(
 }
 
 fn spawn_files_fetch(
-    repo: Arc<gh::Repo>,
+    provider: Provider,
+    repo: Arc<Repo>,
     number: u32,
     tx: mpsc::UnboundedSender<Message>,
 ) {
     tokio::spawn(async move {
-        let outcome = gh::fetch_files(&repo, number)
+        let outcome = provider
+            .fetch_files(&repo, number)
             .await
             .map_err(|err| err.to_string());
         let _ = tx.send(Message::App(AppMessage::Files(outcome)));
@@ -103,11 +108,15 @@ fn spawn_files_fetch(
 }
 
 /// Asked only after something has already failed, so a healthy session never
-/// pays the round trip. Silence means GitHub says it is fine and the failure
-/// belongs to this request alone.
-fn spawn_outage_probe(repo: Arc<gh::Repo>, tx: mpsc::UnboundedSender<Message>) {
+/// pays the round trip. Silence means the provider reports no outage and the
+/// failure belongs to this request alone.
+fn spawn_outage_probe(
+    provider: Provider,
+    repo: Arc<Repo>,
+    tx: mpsc::UnboundedSender<Message>,
+) {
     tokio::spawn(async move {
-        if let Some(summary) = gh::fetch_outage(&repo).await {
+        if let Some(summary) = provider.fetch_outage(&repo).await {
             let _ = tx.send(Message::App(AppMessage::Outage(summary)));
         }
     });
@@ -116,55 +125,56 @@ fn spawn_outage_probe(repo: Arc<gh::Repo>, tx: mpsc::UnboundedSender<Message>) {
 /// Writes go out on their own task so a slow round trip never freezes the
 /// review surface behind it.
 fn spawn_request(
+    provider: Provider,
     request: Request,
-    repo: Arc<gh::Repo>,
+    repo: Arc<Repo>,
     number: u32,
     tx: mpsc::UnboundedSender<Message>,
 ) {
     tokio::spawn(async move {
         let outcome = match request {
-            Request::AddThread { draft, thread } => {
-                gh::add_thread(&repo, thread)
-                    .await
-                    .map(|added| Sent::ThreadAdded {
-                        draft,
-                        review: added.review,
-                        comment: added.comment,
-                    })
-                    .map_err(|err| Failure::Draft(draft, err.to_string()))
-            }
+            Request::AddThread { draft, thread } => provider
+                .add_thread(&repo, thread)
+                .await
+                .map(|added| Sent::ThreadAdded {
+                    draft,
+                    review: added.review,
+                    comment: added.comment,
+                })
+                .map_err(|err| Failure::Draft(draft, err.to_string())),
             Request::UpdateComment {
                 draft,
                 comment,
                 body,
-            } => gh::update_comment(&repo, comment, body)
+            } => provider
+                .update_comment(&repo, comment, body)
                 .await
                 .map(|()| Sent::CommentUpdated(draft))
                 .map_err(|err| Failure::Draft(draft, err.to_string())),
-            Request::DeleteComment { draft, comment } => {
-                gh::delete_comment(&repo, comment)
-                    .await
-                    .map(|()| Sent::CommentDeleted(draft))
-                    .map_err(|err| Failure::Draft(draft, err.to_string()))
-            }
+            Request::DeleteComment { draft, comment } => provider
+                .delete_comment(&repo, comment)
+                .await
+                .map(|()| Sent::CommentDeleted(draft))
+                .map_err(|err| Failure::Draft(draft, err.to_string())),
             Request::Review {
                 parent,
                 event,
                 body,
-            } => gh::submit_review(&repo, parent, event, body)
+            } => provider
+                .submit_review(&repo, parent, event, body)
                 .await
                 .map(|()| Sent::Review)
                 .map_err(|err| Failure::Review(err.to_string())),
-            Request::Reply { in_reply_to, body } => {
-                gh::reply(&repo, number, in_reply_to, body)
-                    .await
-                    .map(|()| Sent::Reply)
-                    .map_err(|err| Failure::Other(err.to_string()))
-            }
+            Request::Reply { in_reply_to, body } => provider
+                .reply(&repo, number, in_reply_to, body)
+                .await
+                .map(|()| Sent::Reply)
+                .map_err(|err| Failure::Other(err.to_string())),
             Request::Resolve {
                 thread_id,
                 is_resolved,
-            } => gh::set_resolved(&repo, thread_id, is_resolved)
+            } => provider
+                .set_resolved(&repo, thread_id, is_resolved)
                 .await
                 .map(|()| Sent::Resolution(is_resolved))
                 .map_err(|err| Failure::Other(err.to_string())),
@@ -172,12 +182,13 @@ fn spawn_request(
                 pr,
                 path,
                 is_viewed,
-            } => gh::set_viewed(&repo, pr, &path, is_viewed)
+            } => provider
+                .set_viewed(&repo, pr, &path, is_viewed)
                 .await
                 .map(|()| Sent::Viewed { path, is_viewed })
                 .map_err(|err| Failure::Other(err.to_string())),
             Request::Blob { path, commit } => {
-                match gh::fetch_blob(&repo, &path, &commit).await {
+                match provider.fetch_blob(&repo, &path, &commit).await {
                     Ok(text) => Ok(Sent::Blob {
                         path,
                         lines: text.lines().map(str::to_string).collect(),
@@ -212,12 +223,12 @@ fn open_url(url: &str) -> Result<()> {
 
 enum Launch {
     Review {
-        repo: gh::Repo,
+        repo: Repo,
         number: u32,
     },
     /// The scope the listing is read from, which is every pull request the
     /// user is involved in when the process is outside a repository.
-    Select(Option<gh::Repo>),
+    Select(Option<Repo>),
 }
 
 #[derive(Clone, Copy)]
@@ -239,16 +250,17 @@ impl ReviewExit {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let follow_terminal = args.theme.follows_terminal();
+    let provider = Provider::github();
 
     let repo = match &args.repo {
-        Some(slug) => Some(gh::Repo::parse(slug)?),
-        None => gh::current_repo_if_present().await?,
+        Some(slug) => Some(provider.parse_repo(slug)?),
+        None => provider.current_repo_if_present().await?,
     };
 
     let launch = match (args.number, repo) {
         (Some(number), repo) => Launch::Review {
             repo: repo
-                .context("not inside a GitHub repo; pass -R OWNER/REPO")?,
+                .context("repository not detected; pass -R OWNER/REPO")?,
             number,
         },
         (None, repo) => Launch::Select(repo),
@@ -258,13 +270,14 @@ async fn main() -> Result<()> {
     // auto mode the live notification can still update it inside the session.
     let theme = Theme::for_mode(args.theme.resolve());
 
-    run(theme, follow_terminal, launch).await
+    run(theme, follow_terminal, launch, provider).await
 }
 
 async fn run(
     theme: Theme,
     follow_terminal: bool,
     launch: Launch,
+    provider: Provider,
 ) -> Result<()> {
     terminal::scope(follow_terminal, async move |terminal, events| {
         let mut theme = theme;
@@ -276,13 +289,14 @@ async fn run(
                     events,
                     &mut theme,
                     follow_terminal,
-                    gh::PullRequestTarget { repo, number },
+                    PullRequestTarget { repo, number },
+                    provider,
                     ReviewExit::Process,
                 )
                 .await?;
             }
             Launch::Select(repo) => {
-                let mut dashboard = selector::Dashboard::new(repo);
+                let mut dashboard = selector::Dashboard::new(repo, provider);
                 let mut is_preloaded = false;
 
                 loop {
@@ -307,6 +321,7 @@ async fn run(
                             &mut theme,
                             follow_terminal,
                             target,
+                            provider,
                             ReviewExit::Dashboard,
                         )
                         .await?,
@@ -328,7 +343,8 @@ async fn event_loop(
     events: &mut EventStream,
     theme: &mut Theme,
     follow_terminal: bool,
-    target: gh::PullRequestTarget,
+    target: PullRequestTarget,
+    provider: Provider,
     mut exit: ReviewExit,
 ) -> Result<ReviewExit> {
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -336,7 +352,7 @@ async fn event_loop(
     let repo = Arc::new(target.repo);
     let mut app = App::with_theme(*theme);
     app.set_origin(Origin {
-        repo_url: repo.web_url(),
+        repo_url: provider.repo_url(&repo),
         number,
     });
     app.start();
@@ -358,18 +374,25 @@ async fn event_loop(
         for effect in app.take_effects() {
             match effect {
                 Effect::FetchFiles => {
-                    spawn_files_fetch(Arc::clone(&repo), number, tx.clone());
+                    spawn_files_fetch(
+                        provider,
+                        Arc::clone(&repo),
+                        number,
+                        tx.clone(),
+                    );
                 }
                 Effect::FetchMeta { generation } => spawn_meta_fetch(
+                    provider,
                     Arc::clone(&repo),
                     number,
                     generation,
                     tx.clone(),
                 ),
                 Effect::ProbeOutage => {
-                    spawn_outage_probe(Arc::clone(&repo), tx.clone());
+                    spawn_outage_probe(provider, Arc::clone(&repo), tx.clone());
                 }
                 Effect::Request(request) => spawn_request(
+                    provider,
                     request,
                     Arc::clone(&repo),
                     number,

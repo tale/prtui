@@ -331,9 +331,11 @@ mod tests {
             "patch": PATCH,
         }]]);
 
-        crate::gh::parse_files(&serde_json::to_vec(&page).unwrap())
-            .unwrap()
-            .remove(0)
+        crate::provider::github::parse_files(
+            &serde_json::to_vec(&page).unwrap(),
+        )
+        .unwrap()
+        .remove(0)
     }
 
     /// The file as head has it, which is what a reveal reads out of.
