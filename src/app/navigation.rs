@@ -1,0 +1,548 @@
+//! Cursor, pane, file, and conversation navigation.
+
+use super::action::Motion;
+use super::{App, Card, Draft, Mode, Pane};
+use crate::layout::tree::Row as TreeNode;
+use crate::layout::{Layout, rows};
+use crate::vim::step;
+
+impl App {
+    pub(super) fn toggle_pane(&mut self) {
+        if self.mode != Mode::Normal {
+            return;
+        }
+
+        if self.pane == Pane::Files {
+            self.focus_diff();
+        } else {
+            self.focus_files();
+        }
+    }
+
+    pub(super) fn activate(&mut self, layout: &Layout) {
+        if self.pane == Pane::Files {
+            // A heading has nothing to open, so the same key folds it.
+            if self.tree_directory.is_some() {
+                self.toggle_directory(layout);
+            } else {
+                self.focus_diff();
+            }
+            return;
+        }
+
+        let Some(card) = self.focused_card.as_ref() else {
+            return;
+        };
+        if self.expanded_card.as_ref() == Some(card) {
+            self.expanded_card = None;
+        } else {
+            self.expanded_card = Some(card.clone());
+        }
+        self.thread_scroll = 0;
+    }
+
+    pub(super) fn focus_files(&mut self) {
+        if self.mode != Mode::Normal {
+            return;
+        }
+
+        self.is_files_visible = true;
+        self.pane = Pane::Files;
+    }
+
+    pub(super) fn focus_diff(&mut self) {
+        if self.mode == Mode::Normal {
+            self.pane = Pane::Diff;
+        }
+    }
+
+    pub(super) fn select_file(&mut self, index: usize) {
+        self.set_selected_file(index, true);
+    }
+
+    /// `]` and `[` walk files only, skipping the headings `j` stops on, and in
+    /// the order the tree lists them rather than the order GitHub sent them.
+    pub(super) fn step_file(
+        &mut self,
+        direction: isize,
+        count: usize,
+        layout: &Layout,
+    ) {
+        let file_count = layout.files.file_count();
+        let Some(position) = layout
+            .files
+            .files()
+            .position(|index| index == self.selected_file)
+        else {
+            return;
+        };
+
+        let steps =
+            direction.saturating_mul(count.min(file_count).cast_signed());
+        let target = position
+            .saturating_add_signed(steps)
+            .min(file_count.saturating_sub(1));
+        if let Some(index) = layout.files.files().nth(target) {
+            self.select_file(index);
+        }
+    }
+
+    pub(super) fn set_selected_file(
+        &mut self,
+        index: usize,
+        leave_transient_mode: bool,
+    ) {
+        if self.files.is_empty() {
+            return;
+        }
+
+        self.selected_file = index.min(self.files.len() - 1);
+        self.tree_directory = None;
+        self.cursor = 0;
+        self.set_focus(None);
+        self.diff_scroll = 0;
+        self.selection = None;
+        if leave_transient_mode {
+            self.mode = Mode::Normal;
+        }
+    }
+
+    pub(super) fn travel(&mut self, motion: Motion, layout: &Layout) {
+        if self.mode.is_overlay() {
+            self.overlay_scroll = step(
+                motion,
+                self.overlay_scroll,
+                layout.overlay_limit() + 1,
+                layout.overlay_viewport(),
+            );
+            return;
+        }
+
+        if self.pane == Pane::Files {
+            self.travel_files(motion, layout);
+            return;
+        }
+
+        let viewport = layout.diff_viewport();
+
+        // An open conversation captures the cursor while it still has something
+        // to scroll. Once it runs out the motion carries on into the diff, so
+        // the pane reads as one list and a short conversation never swallows a
+        // keypress. Visual mode overrides all of it, since a selection is being
+        // extended over code. A line number is not a scroll offset either, so
+        // it addresses the file however the cursor is parked.
+        if self.mode != Mode::Visual
+            && self.expanded_card.is_some()
+            && !matches!(motion, Motion::Line(_))
+        {
+            let limit = layout.rows.body_limit();
+            let target = step(motion, self.thread_scroll, limit + 1, viewport);
+
+            // `gg` and `G` mean the ends of the conversation, not the ends of
+            // the file, so they stay inside it even when nothing moves.
+            if target != self.thread_scroll
+                || matches!(motion, Motion::Top | Motion::Bottom)
+            {
+                self.thread_scroll = target;
+                return;
+            }
+        }
+
+        if self.mode == Mode::Visual {
+            self.cursor = match motion {
+                Motion::Line(number) => self.row_of_line(number),
+                _ => step(motion, self.cursor, self.diff_len(), viewport),
+            };
+        } else {
+            match motion {
+                Motion::Down(n) => self.move_diff_stops(1, n, layout),
+                Motion::Up(n) => self.move_diff_stops(-1, n, layout),
+                Motion::HalfPageDown => {
+                    self.move_diff_stops(1, viewport / 2, layout);
+                }
+                Motion::HalfPageUp => {
+                    self.move_diff_stops(-1, viewport / 2, layout);
+                }
+                Motion::Top => {
+                    self.cursor = 0;
+                    self.set_focus(None);
+                }
+                Motion::Bottom => {
+                    self.cursor = self.diff_len().saturating_sub(1);
+                    self.set_focus(None);
+                }
+                Motion::Line(number) => {
+                    self.cursor = self.row_of_line(number);
+                    self.set_focus(None);
+                }
+            }
+        }
+
+        if let Some(selection) = &mut self.selection {
+            selection.head = self.cursor;
+        }
+
+        self.follow_cursor(layout);
+    }
+
+    /// The cursor walks headings as well as files, since a heading has to be
+    /// reachable to be unfolded.
+    fn travel_files(&mut self, motion: Motion, layout: &Layout) {
+        let tree = &layout.files;
+        if tree.is_empty() {
+            return;
+        }
+
+        let current = self.tree_cursor(layout);
+        let target = step(motion, current, tree.len(), layout.files_viewport());
+
+        match tree.get(target) {
+            Some(TreeNode::File { index, .. }) => {
+                self.tree_directory = None;
+                self.set_selected_file(*index, false);
+            }
+            Some(TreeNode::Directory { path, .. }) => {
+                self.tree_directory = Some(path.clone());
+            }
+            None => {}
+        }
+    }
+
+    /// The diff row a line number names, counted the way the gutter shows it.
+    ///
+    /// The new side is what a reviewer reads off the screen, so it is tried
+    /// first; a line only the old side has still resolves, and a number the
+    /// patch never shows lands on the nearest row below it.
+    fn row_of_line(&self, number: usize) -> usize {
+        let Some(file) = self.current_file() else {
+            return 0;
+        };
+        let wanted = u32::try_from(number).unwrap_or(u32::MAX);
+        let last = file.lines.len().saturating_sub(1);
+
+        let found = file
+            .lines
+            .iter()
+            .position(|line| line.new_line == Some(wanted))
+            .or_else(|| {
+                file.lines
+                    .iter()
+                    .position(|line| line.old_line == Some(wanted))
+            })
+            .or_else(|| {
+                file.lines.iter().position(|line| {
+                    line.new_line.is_some_and(|shown| shown > wanted)
+                })
+            });
+
+        found.unwrap_or(last)
+    }
+
+    /// Which row the tree cursor is on: the heading it rests on, or the row of
+    /// the open file.
+    fn tree_cursor(&self, layout: &Layout) -> usize {
+        self.tree_directory
+            .as_deref()
+            .map_or_else(
+                || layout.files.row_of(self.selected_file),
+                |path| layout.files.row_of_directory(path),
+            )
+            .unwrap_or(0)
+    }
+
+    /// Folds the heading the cursor is on, or the one the open file sits under.
+    /// Unfolding leaves the cursor where it is, so the contents appear below it.
+    pub(super) fn toggle_directory(&mut self, layout: &Layout) {
+        let mut path = self.tree_directory.clone();
+
+        if path.is_none() {
+            let row = self.tree_cursor(layout);
+            // Folding away the file the cursor is on would strand it, so the
+            // cursor moves up to the heading swallowing it.
+            path = layout.files.enclosing_directory(row).cloned();
+            self.tree_directory.clone_from(&path);
+        }
+
+        let Some(path) = path else {
+            return;
+        };
+
+        if !self.collapsed.remove(&path) {
+            self.collapsed.insert(path);
+        }
+    }
+
+    fn move_diff_stops(
+        &mut self,
+        direction: isize,
+        count: usize,
+        layout: &Layout,
+    ) {
+        let max_steps = layout.rows.len();
+
+        for _ in 0..count.min(max_steps) {
+            if !self.move_diff_stop(direction, layout) {
+                break;
+            }
+        }
+    }
+
+    fn move_diff_stop(&mut self, direction: isize, layout: &Layout) -> bool {
+        let stops = layout.rows.stops_at(self.cursor);
+
+        if direction > 0 {
+            if let Some(focused) = self.focused_card.as_ref() {
+                if let Some(position) =
+                    stops.iter().position(|stop| stop.card == *focused)
+                    && let Some(next) = stops.get(position + 1)
+                {
+                    self.set_focus(Some(next.card.clone()));
+                    return true;
+                }
+                if self.cursor + 1 < self.diff_len() {
+                    self.cursor += 1;
+                    self.set_focus(None);
+                    return true;
+                }
+                return false;
+            }
+
+            if let Some(first) = stops.first() {
+                self.set_focus(Some(first.card.clone()));
+                return true;
+            }
+            if self.cursor + 1 < self.diff_len() {
+                self.cursor += 1;
+                return true;
+            }
+            return false;
+        }
+
+        if let Some(focused) = self.focused_card.as_ref() {
+            if let Some(position) =
+                stops.iter().position(|stop| stop.card == *focused)
+            {
+                if position > 0 {
+                    self.set_focus(Some(stops[position - 1].card.clone()));
+                } else {
+                    self.set_focus(None);
+                }
+                return true;
+            }
+            self.set_focus(None);
+            return true;
+        }
+
+        if self.cursor == 0 {
+            return false;
+        }
+        self.cursor -= 1;
+        let previous = layout.rows.stops_at(self.cursor);
+        self.set_focus(previous.last().map(|stop| stop.card.clone()));
+        true
+    }
+
+    pub(super) fn jump_comment(
+        &mut self,
+        direction: isize,
+        count: usize,
+        layout: &Layout,
+    ) {
+        for _ in 0..count {
+            if !self.jump_comment_once(direction, layout) {
+                return;
+            }
+        }
+    }
+
+    /// Returns whether there was a conversation left to land on.
+    fn jump_comment_once(&mut self, direction: isize, layout: &Layout) -> bool {
+        if let Some((row, card)) = self.comment_stop_here(direction) {
+            self.land_on(row, Some(card), layout);
+            return true;
+        }
+
+        let Some((index, row, card)) = self.comment_stop_elsewhere(direction)
+        else {
+            self.status = "no more comments".into();
+            return false;
+        };
+
+        self.set_selected_file(index, false);
+        self.land_on(row, Some(card), layout);
+        true
+    }
+
+    /// Puts the cursor on a diff row, optionally focusing one of its cards,
+    /// and scrolls the row into view.
+    pub(super) fn land_on(
+        &mut self,
+        row: usize,
+        card: Option<Card>,
+        layout: &Layout,
+    ) {
+        self.pane = Pane::Diff;
+        self.selection = None;
+        self.cursor = row;
+        self.set_focus(card);
+        self.follow_cursor(layout);
+        self.status.clear();
+    }
+
+    /// The subset of cards that `}` and `{` stop at. Jumps cross files, so
+    /// this anchors a file the layout has not laid out.
+    ///
+    /// A settled conversation is not what a review is being read for, so
+    /// resolved and outdated threads are skipped. Every draft is a stop: an
+    /// unsent remark is the one thing still waiting on the reader.
+    fn comment_stops(&self, index: usize) -> Vec<(usize, Card)> {
+        let Some(file) = self.files.get(index) else {
+            return Vec::new();
+        };
+        let threads = self
+            .threads_by_path
+            .get(&file.path)
+            .map_or(&[][..], Vec::as_slice);
+        let drafts = self.drafts_for(&file.path);
+
+        rows::stops_for(file, threads, &drafts)
+            .into_iter()
+            .filter(|stop| {
+                stop.card.thread().is_none_or(|id| {
+                    threads.iter().any(|thread| {
+                        thread.id == *id
+                            && !thread.is_resolved
+                            && !thread.is_outdated
+                    })
+                })
+            })
+            .map(|stop| (stop.source, stop.card))
+            .collect()
+    }
+
+    /// The drafts filed against one file, in the order the row list indexes
+    /// them.
+    pub(super) fn drafts_for(&self, path: &str) -> Vec<&Draft> {
+        self.drafts
+            .iter()
+            .filter(|draft| *draft.path == *path)
+            .collect()
+    }
+
+    /// A focused card that is not itself a stop (resolved or outdated) falls
+    /// back to the cursor row, so the jump still moves in the right direction.
+    fn comment_stop_here(&self, direction: isize) -> Option<(usize, Card)> {
+        let stops = self.comment_stops(self.selected_file);
+        let current = self.focused_card.as_ref().and_then(|focused| {
+            stops.iter().position(|(_, card)| card == focused)
+        });
+
+        let target = match (current, direction > 0) {
+            (Some(index), true) => (index + 1 < stops.len()).then(|| index + 1),
+            (Some(index), false) => index.checked_sub(1),
+            (None, true) => {
+                stops.iter().position(|(row, _)| *row >= self.cursor)
+            }
+            (None, false) => {
+                stops.iter().rposition(|(row, _)| *row <= self.cursor)
+            }
+        }?;
+
+        Some(stops[target].clone())
+    }
+
+    fn comment_stop_elsewhere(
+        &self,
+        direction: isize,
+    ) -> Option<(usize, usize, Card)> {
+        let visible = self.filtered_file_indices();
+        let position = visible.iter().position(|&i| i == self.selected_file)?;
+
+        if direction > 0 {
+            self.comment_stop_in(visible[position + 1..].iter().copied(), true)
+        } else {
+            self.comment_stop_in(
+                visible[..position].iter().rev().copied(),
+                false,
+            )
+        }
+    }
+
+    fn comment_stop_in(
+        &self,
+        mut files: impl Iterator<Item = usize>,
+        forwards: bool,
+    ) -> Option<(usize, usize, Card)> {
+        files.find_map(|index| {
+            let stops = self.comment_stops(index);
+            let stop = if forwards {
+                stops.first()
+            } else {
+                stops.last()
+            }?;
+
+            Some((index, stop.0, stop.1.clone()))
+        })
+    }
+
+    pub(super) fn set_focus(&mut self, focused: Option<Card>) {
+        if self.focused_card != focused {
+            self.expanded_card = None;
+            self.thread_scroll = 0;
+        }
+        self.focused_card = focused;
+    }
+
+    /// The focused thread, when the focus is on one rather than on a draft.
+    pub fn focused_thread(&self) -> Option<&str> {
+        self.focused_card.as_ref()?.thread().map(|id| &**id)
+    }
+
+    /// The focused draft, by the index the drafts are held at.
+    pub fn focused_draft(&self) -> Option<usize> {
+        self.draft_by_id(self.focused_card.as_ref()?.draft()?)
+    }
+
+    /// The row the cursor sits on: a focused thread's summary when one is
+    /// focused, otherwise the source line itself.
+    fn cursor_row(&self, layout: &Layout) -> usize {
+        let focused = self
+            .focused_card
+            .as_ref()
+            .and_then(|card| layout.rows.card_row(card));
+
+        focused.unwrap_or_else(|| layout.rows.code_row(self.cursor))
+    }
+
+    /// Keeps the cursor inside the viewport with a small scroll-off margin.
+    ///
+    /// The row list is the one built before this keystroke, which is also the
+    /// one the renderer will slice, so a motion and the scroll that follows it
+    /// agree even though the list is a frame behind.
+    fn follow_cursor(&mut self, layout: &Layout) {
+        self.scroll_into_view(layout, layout.diff_viewport());
+    }
+
+    pub(super) fn scroll_into_view(
+        &mut self,
+        layout: &Layout,
+        viewport: usize,
+    ) {
+        if viewport == 0 {
+            return;
+        }
+
+        let row = self.cursor_row(layout);
+        let margin = 3.min(viewport / 4);
+
+        if row < self.diff_scroll + margin {
+            self.diff_scroll = row.saturating_sub(margin);
+            return;
+        }
+
+        let bottom = self.diff_scroll + viewport.saturating_sub(margin + 1);
+        if row > bottom {
+            self.diff_scroll = (row + margin + 1).saturating_sub(viewport);
+        }
+    }
+}
