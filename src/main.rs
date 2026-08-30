@@ -7,6 +7,7 @@ use prtui::app::input::InputRouter;
 use prtui::app::link::{Errand, Origin};
 use prtui::app::review::{Failure, Request, Sent};
 use prtui::layout::Layout;
+use prtui::provider::github::GitHub;
 use prtui::provider::{Provider, PullRequestTarget, Repo};
 use prtui::renderer::{self, Theme, ThemeMode};
 use prtui::ui;
@@ -72,8 +73,8 @@ enum Message {
 
 /// Pull metadata again so a posted reply or a resolved thread shows up in the
 /// diff without a restart.
-fn spawn_meta_fetch(
-    provider: Provider,
+fn spawn_meta_fetch<P: Provider>(
+    provider: P,
     repo: Arc<Repo>,
     number: u32,
     generation: u64,
@@ -92,8 +93,8 @@ fn spawn_meta_fetch(
     });
 }
 
-fn spawn_files_fetch(
-    provider: Provider,
+fn spawn_files_fetch<P: Provider>(
+    provider: P,
     repo: Arc<Repo>,
     number: u32,
     tx: mpsc::UnboundedSender<Message>,
@@ -110,8 +111,8 @@ fn spawn_files_fetch(
 /// Asked only after something has already failed, so a healthy session never
 /// pays the round trip. Silence means the provider reports no outage and the
 /// failure belongs to this request alone.
-fn spawn_outage_probe(
-    provider: Provider,
+fn spawn_outage_probe<P: Provider>(
+    provider: P,
     repo: Arc<Repo>,
     tx: mpsc::UnboundedSender<Message>,
 ) {
@@ -124,8 +125,8 @@ fn spawn_outage_probe(
 
 /// Writes go out on their own task so a slow round trip never freezes the
 /// review surface behind it.
-fn spawn_request(
-    provider: Provider,
+fn spawn_request<P: Provider>(
+    provider: P,
     request: Request,
     repo: Arc<Repo>,
     number: u32,
@@ -250,7 +251,7 @@ impl ReviewExit {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let follow_terminal = args.theme.follows_terminal();
-    let provider = Provider::github();
+    let provider = GitHub;
 
     let repo = match &args.repo {
         Some(slug) => Some(provider.parse_repo(slug)?),
@@ -273,11 +274,11 @@ async fn main() -> Result<()> {
     run(theme, follow_terminal, launch, provider).await
 }
 
-async fn run(
+async fn run<P: Provider>(
     theme: Theme,
     follow_terminal: bool,
     launch: Launch,
-    provider: Provider,
+    provider: P,
 ) -> Result<()> {
     terminal::scope(follow_terminal, async move |terminal, events| {
         let mut theme = theme;
@@ -338,13 +339,13 @@ async fn run(
     .await
 }
 
-async fn event_loop(
+async fn event_loop<P: Provider>(
     terminal: &mut terminal::AppTerminal,
     events: &mut EventStream,
     theme: &mut Theme,
     follow_terminal: bool,
     target: PullRequestTarget,
-    provider: Provider,
+    provider: P,
     mut exit: ReviewExit,
 ) -> Result<ReviewExit> {
     let (tx, mut rx) = mpsc::unbounded_channel();

@@ -443,15 +443,15 @@ impl Selector {
 
 /// One dashboard session. It owns its listing so opening a review and coming
 /// back does not throw away the reader's filter or place in the list.
-pub struct Dashboard {
+pub struct Dashboard<P: Provider> {
     selector: Selector,
-    provider: Provider,
+    provider: P,
     tx: mpsc::UnboundedSender<Message>,
     rx: mpsc::UnboundedReceiver<Message>,
 }
 
-impl Dashboard {
-    pub fn new(repo: Option<Repo>, provider: Provider) -> Self {
+impl<P: Provider> Dashboard<P> {
+    pub fn new(repo: Option<Repo>, provider: P) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         spawn_listing(repo, provider, tx.clone());
 
@@ -567,9 +567,9 @@ fn row_text(row: &provider::PullRequestRow<'_>) -> String {
 
 /// Reads the listing behind the selector so the wait is spent in the alternate
 /// screen rather than in front of it.
-fn spawn_listing(
+fn spawn_listing<P: Provider>(
     repo: Option<Repo>,
-    provider: Provider,
+    provider: P,
     tx: mpsc::UnboundedSender<Message>,
 ) {
     tokio::spawn(async move {
@@ -582,9 +582,9 @@ fn spawn_listing(
     });
 }
 
-fn spawn_summary(
+fn spawn_summary<P: Provider>(
     target: Arc<PullRequestTarget>,
-    provider: Provider,
+    provider: P,
     tx: mpsc::UnboundedSender<Message>,
 ) {
     tokio::spawn(async move {
