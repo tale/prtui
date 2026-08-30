@@ -1618,7 +1618,7 @@ pub async fn set_resolved(
 pub async fn set_viewed(
     repo: &Repo,
     pr: Arc<str>,
-    path: Arc<str>,
+    path: &str,
     is_viewed: bool,
 ) -> Result<()> {
     let (query, what) = if is_viewed {
@@ -1630,7 +1630,7 @@ pub async fn set_viewed(
     mutate(
         repo,
         query,
-        serde_json::json!({ "id": &*pr, "path": &*path }),
+        serde_json::json!({ "id": &*pr, "path": path }),
         what,
     )
     .await

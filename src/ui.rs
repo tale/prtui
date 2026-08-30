@@ -395,7 +395,7 @@ fn matched_spans(
         return vec![Span::styled(text, base)];
     }
 
-    let mut spans = Vec::new();
+    let mut spans = Vec::with_capacity(hits.len() * 2 + 1);
     let mut at = 0;
 
     for range in hits {
@@ -1840,7 +1840,7 @@ fn draw_hints(
         return;
     };
 
-    let mut hint_spans = Vec::new();
+    let mut hint_spans = Vec::with_capacity((keys.len() + reserved.len()) * 2);
     let mut used = 0;
     for &(key, label) in keys {
         let pair_width = hint_width((key, label));

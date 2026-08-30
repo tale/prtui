@@ -2280,7 +2280,7 @@ impl App {
             .map(|stop| (stop.source, stop.card.clone()))
             .collect();
 
-        let mut matches = Vec::new();
+        let mut matches = Vec::with_capacity(file.lines.len() + hits.len());
         for (row, line) in file.lines.iter().enumerate() {
             if query.is_match(&line.text) {
                 matches.push(search::Match::Line(row));

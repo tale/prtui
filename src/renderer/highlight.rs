@@ -205,7 +205,7 @@ fn join_across_whitespace(
     text: &str,
     ranges: Vec<Range<usize>>,
 ) -> Vec<Range<usize>> {
-    let mut joined: Vec<Range<usize>> = Vec::new();
+    let mut joined: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
 
     for range in ranges {
         let is_gap_blank = joined.last().is_some_and(|last| {

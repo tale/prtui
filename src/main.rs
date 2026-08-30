@@ -9,7 +9,9 @@ use prtui::app::review::{Failure, Request, Sent};
 use prtui::layout::Layout;
 use prtui::renderer::{self, Theme, ThemeMode};
 use prtui::{gh, ui};
-use std::{future::poll_fn, pin::Pin, process::Stdio, time::Duration};
+use std::{
+    future::poll_fn, pin::Pin, process::Stdio, sync::Arc, time::Duration,
+};
 use termina::escape::csi::{
     Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode,
 };
@@ -70,7 +72,7 @@ enum Message {
 /// Pull metadata again so a posted reply or a resolved thread shows up in the
 /// diff without a restart.
 fn spawn_meta_fetch(
-    repo: gh::Repo,
+    repo: Arc<gh::Repo>,
     number: u32,
     generation: u64,
     tx: mpsc::UnboundedSender<Message>,
@@ -88,7 +90,7 @@ fn spawn_meta_fetch(
 }
 
 fn spawn_files_fetch(
-    repo: gh::Repo,
+    repo: Arc<gh::Repo>,
     number: u32,
     tx: mpsc::UnboundedSender<Message>,
 ) {
@@ -103,7 +105,7 @@ fn spawn_files_fetch(
 /// Asked only after something has already failed, so a healthy session never
 /// pays the round trip. Silence means GitHub says it is fine and the failure
 /// belongs to this request alone.
-fn spawn_outage_probe(repo: gh::Repo, tx: mpsc::UnboundedSender<Message>) {
+fn spawn_outage_probe(repo: Arc<gh::Repo>, tx: mpsc::UnboundedSender<Message>) {
     tokio::spawn(async move {
         if let Some(summary) = gh::fetch_outage(&repo).await {
             let _ = tx.send(Message::App(AppMessage::Outage(summary)));
@@ -115,7 +117,7 @@ fn spawn_outage_probe(repo: gh::Repo, tx: mpsc::UnboundedSender<Message>) {
 /// review surface behind it.
 fn spawn_request(
     request: Request,
-    repo: gh::Repo,
+    repo: Arc<gh::Repo>,
     number: u32,
     tx: mpsc::UnboundedSender<Message>,
 ) {
@@ -170,7 +172,7 @@ fn spawn_request(
                 pr,
                 path,
                 is_viewed,
-            } => gh::set_viewed(&repo, pr, path.clone(), is_viewed)
+            } => gh::set_viewed(&repo, pr, &path, is_viewed)
                 .await
                 .map(|()| Sent::Viewed { path, is_viewed })
                 .map_err(|err| Failure::Other(err.to_string())),
@@ -244,17 +246,6 @@ async fn main() -> Result<()> {
     run(theme, follow_terminal, launch).await
 }
 
-/// What the event loop needs to talk back to GitHub after the first paint.
-#[derive(Clone)]
-struct Session {
-    repo: gh::Repo,
-    number: u32,
-    /// Where the same pull request is read on the web, which is what a
-    /// permalink and the browser are handed.
-    origin: Origin,
-    follow_terminal: bool,
-}
-
 async fn run(
     theme: Theme,
     follow_terminal: bool,
@@ -262,16 +253,10 @@ async fn run(
 ) -> Result<()> {
     terminal::scope(follow_terminal, async move |terminal, events| {
         let mut theme = theme;
-        let session = match launch {
-            Launch::Review { repo, number } => Session {
-                origin: Origin {
-                    repo_url: repo.web_url(),
-                    number,
-                },
-                repo,
-                number,
-                follow_terminal,
-            },
+        let target = match launch {
+            Launch::Review { repo, number } => {
+                gh::PullRequestTarget { repo, number }
+            }
             Launch::Select(repo) => {
                 let Some(target) = selector::select(
                     terminal,
@@ -285,15 +270,7 @@ async fn run(
                     return Ok(());
                 };
 
-                Session {
-                    origin: Origin {
-                        repo_url: target.repo.web_url(),
-                        number: target.number,
-                    },
-                    repo: target.repo,
-                    number: target.number,
-                    follow_terminal,
-                }
+                target
             }
         };
 
@@ -302,7 +279,16 @@ async fn run(
         // Syntax assets deserialize while the initial requests are in flight.
         std::thread::spawn(move || renderer::preload(theme.mode));
 
-        event_loop(terminal, events, &mut rx, tx, theme, &session).await
+        event_loop(
+            terminal,
+            events,
+            &mut rx,
+            tx,
+            theme,
+            follow_terminal,
+            target,
+        )
+        .await
     })
     .await
 }
@@ -313,11 +299,16 @@ async fn event_loop(
     rx: &mut mpsc::UnboundedReceiver<Message>,
     tx: mpsc::UnboundedSender<Message>,
     theme: Theme,
-    session: &Session,
+    follow_terminal: bool,
+    target: gh::PullRequestTarget,
 ) -> Result<()> {
-    let follow_terminal = session.follow_terminal;
+    let number = target.number;
+    let repo = Arc::new(target.repo);
     let mut app = App::with_theme(theme);
-    app.set_origin(session.origin.clone());
+    app.set_origin(Origin {
+        repo_url: repo.web_url(),
+        number,
+    });
     app.start();
     let mut input = InputRouter::default();
     let highlighter = highlighter::Highlighter::new({
@@ -336,24 +327,22 @@ async fn event_loop(
     while !app.should_quit {
         for effect in app.take_effects() {
             match effect {
-                Effect::FetchFiles => spawn_files_fetch(
-                    session.repo.clone(),
-                    session.number,
-                    tx.clone(),
-                ),
+                Effect::FetchFiles => {
+                    spawn_files_fetch(Arc::clone(&repo), number, tx.clone());
+                }
                 Effect::FetchMeta { generation } => spawn_meta_fetch(
-                    session.repo.clone(),
-                    session.number,
+                    Arc::clone(&repo),
+                    number,
                     generation,
                     tx.clone(),
                 ),
                 Effect::ProbeOutage => {
-                    spawn_outage_probe(session.repo.clone(), tx.clone());
+                    spawn_outage_probe(Arc::clone(&repo), tx.clone());
                 }
                 Effect::Request(request) => spawn_request(
                     request,
-                    session.repo.clone(),
-                    session.number,
+                    Arc::clone(&repo),
+                    number,
                     tx.clone(),
                 ),
                 Effect::HighlightAll => highlighter.all(

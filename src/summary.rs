@@ -174,7 +174,7 @@ fn reviewer_tally(summary: &Summary, theme: Theme) -> Vec<Span<'static>> {
         return vec![dim("nobody has looked yet", theme)];
     }
 
-    let mut parts = Vec::new();
+    let mut parts = Vec::with_capacity(7);
     for verdict in [
         Verdict::ChangesRequested,
         Verdict::Waiting,
@@ -204,7 +204,7 @@ fn check_tally(summary: &Summary, theme: Theme) -> Vec<Span<'static>> {
         return vec![dim("no checks", theme)];
     }
 
-    let mut parts = Vec::new();
+    let mut parts = Vec::with_capacity(7);
     for (state, label) in [
         (CheckState::Failed, "failed"),
         (CheckState::Running, "running"),
