@@ -168,8 +168,18 @@ query($owner:String!, $repo:String!, $number:Int!) {
       author { login }
       baseRefName headRefName
       comments { totalCount }
-      reviewRequests { totalCount }
-      latestReviews(first:100) { nodes { state } }
+      reviewRequests(first:100) {
+        nodes {
+          requestedReviewer {
+            __typename
+            ... on User { login }
+            ... on Bot { login }
+            ... on Mannequin { login }
+            ... on Team { combinedSlug }
+          }
+        }
+      }
+      latestReviews(first:100) { nodes { state author { login } } }
       reviewThreads(first:100) {
         totalCount
         nodes { isResolved }
@@ -179,11 +189,10 @@ query($owner:String!, $repo:String!, $number:Int!) {
           commit {
             statusCheckRollup {
               contexts(first:100) {
-                totalCount
                 nodes {
                   __typename
-                  ... on CheckRun { status conclusion }
-                  ... on StatusContext { state }
+                  ... on CheckRun { name status conclusion }
+                  ... on StatusContext { context state }
                 }
               }
             }
@@ -383,35 +392,57 @@ pub struct Summary {
     /// The day it last moved, which is the date half of the API timestamp.
     pub updated_on: String,
     pub comments: u32,
-    pub checks: Checks,
-    pub reviews: Reviews,
+    /// Most blocking first: what is failing, then what is still running.
+    pub checks: Vec<Check>,
+    /// Most blocking first as well: changes requested, then who is still
+    /// being waited on.
+    pub reviewers: Vec<Reviewer>,
     pub threads: Threads,
 }
 
-/// The head commit's checks, counted rather than listed.
-#[derive(Default)]
-pub struct Checks {
-    pub passed: u32,
-    pub failed: u32,
-    pub running: u32,
+/// One check on the head commit, whichever app reported it.
+pub struct Check {
+    pub name: String,
+    pub state: CheckState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CheckState {
+    /// Ordered by how much it wants a reader's attention, which is the order
+    /// the panel lists them in.
+    Failed,
+    Running,
+    Passed,
     /// Skipped and neutral runs, which decide nothing either way.
-    pub skipped: u32,
+    Skipped,
 }
 
-impl Checks {
-    pub const fn total(&self) -> u32 {
-        self.passed + self.failed + self.running + self.skipped
+/// One reviewer and where they stand: someone who has answered, or someone
+/// the pull request is still waiting on.
+pub struct Reviewer {
+    /// A login, or `owner/team` for a team that was asked as a team.
+    pub name: String,
+    pub is_team: bool,
+    pub verdict: Verdict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Verdict {
+    ChangesRequested,
+    Waiting,
+    Commented,
+    Approved,
+}
+
+impl Verdict {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ChangesRequested => "changes requested",
+            Self::Waiting => "waiting",
+            Self::Commented => "commented",
+            Self::Approved => "approved",
+        }
     }
-}
-
-/// Where the reviewers stand, one count per verdict.
-#[derive(Default)]
-pub struct Reviews {
-    pub approved: u32,
-    pub changes_requested: u32,
-    pub commented: u32,
-    /// Reviewers who have been asked and have not answered yet.
-    pub requested: u32,
 }
 
 pub struct Threads {
@@ -606,7 +637,7 @@ struct WireSummary {
     base_ref_name: String,
     head_ref_name: String,
     comments: WireTotal,
-    review_requests: WireTotal,
+    review_requests: WireNodes<WireReviewRequest>,
     latest_reviews: Option<WireNodes<WireLatestReview>>,
     review_threads: WireSummaryThreads,
     commits: WireNodes<WireSummaryCommit>,
@@ -615,6 +646,35 @@ struct WireSummary {
 #[derive(Deserialize)]
 struct WireLatestReview {
     state: String,
+    author: Option<WireLogin>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireReviewRequest {
+    requested_reviewer: Option<WireRequestedReviewer>,
+}
+
+/// A review can be asked of a person, of a bot, or of a whole team, and the
+/// three name themselves differently.
+#[derive(Deserialize)]
+#[serde(tag = "__typename")]
+enum WireRequestedReviewer {
+    User {
+        login: String,
+    },
+    Bot {
+        login: String,
+    },
+    Mannequin {
+        login: String,
+    },
+    Team {
+        #[serde(rename = "combinedSlug")]
+        combined_slug: String,
+    },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Deserialize)]
@@ -647,66 +707,118 @@ struct WireRollup {
 }
 
 /// A rollup mixes the checks an app reports with the statuses a commit carries,
-/// and the two spell the same verdict differently.
+/// and the two spell both their name and their verdict differently.
 #[derive(Deserialize)]
 #[serde(tag = "__typename")]
 enum WireContext {
     CheckRun {
+        name: String,
         status: String,
         conclusion: Option<String>,
     },
     StatusContext {
+        context: String,
         state: String,
     },
     #[serde(other)]
     Other,
 }
 
-fn count_checks(contexts: Vec<WireContext>) -> Checks {
-    let mut checks = Checks::default();
+/// Failing checks first, then whatever is still running: a reader deciding
+/// whether to review reads the top of the list and stops.
+fn read_checks(contexts: Vec<WireContext>) -> Vec<Check> {
+    let mut checks: Vec<Check> = contexts
+        .into_iter()
+        .filter_map(|context| match context {
+            WireContext::CheckRun {
+                name,
+                status,
+                conclusion,
+            } => {
+                let state = if status == "COMPLETED" {
+                    match conclusion.as_deref() {
+                        Some("SUCCESS") => CheckState::Passed,
+                        Some("SKIPPED" | "NEUTRAL") => CheckState::Skipped,
+                        _ => CheckState::Failed,
+                    }
+                } else {
+                    CheckState::Running
+                };
 
-    for context in contexts {
-        let counter = match context {
-            WireContext::CheckRun { status, .. } if status != "COMPLETED" => {
-                &mut checks.running
+                Some(Check { name, state })
             }
-            WireContext::CheckRun { conclusion, .. } => {
-                match conclusion.as_deref() {
-                    Some("SUCCESS") => &mut checks.passed,
-                    Some("SKIPPED" | "NEUTRAL") => &mut checks.skipped,
-                    _ => &mut checks.failed,
-                }
-            }
-            WireContext::StatusContext { state } => match state.as_str() {
-                "SUCCESS" => &mut checks.passed,
-                "PENDING" | "EXPECTED" => &mut checks.running,
-                _ => &mut checks.failed,
-            },
-            WireContext::Other => continue,
-        };
+            WireContext::StatusContext { context, state } => {
+                let state = match state.as_str() {
+                    "SUCCESS" => CheckState::Passed,
+                    "PENDING" | "EXPECTED" => CheckState::Running,
+                    _ => CheckState::Failed,
+                };
 
-        *counter += 1;
-    }
+                Some(Check {
+                    name: context,
+                    state,
+                })
+            }
+            WireContext::Other => None,
+        })
+        .collect();
+
+    checks.sort_by(|left, right| {
+        left.state
+            .cmp(&right.state)
+            .then(left.name.cmp(&right.name))
+    });
 
     checks
 }
 
-fn count_reviews(reviews: Vec<WireLatestReview>, requested: u32) -> Reviews {
-    let mut counts = Reviews {
-        requested,
-        ..Reviews::default()
-    };
+/// Everyone who has answered, then everyone still being waited on. A team is
+/// listed as the team: nobody on it has been picked yet.
+fn read_reviewers(
+    reviews: Vec<WireLatestReview>,
+    requests: Vec<WireReviewRequest>,
+) -> Vec<Reviewer> {
+    let answered = reviews.into_iter().filter_map(|review| {
+        let verdict = match review.state.as_str() {
+            "APPROVED" => Verdict::Approved,
+            "CHANGES_REQUESTED" => Verdict::ChangesRequested,
+            "COMMENTED" => Verdict::Commented,
+            _ => return None,
+        };
 
-    for review in reviews {
-        match review.state.as_str() {
-            "APPROVED" => counts.approved += 1,
-            "CHANGES_REQUESTED" => counts.changes_requested += 1,
-            "COMMENTED" => counts.commented += 1,
-            _ => {}
-        }
-    }
+        Some(Reviewer {
+            name: review.author?.login,
+            is_team: false,
+            verdict,
+        })
+    });
 
-    counts
+    let waiting = requests.into_iter().filter_map(|request| {
+        let (name, is_team) = match request.requested_reviewer? {
+            WireRequestedReviewer::User { login }
+            | WireRequestedReviewer::Bot { login }
+            | WireRequestedReviewer::Mannequin { login } => (login, false),
+            WireRequestedReviewer::Team { combined_slug } => {
+                (combined_slug, true)
+            }
+            WireRequestedReviewer::Other => return None,
+        };
+
+        Some(Reviewer {
+            name,
+            is_team,
+            verdict: Verdict::Waiting,
+        })
+    });
+
+    let mut reviewers: Vec<Reviewer> = answered.chain(waiting).collect();
+    reviewers.sort_by(|left, right| {
+        left.verdict
+            .cmp(&right.verdict)
+            .then(left.name.cmp(&right.name))
+    });
+
+    reviewers
 }
 
 fn parse_summary(val: &serde_json::Value) -> Result<Summary> {
@@ -737,7 +849,7 @@ fn parse_summary(val: &serde_json::Value) -> Result<Summary> {
         .into_iter()
         .next()
         .and_then(|node| node.commit.status_check_rollup)
-        .map(|rollup| count_checks(rollup.contexts.nodes))
+        .map(|rollup| read_checks(rollup.contexts.nodes))
         .unwrap_or_default();
 
     Ok(Summary {
@@ -750,11 +862,11 @@ fn parse_summary(val: &serde_json::Value) -> Result<Summary> {
         updated_on: pr.updated_at.get(..10).unwrap_or_default().to_owned(),
         comments: pr.comments.total_count,
         checks,
-        reviews: count_reviews(
+        reviewers: read_reviewers(
             pr.latest_reviews
                 .map(|reviews| reviews.nodes)
                 .unwrap_or_default(),
-            pr.review_requests.total_count,
+            pr.review_requests.nodes,
         ),
         threads,
     })
@@ -2052,12 +2164,18 @@ mod tests {
                 "author":{"login":"tale"},
                 "baseRefName":"main","headRefName":"rows",
                 "comments":{"totalCount":2},
-                "reviewRequests":{"totalCount":3},
+                "reviewRequests":{"nodes":[
+                    {"requestedReviewer":{"__typename":"User",
+                     "login":"dana"}},
+                    {"requestedReviewer":{"__typename":"Team",
+                     "combinedSlug":"owner/backend"}},
+                    {"requestedReviewer":null}
+                ]},
                 "latestReviews":{"nodes":[
-                    {"state":"APPROVED"},
-                    {"state":"APPROVED"},
-                    {"state":"CHANGES_REQUESTED"},
-                    {"state":"DISMISSED"}
+                    {"state":"APPROVED","author":{"login":"alice"}},
+                    {"state":"APPROVED","author":{"login":"erin"}},
+                    {"state":"CHANGES_REQUESTED","author":{"login":"bob"}},
+                    {"state":"DISMISSED","author":{"login":"carol"}}
                 ]},
                 "reviewThreads":{"totalCount":3,"nodes":[
                     {"isResolved":false},
@@ -2065,16 +2183,17 @@ mod tests {
                     {"isResolved":false}
                 ]},
                 "commits":{"nodes":[{"commit":{"statusCheckRollup":{
-                    "contexts":{"totalCount":5,"nodes":[
-                        {"__typename":"CheckRun","status":"COMPLETED",
-                         "conclusion":"SUCCESS"},
-                        {"__typename":"CheckRun","status":"IN_PROGRESS",
-                         "conclusion":null},
-                        {"__typename":"CheckRun","status":"COMPLETED",
-                         "conclusion":"FAILURE"},
-                        {"__typename":"CheckRun","status":"COMPLETED",
-                         "conclusion":"SKIPPED"},
-                        {"__typename":"StatusContext","state":"PENDING"}
+                    "contexts":{"nodes":[
+                        {"__typename":"CheckRun","name":"build",
+                         "status":"COMPLETED","conclusion":"SUCCESS"},
+                        {"__typename":"CheckRun","name":"deploy",
+                         "status":"IN_PROGRESS","conclusion":null},
+                        {"__typename":"CheckRun","name":"clippy",
+                         "status":"COMPLETED","conclusion":"FAILURE"},
+                        {"__typename":"CheckRun","name":"docs",
+                         "status":"COMPLETED","conclusion":"SKIPPED"},
+                        {"__typename":"StatusContext","context":"vercel",
+                         "state":"PENDING"}
                     ]}
                 }}}]}
             }}}}"#,
@@ -2085,13 +2204,43 @@ mod tests {
 
         assert_eq!(summary.author, "tale");
         assert_eq!(summary.updated_on, "2026-08-28");
-        assert_eq!(summary.checks.passed, 1);
-        assert_eq!(summary.checks.failed, 1);
-        assert_eq!(summary.checks.running, 2);
-        assert_eq!(summary.checks.skipped, 1);
-        assert_eq!(summary.reviews.approved, 2);
-        assert_eq!(summary.reviews.changes_requested, 1);
-        assert_eq!(summary.reviews.requested, 3);
+
+        // Failing first, then running, then the rest by name.
+        let checks: Vec<(&str, CheckState)> = summary
+            .checks
+            .iter()
+            .map(|check| (check.name.as_str(), check.state))
+            .collect();
+        assert_eq!(
+            checks,
+            [
+                ("clippy", CheckState::Failed),
+                ("deploy", CheckState::Running),
+                ("vercel", CheckState::Running),
+                ("build", CheckState::Passed),
+                ("docs", CheckState::Skipped),
+            ]
+        );
+
+        // A dismissed review is nobody's verdict, and a team is named as the
+        // team it was asked of.
+        let reviewers: Vec<(&str, Verdict, bool)> = summary
+            .reviewers
+            .iter()
+            .map(|reviewer| {
+                (reviewer.name.as_str(), reviewer.verdict, reviewer.is_team)
+            })
+            .collect();
+        assert_eq!(
+            reviewers,
+            [
+                ("bob", Verdict::ChangesRequested, false),
+                ("dana", Verdict::Waiting, false),
+                ("owner/backend", Verdict::Waiting, true),
+                ("alice", Verdict::Approved, false),
+                ("erin", Verdict::Approved, false),
+            ]
+        );
         assert_eq!(summary.threads.unresolved, 2);
         assert_eq!(summary.threads.total, 3);
         assert!(!summary.threads.is_truncated);
@@ -2107,7 +2256,7 @@ mod tests {
                 "author":null,
                 "baseRefName":"main","headRefName":"rows",
                 "comments":{"totalCount":0},
-                "reviewRequests":{"totalCount":0},
+                "reviewRequests":{"nodes":[]},
                 "latestReviews":{"nodes":[]},
                 "reviewThreads":{"totalCount":0,"nodes":[]},
                 "commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}
@@ -2117,7 +2266,8 @@ mod tests {
 
         let summary = parse_summary(&val).unwrap();
 
-        assert_eq!(summary.checks.total(), 0);
+        assert!(summary.checks.is_empty());
+        assert!(summary.reviewers.is_empty());
         assert_eq!(summary.author, "");
     }
 
@@ -2136,7 +2286,7 @@ mod tests {
                 "author":{{"login":"tale"}},
                 "baseRefName":"main","headRefName":"rows",
                 "comments":{{"totalCount":0}},
-                "reviewRequests":{{"totalCount":0}},
+                "reviewRequests":{{"nodes":[]}},
                 "latestReviews":{{"nodes":[]}},
                 "reviewThreads":{{"totalCount":140,"nodes":[{nodes}]}},
                 "commits":{{"nodes":[]}}

@@ -90,8 +90,10 @@ below is a named command, so anything bound to a key is also reachable as
 rest of the app: `j`/`k`, `<C-d>`/`<C-u>`, `gg`/`G`, and a count like `12G`.
 `/` narrows the list as you type, over titles and repositories: `<CR>` keeps
 the narrowing, `esc` puts back the list and the row you opened it on. `K`
-summarizes the pull request under the cursor — its checks, where its reviewers stand, and how many
-conversations are still unresolved — and `<CR>` opens it.
+summarizes the pull request under the cursor: who it is waiting on, named one
+per row, its unresolved conversations, and a tally of its checks that `za` or
+`<CR>` unfolds into the list. `<CR>` anywhere else in the panel opens the pull
+request.
 
 **The pull request** — `o` opens the description and the discussion over the
 panes, and `?` opens the key reference. Both scroll with the same keys the rest

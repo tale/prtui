@@ -51,6 +51,7 @@ const KEYS: &[(&str, &str, &str)] = &[
     ("no", "<CR>", "activate"),
     ("n", "q", "quit"),
     ("n", "<Esc>", "escape"),
+    ("o", "za", "expand-all"),
     ("o", "K", "close-panel"),
     ("o", "q", "close-panel"),
     ("o", "<Esc>", "close-panel"),
@@ -65,8 +66,13 @@ const KEYS: &[(&str, &str, &str)] = &[
 /// and the blank row under it.
 const HEADER_ROWS: u16 = 2;
 
-/// Widest the summary panel gets before it stops using the whole terminal.
-const PANEL_WIDTH: u16 = 62;
+/// Widest the summary panel gets before it stops using the whole terminal,
+/// matching the panels the review surface opens.
+const PANEL_WIDTH: u16 = 80;
+
+/// Rows of margin above and below the panel, so it reads as a panel rather
+/// than as a second pane.
+const PANEL_MARGIN: u16 = 2;
 
 enum Message {
     Listed(Result<PullRequestList>),
@@ -103,7 +109,12 @@ impl Listing {
 struct Panel {
     target: PullRequestTarget,
     state: PanelState,
-    scroll: usize,
+    /// The line the panel is reading, which is what the motions move and the
+    /// frame scrolls to follow.
+    cursor: Cursor,
+    /// A busy repository reports dozens of checks, so they open on the tally
+    /// and the list is asked for with `za`.
+    is_checks_open: bool,
 }
 
 enum PanelState {
@@ -274,9 +285,8 @@ impl Selector {
             Action::Move(motion) => {
                 match self.panel.as_mut() {
                     Some(panel) => {
-                        let mut cursor = Cursor::at(panel.scroll);
-                        cursor.apply(*motion, panel_len(panel), viewport);
-                        panel.scroll = cursor.index;
+                        let len = panel_len(panel);
+                        panel.cursor.apply(*motion, len, viewport);
                     }
                     None => {
                         self.cursor.apply(
@@ -287,6 +297,11 @@ impl Selector {
                     }
                 }
                 self.status.clear();
+            }
+            // Inside the panel `<CR>` opens what the cursor is on, which is
+            // the fold on its own row and the pull request everywhere else.
+            Action::Activate if self.is_on_fold() => {
+                self.toggle_checks();
             }
             Action::Activate => {
                 self.chosen = self.target();
@@ -304,6 +319,7 @@ impl Selector {
             }
             Action::OpenOverview => return self.open_panel(),
             Action::CloseOverlay => self.close_panel(),
+            Action::Expand(_) => self.toggle_checks(),
             // The line starts empty each time: the list it narrows is right
             // there, so there is nothing to recall.
             Action::StartFind => {
@@ -363,11 +379,37 @@ impl Selector {
         self.panel = Some(Panel {
             target,
             state: PanelState::Loading,
-            scroll: 0,
+            cursor: Cursor::default(),
+            is_checks_open: false,
         });
         self.set_mode(Mode::Overview);
 
         Some(asked)
+    }
+
+    /// Whether the panel's cursor is parked on the checks fold.
+    fn is_on_fold(&self) -> bool {
+        let Some(panel) = self.panel.as_ref() else {
+            return false;
+        };
+        let PanelState::Ready(summary) = &panel.state else {
+            return false;
+        };
+
+        panel.cursor.index == summary::checks_row(summary)
+    }
+
+    fn toggle_checks(&mut self) {
+        let Some(panel) = self.panel.as_mut() else {
+            return;
+        };
+
+        panel.is_checks_open = !panel.is_checks_open;
+
+        // The fold keeps the row it opened from under the cursor; only what
+        // is below it moves.
+        let len = panel_len(panel);
+        panel.cursor.jump(panel.cursor.index.min(len), len, len);
     }
 
     fn close_panel(&mut self) {
@@ -376,9 +418,11 @@ impl Selector {
     }
 }
 
-const fn panel_len(panel: &Panel) -> usize {
+fn panel_len(panel: &Panel) -> usize {
     match &panel.state {
-        PanelState::Ready(_) => summary::LINE_COUNT,
+        PanelState::Ready(summary) => {
+            summary::line_count(summary, panel.is_checks_open)
+        }
         _ => 1,
     }
 }
@@ -644,7 +688,7 @@ fn draw_table(
 /// and the row it belongs to is the one the cursor is already parked on.
 fn panel_area(area: Rect) -> Rect {
     let width = PANEL_WIDTH.min(area.width);
-    let height = (summary::LINE_COUNT as u16 + 4).min(area.height);
+    let height = area.height.saturating_sub(PANEL_MARGIN * 2).max(3);
 
     Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
@@ -688,7 +732,9 @@ fn draw_panel(
     frame.render_widget(block, outer);
 
     let lines = match &panel.state {
-        PanelState::Ready(summary) => summary::build(summary, theme),
+        PanelState::Ready(summary) => {
+            summary::build(summary, panel.is_checks_open, theme)
+        }
         PanelState::Loading => vec![spinner_line(
             selector.loading_frame,
             "loading the summary",
@@ -699,9 +745,39 @@ fn draw_panel(
             Style::default().fg(theme.danger),
         )],
     };
-    let visible: Vec<Line> = lines.into_iter().skip(panel.scroll).collect();
+    // The cursor is a painted row rather than a terminal cursor, the way the
+    // tree and the diff carry theirs.
+    let width = inner.width as usize;
+    let visible: Vec<Line> = lines
+        .into_iter()
+        .enumerate()
+        .skip(panel.cursor.scroll)
+        .take(inner.height as usize)
+        .map(|(row, line)| {
+            if row == panel.cursor.index {
+                cursor_line(line, width, theme)
+            } else {
+                line
+            }
+        })
+        .collect();
 
     frame.render_widget(Paragraph::new(visible), inner);
+}
+
+/// One row under the panel's cursor, padded so the highlight covers the width
+/// rather than stopping at the text.
+fn cursor_line(
+    mut line: Line<'static>,
+    width: usize,
+    theme: Theme,
+) -> Line<'static> {
+    let pad = width.saturating_sub(line.width());
+    if pad > 0 {
+        line.spans.push(Span::raw(" ".repeat(pad)));
+    }
+
+    line.style(Style::default().bg(theme.cursor))
 }
 
 /// The same bar the review surface wears, so the mode, the `/` line and the
@@ -757,8 +833,13 @@ fn draw_status(
     }
 }
 
-/// Where the cursor is in the list, counted against what the filter left.
+/// Where the cursor is: in the panel while one is open, otherwise in the list,
+/// counted against what the filter left.
 fn position(selector: &Selector) -> String {
+    if let Some(panel) = selector.panel.as_ref() {
+        return format!("  {}/{}", panel.cursor.index + 1, panel_len(panel));
+    }
+
     if selector.visible.is_empty() {
         return String::new();
     }
@@ -779,7 +860,16 @@ fn key_hints(selector: &Selector) -> &'static [(&'static str, &'static str)] {
     }
 
     if selector.panel.is_some() {
-        return &[("j/k", "scroll"), ("↵", "open"), ("esc", "close")];
+        if selector.is_on_fold() {
+            return &[("j/k", "move"), ("↵", "checks"), ("esc", "close")];
+        }
+
+        return &[
+            ("j/k", "move"),
+            ("za", "checks"),
+            ("↵", "open"),
+            ("esc", "close"),
+        ];
     }
 
     if !selector.filter.is_empty() {
@@ -1127,48 +1217,107 @@ mod tests {
         assert_eq!(selector.mode, Mode::Normal);
     }
 
-    #[test]
-    fn the_panel_shows_the_summary_once_it_lands() {
-        let mut selector = ready(many());
+    fn summary() -> Summary {
+        Summary {
+            author: "tale".into(),
+            base_ref: "main".into(),
+            head_ref: "rows".into(),
+            additions: 120,
+            deletions: 34,
+            changed_files: 7,
+            updated_on: "2026-08-20".into(),
+            comments: 3,
+            checks: vec![
+                gh::Check {
+                    name: "clippy".into(),
+                    state: gh::CheckState::Failed,
+                },
+                gh::Check {
+                    name: "build".into(),
+                    state: gh::CheckState::Passed,
+                },
+            ],
+            reviewers: vec![
+                gh::Reviewer {
+                    name: "bob".into(),
+                    is_team: false,
+                    verdict: gh::Verdict::ChangesRequested,
+                },
+                gh::Reviewer {
+                    name: "owner/backend".into(),
+                    is_team: true,
+                    verdict: gh::Verdict::Waiting,
+                },
+            ],
+            threads: gh::Threads {
+                unresolved: 4,
+                total: 11,
+                is_truncated: false,
+            },
+        }
+    }
+
+    fn summarized(selector: &mut Selector) {
         let target = selector.apply(&Action::OpenOverview, 10).unwrap();
-        selector.receive(
-            Message::Summarized(
-                target,
-                Ok(Summary {
-                    author: "tale".into(),
-                    base_ref: "main".into(),
-                    head_ref: "rows".into(),
-                    additions: 120,
-                    deletions: 34,
-                    changed_files: 7,
-                    updated_on: "2026-08-20".into(),
-                    comments: 3,
-                    checks: gh::Checks {
-                        passed: 12,
-                        failed: 1,
-                        running: 0,
-                        skipped: 0,
-                    },
-                    reviews: gh::Reviews {
-                        approved: 1,
-                        changes_requested: 0,
-                        commented: 0,
-                        requested: 2,
-                    },
-                    threads: gh::Threads {
-                        unresolved: 4,
-                        total: 11,
-                        is_truncated: false,
-                    },
-                }),
-            ),
-            10,
-        );
+        selector.receive(Message::Summarized(target, Ok(summary())), 10);
+    }
+
+    #[test]
+    fn the_panel_names_the_reviewers_and_folds_the_checks() {
+        let mut selector = ready(many());
+        summarized(&mut selector);
         let rendered = render_selector(&selector);
 
         assert!(rendered.contains("owner/repo #1"));
-        assert!(rendered.contains("12 passed"));
-        assert!(rendered.contains("4 unresolved of 11"));
+        assert!(rendered.contains("@bob"));
+        assert!(rendered.contains("@owner/backend (team)"));
+        assert!(rendered.contains("1 failed · 1 passed"));
+        assert!(!rendered.contains("clippy"));
+    }
+
+    /// The fold is what the cursor is on, so `<CR>` opens it there and the
+    /// hints say so.
+    #[test]
+    fn the_checks_open_from_the_row_the_cursor_is_on() {
+        let mut selector = ready(many());
+        summarized(&mut selector);
+
+        press(&mut selector, "7G");
+        assert!(selector.is_on_fold());
+
+        press_key(&mut selector, KeyCode::Enter, Modifiers::NONE);
+        assert!(!selector.is_done);
+
+        let rendered = render_selector(&selector);
+
+        assert!(rendered.contains("clippy"));
+        assert!(rendered.contains("build"));
+    }
+
+    /// `za` works wherever the cursor is parked.
+    #[test]
+    fn za_folds_the_checks_from_anywhere_in_the_panel() {
+        let mut selector = ready(many());
+        summarized(&mut selector);
+
+        press(&mut selector, "za");
+        assert!(render_selector(&selector).contains("clippy"));
+
+        press(&mut selector, "za");
+        assert!(!render_selector(&selector).contains("clippy"));
+    }
+
+    /// The panel's cursor is a row of its own, which the frame follows.
+    #[test]
+    fn the_panel_carries_a_cursor_rather_than_a_scroll() {
+        let mut selector = ready(many());
+        summarized(&mut selector);
+
+        press(&mut selector, "3j");
+        let panel = selector.panel.as_ref().unwrap();
+
+        assert_eq!(panel.cursor.index, 3);
+        assert_eq!(panel.cursor.scroll, 0);
     }
 
     /// The cursor cannot wander off the pull request the panel is pinned to,
