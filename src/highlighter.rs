@@ -46,39 +46,58 @@ impl Generations {
 }
 
 #[derive(Default)]
+struct Queue {
+    tasks: VecDeque<Task>,
+    is_closed: bool,
+}
+
+#[derive(Default)]
 struct Pending {
-    tasks: Mutex<VecDeque<Task>>,
+    queue: Mutex<Queue>,
     ready: Condvar,
 }
 
 impl Pending {
     fn replace(&self, tasks: impl IntoIterator<Item = Task>) {
-        let mut pending = lock(&self.tasks);
-        pending.clear();
-        pending.extend(tasks);
+        let mut pending = lock(&self.queue);
+        pending.tasks.clear();
+        pending.tasks.extend(tasks);
         drop(pending);
         self.ready.notify_one();
     }
 
     fn prioritize(&self, task: Task) {
-        let mut pending = lock(&self.tasks);
-        pending.retain(|held| held.file.path != task.file.path);
-        pending.push_front(task);
+        let mut pending = lock(&self.queue);
+        pending
+            .tasks
+            .retain(|held| held.file.path != task.file.path);
+        pending.tasks.push_front(task);
         drop(pending);
         self.ready.notify_one();
     }
 
-    fn take(&self) -> Task {
-        let mut pending = lock(&self.tasks);
+    fn take(&self) -> Option<Task> {
+        let mut pending = lock(&self.queue);
         loop {
-            if let Some(task) = pending.pop_front() {
-                return task;
+            if let Some(task) = pending.tasks.pop_front() {
+                return Some(task);
+            }
+            if pending.is_closed {
+                return None;
             }
             pending = self
                 .ready
                 .wait(pending)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+    }
+
+    fn close(&self) {
+        let mut pending = lock(&self.queue);
+        pending.tasks.clear();
+        pending.is_closed = true;
+        drop(pending);
+        self.ready.notify_one();
     }
 }
 
@@ -101,8 +120,7 @@ impl Highlighter {
         let worker_pending = pending.clone();
 
         std::thread::spawn(move || {
-            loop {
-                let task = worker_pending.take();
+            while let Some(task) = worker_pending.take() {
                 if !lock(&worker_generations)
                     .is_current(&task.file.path, task.generation)
                 {
@@ -175,6 +193,12 @@ impl Highlighter {
 
     pub fn accepts(&self, output: &Output) -> bool {
         lock(&self.generations).is_current(&output.path, output.generation)
+    }
+}
+
+impl Drop for Highlighter {
+    fn drop(&mut self) {
+        self.pending.close();
     }
 }
 

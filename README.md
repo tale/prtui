@@ -92,8 +92,9 @@ rest of the app: `j`/`k`, `<C-d>`/`<C-u>`, `gg`/`G`, and a count like `12G`.
 the narrowing, `esc` puts back the list and the row you opened it on. `K`
 summarizes the pull request under the cursor: who it is waiting on, named one
 per row, its unresolved conversations, and a tally of its checks that `za` or
-`<CR>` unfolds into the list. `<CR>` anywhere else in the panel opens the pull
-request.
+`<CR>` unfolds into the list. The panel names the pull request and keeps its
+available actions on its lower edge. `<CR>` anywhere else opens the review.
+`gx` opens the selected pull request in a browser from either surface.
 
 **The pull request** — `o` opens the description and the discussion over the
 panes, and `?` opens the key reference. Both scroll with the same keys the rest
@@ -131,8 +132,10 @@ it works over SSH. `gx` opens the pull request in a browser.
 **Submitting** — `s` opens the form. `<Tab>` steps the verdict between
 comment, approve, and request changes; `<CR>` ships every draft as one review.
 
-`q` or `:q` quits. `<Esc>` backs out of whatever you are inside — a
-conversation, then a live query — but never out of the app.
+When a review was opened from the dashboard, `q` or `:q` returns to the same
+row and a second `q` quits. When a review was opened directly by number, `q`
+quits immediately. `<C-c>` always quits. `<Esc>` backs out of whatever you are
+inside — a conversation, then a live query — but never out of the app.
 
 ## Contributing
 

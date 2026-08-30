@@ -9,6 +9,7 @@ use crate::terminal;
 use anyhow::{Context, Result};
 use prtui::app::action::Action;
 use prtui::app::keymap::{Keymap, Resolution};
+use prtui::app::link::Origin;
 use prtui::app::mode::Mode;
 use prtui::app::search::Query;
 use prtui::gh::{
@@ -25,7 +26,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row,
     Table, TableState,
 };
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use termina::escape::csi::{
     Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode,
 };
@@ -48,6 +49,7 @@ const KEYS: &[(&str, &str, &str)] = &[
     ("no", "G", "goto-last-line"),
     ("n", "/", "find"),
     ("n", "K", "overview"),
+    ("no", "gx", "open"),
     ("no", "<CR>", "activate"),
     ("n", "q", "quit"),
     ("n", "<Esc>", "escape"),
@@ -76,7 +78,12 @@ const PANEL_MARGIN: u16 = 2;
 
 enum Message {
     Listed(Result<PullRequestList>),
-    Summarized(PullRequestTarget, Result<Summary>),
+    Summarized(Arc<PullRequestTarget>, Result<Summary>),
+}
+
+enum Effect {
+    Summarize(Arc<PullRequestTarget>),
+    Open(String),
 }
 
 /// What the selector has to paint. The listing is read on its own task, and a
@@ -107,7 +114,10 @@ impl Listing {
 /// The summary panel, pinned to the pull request it was opened on the way an
 /// editor's hover is pinned to the symbol under the cursor.
 struct Panel {
-    target: PullRequestTarget,
+    target: Arc<PullRequestTarget>,
+    /// The table is covered while the panel is open, so keep the identity the
+    /// reader selected in the panel itself.
+    title: String,
     state: PanelState,
     /// The line the panel is reading, which is what the motions move and the
     /// frame scrolls to follow.
@@ -261,11 +271,7 @@ impl Selector {
 
     /// One keystroke, resolved against the keymap and applied. Answers with the
     /// pull request to summarize, which the caller fetches.
-    fn press(
-        &mut self,
-        key: KeyEvent,
-        viewport: usize,
-    ) -> Option<PullRequestTarget> {
+    fn press(&mut self, key: KeyEvent, viewport: usize) -> Option<Effect> {
         match self.keymap.resolve(self.mode, key) {
             Resolution::Action(action) => self.apply(&action, viewport),
             Resolution::Pending => None,
@@ -276,11 +282,7 @@ impl Selector {
         }
     }
 
-    fn apply(
-        &mut self,
-        action: &Action,
-        viewport: usize,
-    ) -> Option<PullRequestTarget> {
+    fn apply(&mut self, action: &Action, viewport: usize) -> Option<Effect> {
         match action {
             Action::Move(motion) => {
                 match self.panel.as_mut() {
@@ -310,14 +312,26 @@ impl Selector {
             Action::Quit => self.is_done = true,
             Action::Escape => {
                 if self.filter.is_empty() {
-                    self.is_done = true;
+                    self.status = "press q to quit".into();
                     return None;
                 }
 
                 self.filter.clear();
                 self.sync_visible(viewport);
             }
-            Action::OpenOverview => return self.open_panel(),
+            Action::OpenOverview => {
+                return self.open_panel().map(Effect::Summarize);
+            }
+            Action::OpenInBrowser => {
+                let target = self.target()?;
+                return Some(Effect::Open(
+                    Origin {
+                        repo_url: target.repo.web_url(),
+                        number: target.number,
+                    }
+                    .pull_url(),
+                ));
+            }
             Action::CloseOverlay => self.close_panel(),
             Action::Expand(_) => self.toggle_checks(),
             // The line starts empty each time: the list it narrows is right
@@ -373,18 +387,22 @@ impl Selector {
         self.keymap.clear();
     }
 
-    fn open_panel(&mut self) -> Option<PullRequestTarget> {
-        let (target, asked) = (self.target()?, self.target()?);
+    fn open_panel(&mut self) -> Option<Arc<PullRequestTarget>> {
+        let row = *self.visible.get(self.cursor.index)?;
+        let pull_requests = self.listing.rows()?;
+        let title = pull_requests.row(row)?.title.to_owned();
+        let target = Arc::new(pull_requests.target(row)?);
 
         self.panel = Some(Panel {
-            target,
+            target: Arc::clone(&target),
+            title,
             state: PanelState::Loading,
             cursor: Cursor::default(),
             is_checks_open: false,
         });
         self.set_mode(Mode::Overview);
 
-        Some(asked)
+        Some(target)
     }
 
     /// Whether the panel's cursor is parked on the checks fold.
@@ -416,6 +434,113 @@ impl Selector {
         self.panel = None;
         self.set_mode(Mode::Normal);
     }
+
+    /// A review returns to the list exactly where it left it. Only transient
+    /// panel state is discarded; the listing, filter and cursor remain useful.
+    fn resume(&mut self) {
+        self.is_done = false;
+        self.chosen = None;
+        self.panel = None;
+        self.status.clear();
+        self.set_mode(Mode::Normal);
+    }
+}
+
+/// One dashboard session. It owns its listing so opening a review and coming
+/// back does not throw away the reader's filter or place in the list.
+pub struct Dashboard {
+    selector: Selector,
+    tx: mpsc::UnboundedSender<Message>,
+    rx: mpsc::UnboundedReceiver<Message>,
+}
+
+impl Dashboard {
+    pub fn new(repo: Option<gh::Repo>) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        spawn_listing(repo, tx.clone());
+
+        Self {
+            selector: Selector::new(),
+            tx,
+            rx,
+        }
+    }
+
+    pub async fn select(
+        &mut self,
+        terminal: &mut terminal::AppTerminal,
+        events: &mut EventStream,
+        theme: &mut Theme,
+        follow_terminal: bool,
+    ) -> Result<Option<PullRequestTarget>> {
+        self.selector.resume();
+        let mut animation = tokio::time::interval(Duration::from_millis(90));
+        animation
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        while !self.selector.is_done {
+            terminal::render(terminal, |frame| {
+                draw(frame, &self.selector, *theme);
+            })
+            .context("drawing pull request selector")?;
+
+            let viewport =
+                viewport(terminal.get_frame().area(), &self.selector);
+
+            let event = tokio::select! {
+                _ = animation.tick(), if self.selector.is_waiting() => {
+                    self.selector.loading_frame =
+                        self.selector.loading_frame.wrapping_add(1);
+                    continue;
+                }
+                message = self.rx.recv() => {
+                    let Some(message) = message else {
+                        anyhow::bail!("selector message channel closed");
+                    };
+                    self.selector.receive(message, viewport);
+                    continue;
+                }
+                event = crate::next_event(events) => {
+                    event
+                        .context("terminal event stream closed")?
+                        .context("reading terminal event")?
+                }
+            };
+
+            match event {
+                Event::Key(key)
+                    if matches!(
+                        key.kind,
+                        KeyEventKind::Press | KeyEventKind::Repeat
+                    ) =>
+                {
+                    match self.selector.press(key, viewport) {
+                        Some(Effect::Summarize(target)) => {
+                            spawn_summary(target, self.tx.clone());
+                        }
+                        Some(Effect::Open(url)) => {
+                            if let Err(err) = crate::open_url(&url) {
+                                self.selector.status = format!("error: {err}");
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                Event::Csi(Csi::Mode(CsiMode::ReportTheme(terminal_mode)))
+                    if follow_terminal =>
+                {
+                    let mode = match terminal_mode {
+                        TerminalThemeMode::Dark => ThemeMode::Dark,
+                        TerminalThemeMode::Light => ThemeMode::Light,
+                    };
+                    *theme = Theme::for_mode(mode);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(self.selector.chosen.take())
+    }
 }
 
 fn panel_len(panel: &Panel) -> usize {
@@ -434,77 +559,6 @@ fn row_text(row: &gh::PullRequestRow<'_>) -> String {
     format!("{repository} #{} {}", row.number, row.title)
 }
 
-/// Paints the selector immediately and fills it in when the listing lands, so
-/// the wait happens inside the alternate screen rather than in front of it.
-pub async fn select(
-    terminal: &mut terminal::AppTerminal,
-    events: &mut EventStream,
-    repo: Option<gh::Repo>,
-    theme: &mut Theme,
-    follow_terminal: bool,
-) -> Result<Option<PullRequestTarget>> {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    spawn_listing(repo, tx.clone());
-
-    let mut selector = Selector::new();
-    let mut animation = tokio::time::interval(Duration::from_millis(90));
-    animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    while !selector.is_done {
-        terminal::render(terminal, |frame| {
-            draw(frame, &selector, *theme);
-        })
-        .context("drawing pull request selector")?;
-
-        let viewport = viewport(terminal.get_frame().area(), &selector);
-
-        let event = tokio::select! {
-            _ = animation.tick(), if selector.is_waiting() => {
-                selector.loading_frame =
-                    selector.loading_frame.wrapping_add(1);
-                continue;
-            }
-            message = rx.recv() => {
-                let Some(message) = message else {
-                    anyhow::bail!("selector message channel closed");
-                };
-                selector.receive(message, viewport);
-                continue;
-            }
-            event = crate::next_event(events) => {
-                event
-                    .context("terminal event stream closed")?
-                    .context("reading terminal event")?
-            }
-        };
-
-        match event {
-            Event::Key(key)
-                if matches!(
-                    key.kind,
-                    KeyEventKind::Press | KeyEventKind::Repeat
-                ) =>
-            {
-                if let Some(target) = selector.press(key, viewport) {
-                    spawn_summary(target, tx.clone());
-                }
-            }
-            Event::Csi(Csi::Mode(CsiMode::ReportTheme(terminal_mode)))
-                if follow_terminal =>
-            {
-                let mode = match terminal_mode {
-                    TerminalThemeMode::Dark => ThemeMode::Dark,
-                    TerminalThemeMode::Light => ThemeMode::Light,
-                };
-                *theme = Theme::for_mode(mode);
-            }
-            _ => {}
-        }
-    }
-
-    Ok(selector.chosen)
-}
-
 /// Reads the listing behind the selector so the wait is spent in the alternate
 /// screen rather than in front of it.
 fn spawn_listing(repo: Option<gh::Repo>, tx: mpsc::UnboundedSender<Message>) {
@@ -519,7 +573,7 @@ fn spawn_listing(repo: Option<gh::Repo>, tx: mpsc::UnboundedSender<Message>) {
 }
 
 fn spawn_summary(
-    target: PullRequestTarget,
+    target: Arc<PullRequestTarget>,
     tx: mpsc::UnboundedSender<Message>,
 ) {
     tokio::spawn(async move {
@@ -709,16 +763,30 @@ fn draw_panel(
     };
 
     let outer = panel_area(area);
+    let actions = if selector.is_on_fold() {
+        " ↵ checks · gx browser · esc close "
+    } else {
+        " ↵ review · gx browser · za checks · esc close "
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.accent))
         .title(Line::styled(
-            format!(" {} #{} ", panel.target.repo.slug(), panel.target.number),
+            format!(
+                " {} #{} · {} ",
+                panel.target.repo.slug(),
+                panel.target.number,
+                panel.title
+            ),
             Style::default()
                 .fg(theme.heading)
                 .add_modifier(Modifier::BOLD),
-        ));
+        ))
+        .title_bottom(
+            Line::styled(actions, Style::default().fg(theme.dim))
+                .right_aligned(),
+        );
     // A row of padding inside each border, so the panel reads as a panel
     // rather than as a second pane.
     let inner = Rect {
@@ -861,13 +929,19 @@ fn key_hints(selector: &Selector) -> &'static [(&'static str, &'static str)] {
 
     if selector.panel.is_some() {
         if selector.is_on_fold() {
-            return &[("j/k", "move"), ("↵", "checks"), ("esc", "close")];
+            return &[
+                ("j/k", "move"),
+                ("↵", "checks"),
+                ("gx", "browser"),
+                ("esc", "close"),
+            ];
         }
 
         return &[
             ("j/k", "move"),
             ("za", "checks"),
-            ("↵", "open"),
+            ("↵", "review"),
+            ("gx", "browser"),
             ("esc", "close"),
         ];
     }
@@ -876,7 +950,8 @@ fn key_hints(selector: &Selector) -> &'static [(&'static str, &'static str)] {
         return &[
             ("j/k", "move"),
             ("K", "summary"),
-            ("↵", "open"),
+            ("↵", "review"),
+            ("gx", "browser"),
             ("esc", "clear"),
         ];
     }
@@ -884,7 +959,8 @@ fn key_hints(selector: &Selector) -> &'static [(&'static str, &'static str)] {
     &[
         ("j/k", "move"),
         ("K", "summary"),
-        ("↵", "open"),
+        ("↵", "review"),
+        ("gx", "browser"),
         ("/", "filter"),
         ("q", "quit"),
     ]
@@ -1206,9 +1282,13 @@ mod tests {
         let mut selector = ready(many());
 
         press(&mut selector, "5G");
-        let asked = selector.apply(&Action::OpenOverview, 10);
+        let Some(Effect::Summarize(asked)) =
+            selector.apply(&Action::OpenOverview, 10)
+        else {
+            panic!("K did not request a summary");
+        };
 
-        assert_eq!(asked.map(|target| target.number), Some(5));
+        assert_eq!(asked.number, 5);
         assert_eq!(selector.mode, Mode::Overview);
         assert!(render_selector(&selector).contains("loading the summary"));
 
@@ -1258,7 +1338,11 @@ mod tests {
     }
 
     fn summarized(selector: &mut Selector) {
-        let target = selector.apply(&Action::OpenOverview, 10).unwrap();
+        let Some(Effect::Summarize(target)) =
+            selector.apply(&Action::OpenOverview, 10)
+        else {
+            panic!("K did not request a summary");
+        };
         selector.receive(Message::Summarized(target, Ok(summary())), 10);
     }
 
@@ -1269,6 +1353,9 @@ mod tests {
         let rendered = render_selector(&selector);
 
         assert!(rendered.contains("owner/repo #1"));
+        assert!(rendered.contains("Change 1"));
+        assert!(rendered.contains("↵ review"));
+        assert!(rendered.contains("esc close"));
         assert!(rendered.contains("@bob"));
         assert!(rendered.contains("@owner/backend (team)"));
         assert!(rendered.contains("1 failed · 1 passed"));
@@ -1292,6 +1379,7 @@ mod tests {
 
         assert!(rendered.contains("clippy"));
         assert!(rendered.contains("build"));
+        assert!(rendered.contains("↵ checks"));
     }
 
     /// `za` works wherever the cursor is parked.
@@ -1345,7 +1433,33 @@ mod tests {
     }
 
     #[test]
-    fn escape_clears_the_filter_before_it_quits() {
+    fn gx_opens_the_selected_pull_request_in_the_browser() {
+        let mut selector = ready(many());
+
+        press_key(&mut selector, KeyCode::Char('g'), Modifiers::NONE);
+        let effect = selector
+            .press(KeyEvent::new(KeyCode::Char('x'), Modifiers::NONE), 10);
+
+        let Some(Effect::Open(url)) = effect else {
+            panic!("gx did not produce a browser action");
+        };
+        assert_eq!(url, "https://github.com/owner/repo/pull/1");
+    }
+
+    #[test]
+    fn returning_from_a_review_keeps_the_selected_row() {
+        let mut selector = ready(many());
+
+        press(&mut selector, "7G");
+        press_key(&mut selector, KeyCode::Enter, Modifiers::NONE);
+        selector.resume();
+
+        assert!(!selector.is_done);
+        assert_eq!(selector.target().map(|target| target.number), Some(7));
+    }
+
+    #[test]
+    fn escape_clears_the_filter_but_only_q_quits() {
         let mut selector = ready(many());
 
         press(&mut selector, "/");
@@ -1358,6 +1472,10 @@ mod tests {
         assert_eq!(selector.visible.len(), 40);
 
         press_key(&mut selector, KeyCode::Escape, Modifiers::NONE);
+        assert!(!selector.is_done);
+        assert_eq!(selector.status, "press q to quit");
+
+        press(&mut selector, "q");
         assert!(selector.is_done);
     }
 }

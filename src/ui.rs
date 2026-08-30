@@ -29,19 +29,39 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 pub const SPINNER: [&str; 10] =
     ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-pub fn draw(frame: &mut Frame, app: &App, layout: &Layout) {
+#[derive(Clone, Copy)]
+pub enum ExitHint {
+    Quit,
+    Back,
+}
+
+impl ExitHint {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Quit => "quit",
+            Self::Back => "back",
+        }
+    }
+}
+
+pub fn draw(
+    frame: &mut Frame,
+    app: &App,
+    layout: &Layout,
+    exit_hint: ExitHint,
+) {
     draw_header(frame, app, layout.header);
 
     if app.is_loading() {
         draw_loading(frame, app, layout.body);
-        draw_bottom_bar(frame, app, layout);
+        draw_bottom_bar(frame, app, layout, exit_hint);
         return;
     }
 
     tree::draw(frame, app, layout);
     draw_diff(frame, app, layout);
 
-    draw_bottom_bar(frame, app, layout);
+    draw_bottom_bar(frame, app, layout, exit_hint);
     draw_composer(frame, app, layout);
     draw_submit(frame, app, layout);
     draw_overlay(frame, app, layout);
@@ -1255,7 +1275,12 @@ pub fn draw_status_bar(
     draw_hints(frame, area, left_width, hints, reserved, bar, theme);
 }
 
-fn draw_bottom_bar(frame: &mut Frame, app: &App, layout: &Layout) {
+fn draw_bottom_bar(
+    frame: &mut Frame,
+    app: &App,
+    layout: &Layout,
+    exit_hint: ExitHint,
+) {
     let area = layout.status;
     let pending_hint = app.pending_hint();
     let theme = app.theme();
@@ -1382,6 +1407,7 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, layout: &Layout) {
         ));
     }
 
+    let exit_label = exit_hint.label();
     let keys: &[(&str, &str)] = match (app.mode, app.pane) {
         (Mode::Filter, _) => {
             &[("↑↓", "select"), ("↵", "apply"), ("esc", "cancel")]
@@ -1445,7 +1471,7 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, layout: &Layout) {
             } else {
                 ("/", "filter")
             },
-            ("q", "quit"),
+            ("q", exit_label),
         ],
         (Mode::Normal, Pane::Diff) if app.focused_draft().is_some() => &[
             ("j/k", "move"),
@@ -1492,7 +1518,7 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, layout: &Layout) {
             ("c", "comment"),
             ("/", "search"),
             ("}", "next comment"),
-            ("q", "quit"),
+            ("q", exit_label),
         ],
     };
 

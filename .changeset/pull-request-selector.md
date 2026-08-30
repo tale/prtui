@@ -1,5 +1,5 @@
 ---
-default: minor
+default: major
 ---
 
-`prtui` without a number lists your open pull requests, and `K` summarizes the one under the cursor
+`prtui` opens a pull request dashboard and returns to it after each review

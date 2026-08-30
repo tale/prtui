@@ -220,6 +220,21 @@ enum Launch {
     Select(Option<gh::Repo>),
 }
 
+#[derive(Clone, Copy)]
+enum ReviewExit {
+    Dashboard,
+    Process,
+}
+
+impl ReviewExit {
+    const fn hint(self) -> ui::ExitHint {
+        match self {
+            Self::Dashboard => ui::ExitHint::Back,
+            Self::Process => ui::ExitHint::Quit,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -253,42 +268,57 @@ async fn run(
 ) -> Result<()> {
     terminal::scope(follow_terminal, async move |terminal, events| {
         let mut theme = theme;
-        let target = match launch {
+        match launch {
             Launch::Review { repo, number } => {
-                gh::PullRequestTarget { repo, number }
-            }
-            Launch::Select(repo) => {
-                let Some(target) = selector::select(
+                std::thread::spawn(move || renderer::preload(theme.mode));
+                event_loop(
                     terminal,
                     events,
-                    repo,
                     &mut theme,
                     follow_terminal,
+                    gh::PullRequestTarget { repo, number },
+                    ReviewExit::Process,
                 )
-                .await?
-                else {
-                    return Ok(());
-                };
-
-                target
+                .await?;
             }
-        };
+            Launch::Select(repo) => {
+                let mut dashboard = selector::Dashboard::new(repo);
+                let mut is_preloaded = false;
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+                loop {
+                    let Some(target) = dashboard
+                        .select(terminal, events, &mut theme, follow_terminal)
+                        .await?
+                    else {
+                        break;
+                    };
 
-        // Syntax assets deserialize while the initial requests are in flight.
-        std::thread::spawn(move || renderer::preload(theme.mode));
+                    if !is_preloaded {
+                        std::thread::spawn(move || {
+                            renderer::preload(theme.mode);
+                        });
+                        is_preloaded = true;
+                    }
 
-        event_loop(
-            terminal,
-            events,
-            &mut rx,
-            tx,
-            theme,
-            follow_terminal,
-            target,
-        )
-        .await
+                    if matches!(
+                        event_loop(
+                            terminal,
+                            events,
+                            &mut theme,
+                            follow_terminal,
+                            target,
+                            ReviewExit::Dashboard,
+                        )
+                        .await?,
+                        ReviewExit::Process
+                    ) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(())
     })
     .await
 }
@@ -296,15 +326,15 @@ async fn run(
 async fn event_loop(
     terminal: &mut terminal::AppTerminal,
     events: &mut EventStream,
-    rx: &mut mpsc::UnboundedReceiver<Message>,
-    tx: mpsc::UnboundedSender<Message>,
-    theme: Theme,
+    theme: &mut Theme,
     follow_terminal: bool,
     target: gh::PullRequestTarget,
-) -> Result<()> {
+    mut exit: ReviewExit,
+) -> Result<ReviewExit> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
     let number = target.number;
     let repo = Arc::new(target.repo);
-    let mut app = App::with_theme(theme);
+    let mut app = App::with_theme(*theme);
     app.set_origin(Origin {
         repo_url: repo.web_url(),
         number,
@@ -370,7 +400,7 @@ async fn event_loop(
         }
 
         if is_dirty {
-            layout = present_frame(terminal, &app)?;
+            layout = present_frame(terminal, &app, exit.hint())?;
             is_dirty = false;
         }
 
@@ -413,7 +443,14 @@ async fn event_loop(
                     Event::WindowResized(_) => is_dirty = true,
                     Event::Key(key) => {
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                            input.dispatch_key(&mut app, key, &layout);
+                            if key.code == termina::event::KeyCode::Char('c')
+                                && key.modifiers.contains(termina::event::Modifiers::CONTROL)
+                            {
+                                exit = ReviewExit::Process;
+                                app.should_quit = true;
+                            } else {
+                                input.dispatch_key(&mut app, key, &layout);
+                            }
                             is_dirty = true;
                         }
                     }
@@ -442,7 +479,9 @@ async fn event_loop(
         bail!(err);
     }
 
-    Ok(())
+    *theme = app.theme();
+
+    Ok(exit)
 }
 
 /// Draws a frame and hands back the layout it was drawn with, which is what
@@ -451,11 +490,12 @@ async fn event_loop(
 fn present_frame(
     terminal: &mut terminal::AppTerminal,
     app: &App,
+    exit_hint: ui::ExitHint,
 ) -> Result<Layout> {
     let layout = Layout::compute(terminal.get_frame().area(), app);
 
     terminal::render(terminal, |frame| {
-        ui::draw(frame, app, &layout);
+        ui::draw(frame, app, &layout, exit_hint);
     })
     .context("drawing a frame")?;
 

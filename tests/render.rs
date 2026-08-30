@@ -69,7 +69,7 @@ fn summary(app: &App) -> (usize, usize) {
 /// draw against it.
 fn paint(frame: &mut Frame, app: &App) {
     let layout = Layout::compute(frame.area(), app);
-    ui::draw(frame, app, &layout);
+    ui::draw(frame, app, &layout, ui::ExitHint::Quit);
 }
 
 /// Drives the app the way the event loop does: raw keys through the keymap.
@@ -114,10 +114,15 @@ fn settle(app: &mut App) {
 
 /// Renders a frame at the size most tests use and returns it as text.
 fn draw(app: &App) -> String {
+    draw_with_exit(app, ui::ExitHint::Quit)
+}
+
+fn draw_with_exit(app: &App, exit_hint: ui::ExitHint) -> String {
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
         .draw(|frame| {
-            paint(frame, app);
+            let layout = Layout::compute(frame.area(), app);
+            ui::draw(frame, app, &layout, exit_hint);
         })
         .unwrap();
 
@@ -1416,11 +1421,15 @@ fn the_bar_keeps_the_reference_hint_on_a_narrow_terminal() {
 /// Launching and finding no way out is the oldest failure a terminal app has.
 #[test]
 fn the_bar_offers_a_way_out_and_a_way_in() {
-    let rendered = draw(&load());
+    let app = load();
+    let rendered = draw(&app);
 
     assert!(rendered.contains("q quit"), "{rendered}");
     assert!(rendered.contains("o description"), "{rendered}");
     assert!(rendered.contains("? keys"), "{rendered}");
+
+    let returning = draw_with_exit(&app, ui::ExitHint::Back);
+    assert!(returning.contains("q back"), "{returning}");
 }
 
 /// A panel that vanishes when you press `/` cannot be searched, whatever the
