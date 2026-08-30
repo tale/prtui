@@ -1,16 +1,15 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use futures_core::Stream;
+use prtui::app::App;
 use prtui::app::draft::Parent;
 use prtui::app::input::InputRouter;
 use prtui::app::link::{Errand, Origin};
 use prtui::app::review::{Failure, Request, Sent};
-use prtui::app::{App, Highlight};
 use prtui::layout::Layout;
 use prtui::model::{self, ChangedFile, Meta};
 use prtui::renderer::{self, Theme, ThemeMode};
 use prtui::{gh, ui};
-use std::sync::Arc;
 use std::{future::poll_fn, pin::Pin, process::Stdio, time::Duration};
 use termina::escape::csi::{
     Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode,
@@ -19,6 +18,7 @@ use termina::event::KeyEventKind;
 use termina::{Event, EventStream};
 use tokio::sync::mpsc;
 
+mod highlighter;
 mod selector;
 mod summary;
 mod terminal;
@@ -66,7 +66,7 @@ impl ThemeChoice {
 enum Message {
     Meta(Box<Meta>),
     Files(Vec<ChangedFile>),
-    Highlight(ThemeMode, Arc<str>, Highlight),
+    Highlight(highlighter::Output),
     MetaFailed(String),
     FilesFailed(String),
     /// GitHub is having an incident that explains a failure already shown.
@@ -283,56 +283,6 @@ fn open_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Colors one file again after its patch grew. Colors are held one list per
-/// line, so a reveal strands every line below it.
-fn spawn_recolor(
-    files: &[ChangedFile],
-    path: &Arc<str>,
-    mode: ThemeMode,
-    tx: mpsc::UnboundedSender<Message>,
-) {
-    let Some(file) = files.iter().find(|file| file.path == *path) else {
-        return;
-    };
-    let (path, lines) = (file.path.clone(), file.lines.clone());
-
-    std::thread::spawn(move || {
-        let styled = renderer::highlight_file(&path, &lines, mode);
-        let _ = tx.send(Message::Highlight(mode, path, styled));
-    });
-}
-
-/// One background thread colors the whole diff, starting with the file on
-/// screen so the first paint is already lit. Each file is published as it
-/// lands, tagged with the palette it was colored under: a straggler from
-/// before a theme switch has to be dropped rather than drawn.
-fn spawn_highlighting(
-    files: Arc<[ChangedFile]>,
-    first: usize,
-    mode: ThemeMode,
-    tx: mpsc::UnboundedSender<Message>,
-) {
-    std::thread::spawn(move || {
-        for index in highlight_order(files.len(), first) {
-            let file = &files[index];
-            let styled =
-                renderer::highlight_file(&file.path, &file.lines, mode);
-            let message = Message::Highlight(mode, file.path.clone(), styled);
-            if tx.send(message).is_err() {
-                return;
-            }
-        }
-    });
-}
-
-/// The file being read first, then everything else in order. Every index it
-/// yields is in range, so the worker can index straight into its payload.
-fn highlight_order(count: usize, first: usize) -> impl Iterator<Item = usize> {
-    std::iter::once(first)
-        .filter(move |index| *index < count)
-        .chain((0..count).filter(move |index| *index != first))
-}
-
 enum Launch {
     Review {
         repo: gh::Repo,
@@ -459,6 +409,12 @@ async fn event_loop(
     let mut app = App::with_theme(theme);
     app.set_origin(session.origin.clone());
     let mut input = InputRouter::default();
+    let highlighter = highlighter::Highlighter::new({
+        let tx = tx.clone();
+        move |output| {
+            let _ = tx.send(Message::Highlight(output));
+        }
+    });
     let mut pending: u8 = 2;
     let mut failure: Option<String> = None;
     let mut outage: Option<String> = None;
@@ -482,7 +438,10 @@ async fn event_loop(
         }
 
         for path in app.take_recolor() {
-            spawn_recolor(&app.files, &path, app.theme().mode, tx.clone());
+            if let Some(file) = app.files.iter().find(|file| file.path == path)
+            {
+                highlighter.one(file, app.theme().mode);
+            }
         }
 
         for errand in app.take_errands() {
@@ -518,12 +477,16 @@ async fn event_loop(
                 let affects_display = match message {
                     // A result colored under the previous palette is dropped:
                     // the pass that replaces it is already running.
-                    Message::Highlight(mode, ..) if mode != app.theme().mode => {
+                    Message::Highlight(output)
+                        if output.mode != app.theme().mode
+                            || !highlighter.accepts(&output) =>
+                    {
                         false
                     }
-                    Message::Highlight(_, path, styled) => {
-                        let is_open = app.current_path() == Some(&*path);
-                        app.set_highlight(path, styled);
+                    Message::Highlight(output) => {
+                        let is_open =
+                            app.current_path() == Some(&*output.path);
+                        app.set_highlight(output.path, output.styled);
                         is_open
                     }
                     Message::Meta(meta) => {
@@ -533,11 +496,10 @@ async fn event_loop(
                     }
                     Message::Files(files) => {
                         app.set_files(files);
-                        spawn_highlighting(
-                            app.files.clone(),
+                        highlighter.all(
+                            &app.files,
                             app.selected_file,
                             app.theme().mode,
-                            tx.clone(),
                         );
                         pending = pending.saturating_sub(1);
                         true
@@ -641,11 +603,10 @@ async fn event_loop(
                             TerminalThemeMode::Light => ThemeMode::Light,
                         };
                         if app.set_theme_mode(mode) {
-                            spawn_highlighting(
-                                app.files.clone(),
+                            highlighter.all(
+                                &app.files,
                                 app.selected_file,
                                 mode,
-                                tx.clone(),
                             );
                             is_dirty = true;
                         }
@@ -697,13 +658,6 @@ mod tests {
             Args::try_parse_from(["prtui", "42"]).unwrap().number,
             Some(42)
         );
-    }
-
-    #[test]
-    fn the_open_file_is_colored_before_the_rest() {
-        assert_eq!(highlight_order(4, 2).collect::<Vec<_>>(), [2, 0, 1, 3]);
-        assert_eq!(highlight_order(3, 0).collect::<Vec<_>>(), [0, 1, 2]);
-        assert!(highlight_order(0, 0).next().is_none());
     }
 
     /// Two writes finishing back to back used to put two fetches in flight,
