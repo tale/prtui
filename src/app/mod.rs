@@ -289,9 +289,10 @@ fn attachment_for(
 
 pub struct App {
     pub pr: Option<PullRequest>,
-    /// Shared so the highlighting thread reads the same patches the diff is
-    /// drawn from rather than a copy of them.
-    pub files: Arc<[ChangedFile]>,
+    /// Each file is shared independently with the syntax worker. A reveal can
+    /// therefore replace or copy only the patch it changes instead of cloning
+    /// every changed file to preserve one worker's snapshot.
+    pub files: Vec<Arc<ChangedFile>>,
     pub threads_by_path: HashMap<Arc<str>, Vec<ReviewThread>>,
     /// The pending review's comments, mirrored locally so they can be drawn
     /// before GitHub has answered for them.
@@ -410,7 +411,7 @@ impl App {
     pub fn with_theme(theme: Theme) -> Self {
         Self {
             pr: None,
-            files: Arc::from([]),
+            files: Vec::new(),
             threads_by_path: HashMap::new(),
             drafts: Vec::new(),
             pending_review: None,
@@ -496,10 +497,14 @@ impl App {
 
     /// File patches are the only data required to make the main review surface
     /// useful. PR metadata and review threads may arrive independently later.
-    pub fn set_files(&mut self, files: Vec<ChangedFile>) {
+    pub fn set_files<I>(&mut self, files: I)
+    where
+        I: IntoIterator,
+        I::Item: Into<Arc<ChangedFile>>,
+    {
         // A path that comes back with a new patch cannot keep its old colors.
         self.highlights.clear();
-        self.files = files.into();
+        self.files = files.into_iter().map(Into::into).collect();
         self.files_state = FilesState::Loaded;
         self.reseed_drafts();
     }
@@ -508,7 +513,7 @@ impl App {
     /// endpoint the patches come from, so a failed diff still leaves a review
     /// surface worth showing — as long as it does not claim the PR is empty.
     pub fn fail_files(&mut self) {
-        self.files = Arc::from([]);
+        self.files.clear();
         self.files_state = FilesState::Failed;
     }
 
@@ -600,8 +605,11 @@ impl App {
             .filter_map(|draft| Some((draft.remote.clone()?, draft.id)))
             .collect();
 
-        let files: HashMap<&str, &ChangedFile> =
-            self.files.iter().map(|file| (&*file.path, file)).collect();
+        let files: HashMap<&str, &ChangedFile> = self
+            .files
+            .iter()
+            .map(|file| (&*file.path, &**file))
+            .collect();
 
         let mut seeded: Vec<Draft> = Vec::new();
         for thread in &self.pending_threads {
@@ -662,7 +670,7 @@ impl App {
     }
 
     pub fn current_file(&self) -> Option<&ChangedFile> {
-        self.files.get(self.selected_file)
+        self.files.get(self.selected_file).map(AsRef::as_ref)
     }
 
     pub fn current_path(&self) -> Option<&str> {
@@ -955,10 +963,10 @@ impl App {
             return String::new();
         };
 
-        // The patches are shared with the highlighting pass, so a reveal
-        // publishes a new list rather than writing through the one on screen.
-        let mut files = self.files.to_vec();
-        let file = &mut files[index];
+        // The worker owns an Arc to this file while it colors it. Copy-on-write
+        // preserves that snapshot when necessary, but never touches any other
+        // file in the review.
+        let file = Arc::make_mut(&mut self.files[index]);
         let mut count = 0;
 
         // Each splice moves only what is below it, so the cursor follows one
@@ -983,8 +991,6 @@ impl App {
         if count == 0 {
             return "nothing left to expand".into();
         }
-
-        self.files = files.into();
 
         // Colors are held per line and drafts are anchored by line number, so
         // both are stale from the reveal downward.

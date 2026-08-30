@@ -5,7 +5,7 @@
 //! the one task already running harmless when its file or palette changes.
 
 use prtui::app::Highlight;
-use prtui::model::{ChangedFile, DiffLine};
+use prtui::model::ChangedFile;
 use prtui::renderer::{self, ThemeMode};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -17,28 +17,10 @@ pub struct Output {
     pub styled: Highlight,
 }
 
-enum Input {
-    Shared {
-        files: Arc<[ChangedFile]>,
-        index: usize,
-    },
-    Owned(Vec<DiffLine>),
-}
-
-impl Input {
-    fn lines(&self) -> &[DiffLine] {
-        match self {
-            Self::Shared { files, index } => &files[*index].lines,
-            Self::Owned(lines) => lines,
-        }
-    }
-}
-
 struct Task {
     generation: u64,
     mode: ThemeMode,
-    path: Arc<str>,
-    input: Input,
+    file: Arc<ChangedFile>,
 }
 
 #[derive(Default)]
@@ -80,7 +62,7 @@ impl Pending {
 
     fn prioritize(&self, task: Task) {
         let mut pending = lock(&self.tasks);
-        pending.retain(|held| held.path != task.path);
+        pending.retain(|held| held.file.path != task.file.path);
         pending.push_front(task);
         drop(pending);
         self.ready.notify_one();
@@ -122,18 +104,18 @@ impl Highlighter {
             loop {
                 let task = worker_pending.take();
                 if !lock(&worker_generations)
-                    .is_current(&task.path, task.generation)
+                    .is_current(&task.file.path, task.generation)
                 {
                     continue;
                 }
 
                 let styled = renderer::highlight_file(
-                    &task.path,
-                    task.input.lines(),
+                    &task.file.path,
+                    &task.file.lines,
                     task.mode,
                 );
                 if !lock(&worker_generations)
-                    .is_current(&task.path, task.generation)
+                    .is_current(&task.file.path, task.generation)
                 {
                     continue;
                 }
@@ -141,7 +123,7 @@ impl Highlighter {
                 publish(Output {
                     generation: task.generation,
                     mode: task.mode,
-                    path: task.path,
+                    path: task.file.path.clone(),
                     styled,
                 });
             }
@@ -157,7 +139,7 @@ impl Highlighter {
     /// does not wait behind work the reader cannot see yet.
     pub fn all(
         &self,
-        files: &Arc<[ChangedFile]>,
+        files: &[Arc<ChangedFile>],
         first: usize,
         mode: ThemeMode,
     ) {
@@ -166,15 +148,11 @@ impl Highlighter {
         generations.retire_all();
         let tasks: Vec<Task> = order
             .map(|index| {
-                let path = files[index].path.clone();
+                let file = files[index].clone();
                 Task {
-                    generation: generations.advance(path.clone()),
+                    generation: generations.advance(file.path.clone()),
                     mode,
-                    path,
-                    input: Input::Shared {
-                        files: files.clone(),
-                        index,
-                    },
+                    file,
                 }
             })
             .collect();
@@ -185,15 +163,13 @@ impl Highlighter {
 
     /// Recolors a file whose patch changed, superseding any older queued pass
     /// for the same path without allowing work to grow without bound.
-    pub fn one(&self, file: &ChangedFile, mode: ThemeMode) {
-        let path = file.path.clone();
-        let generation = lock(&self.generations).advance(path.clone());
+    pub fn one(&self, file: &Arc<ChangedFile>, mode: ThemeMode) {
+        let generation = lock(&self.generations).advance(file.path.clone());
 
         self.pending.prioritize(Task {
             generation,
             mode,
-            path,
-            input: Input::Owned(file.lines.clone()),
+            file: file.clone(),
         });
     }
 

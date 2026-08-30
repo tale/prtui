@@ -157,8 +157,8 @@ fn park_on_unresolved_thread(app: &mut App) -> prtui::model::ReviewThread {
 /// Swaps a synthetic patch in for the open file, for diff shapes the captured
 /// fixture does not contain.
 fn open_patch(app: &mut App, patch: &str) {
-    let mut files = app.files.to_vec();
-    files[app.selected_file] = file_from(patch);
+    let mut files = app.files.clone();
+    files[app.selected_file] = file_from(patch).into();
     app.set_files(files);
 }
 
@@ -1599,7 +1599,7 @@ fn comment_jump_steps_through_every_thread_in_a_file() {
             ..template.clone()
         })
         .collect();
-    app.threads_by_path.insert(file.path, threads);
+    app.threads_by_path.insert(file.path.clone(), threads);
 
     app.cursor = 0;
     app.focused_card = None;

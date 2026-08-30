@@ -10,6 +10,7 @@
 //! spends more columns on indentation than the tree saves by grouping.
 
 use crate::model::ChangedFile;
+use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -81,15 +82,20 @@ impl Tree {
     /// `collapsed` names directories the reader has folded away. A filter
     /// overrides them: a file that matched has to be reachable, and reaching it
     /// by hand through a fold it did not open is not navigation.
-    pub fn build(
-        files: &[ChangedFile],
+    pub fn build<F>(
+        files: &[F],
         visible: &[usize],
         collapsed: &HashSet<Arc<str>>,
         is_filtered: bool,
         unresolved: &[usize],
-    ) -> Self {
+    ) -> Self
+    where
+        F: Borrow<ChangedFile>,
+    {
         let mut sorted: Vec<usize> = visible.to_vec();
-        sorted.sort_by(|&a, &b| files[a].path.cmp(&files[b].path));
+        sorted.sort_by(|&a, &b| {
+            files[a].borrow().path.cmp(&files[b].borrow().path)
+        });
 
         let mut builder = Builder {
             files,
@@ -235,8 +241,8 @@ impl Tree {
     }
 }
 
-struct Builder<'a> {
-    files: &'a [ChangedFile],
+struct Builder<'a, F> {
+    files: &'a [F],
     collapsed: &'a HashSet<Arc<str>>,
     is_filtered: bool,
     /// Open conversations per file, parallel to `files`.
@@ -244,14 +250,21 @@ struct Builder<'a> {
     rows: Vec<Row>,
 }
 
-impl Builder<'_> {
+impl<F> Builder<'_, F>
+where
+    F: Borrow<ChangedFile>,
+{
+    fn file(&self, index: usize) -> &ChangedFile {
+        self.files[index].borrow()
+    }
+
     /// Lays out one directory's contents. `group` is sorted and every path in
     /// it shares the first `prefix` bytes, which is the directory itself.
     fn emit(&mut self, group: &[usize], prefix: usize, depth: usize) {
         let mut at = 0;
 
         while at < group.len() {
-            let path = &*self.files[group[at]].path;
+            let path = &*self.file(group[at]).path;
             let Some(separator) = path[prefix..].find('/') else {
                 self.rows.push(Row::File {
                     index: group[at],
@@ -266,7 +279,7 @@ impl Builder<'_> {
             let run = group[at..]
                 .iter()
                 .take_while(|&&index| {
-                    self.files[index].path[prefix..].starts_with(segment)
+                    self.file(index).path[prefix..].starts_with(segment)
                 })
                 .count();
 
@@ -289,11 +302,11 @@ impl Builder<'_> {
             end = next;
         }
 
-        let path: Arc<str> = Arc::from(&self.files[group[0]].path[..end]);
+        let path: Arc<str> = Arc::from(&self.file(group[0]).path[..end]);
         let is_collapsed = !self.is_filtered && self.collapsed.contains(&path);
 
         self.rows.push(Row::Directory {
-            label: self.files[group[0]].path[prefix..end].to_string(),
+            label: self.file(group[0]).path[prefix..end].to_string(),
             path,
             depth,
             files: group.len(),
@@ -315,14 +328,14 @@ impl Builder<'_> {
     /// inside it. A group of one is still a chain: a lone deep file reads
     /// better as one heading than as a ladder.
     fn shared_segment(&self, group: &[usize], end: usize) -> Option<usize> {
-        let path = &*self.files[group[0]].path;
+        let path = &*self.file(group[0]).path;
         let separator = path[end..].find('/')?;
         let next = end + separator + 1;
         let segment = &path[end..next];
 
         group[1..]
             .iter()
-            .all(|&index| self.files[index].path[end..].starts_with(segment))
+            .all(|&index| self.file(index).path[end..].starts_with(segment))
             .then_some(next)
     }
 }

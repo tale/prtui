@@ -189,6 +189,7 @@ fn head_of(app: &App) -> Arc<[String]> {
 fn opening_a_gap_fetches_the_file_and_then_reveals_it() {
     let mut app = load();
     app.pane = Pane::Diff;
+    let untouched = app.files[1].clone();
     let path = app.files[app.selected_file].path.clone();
     let before = app.files[app.selected_file].lines.len();
 
@@ -223,6 +224,7 @@ fn opening_a_gap_fetches_the_file_and_then_reveals_it() {
     }));
 
     assert_eq!(app.files[app.selected_file].lines.len(), before + 20);
+    assert!(Arc::ptr_eq(&untouched, &app.files[1]));
     assert_eq!(app.status, "expanded 20 lines");
     assert!(draw(&app).contains("head line 107"));
 
@@ -311,9 +313,9 @@ fn a_line_that_hides_nothing_expands_nothing() {
 #[test]
 fn a_deleted_file_has_nothing_to_expand_into() {
     let mut app = load();
-    let mut files = app.files.to_vec();
-    files[0].status = "removed".into();
-    app.files = files.into();
+    let mut files = app.files.clone();
+    Arc::make_mut(&mut files[0]).status = "removed".into();
+    app.files = files;
     app.selected_file = 0;
 
     act(&mut app, &Action::Expand(Reveal::Up(STEP)));
@@ -1186,7 +1188,7 @@ fn highlights_are_addressed_by_path_not_position() {
 
     // The same path can come back carrying a different patch, so a reload
     // cannot keep colors computed against the old one.
-    let files = app.files.to_vec();
+    let files = app.files.clone();
     app.set_files(files);
     assert!(app.open().unwrap().segments(0).is_none());
 }
