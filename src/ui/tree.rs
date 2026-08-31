@@ -109,7 +109,7 @@ pub(super) fn draw(frame: &mut Frame, app: &App, layout: &Layout) {
                     files: *files,
                     unresolved: *unresolved,
                     is_collapsed: *is_collapsed,
-                    is_selected: cursor == Some(&**path),
+                    is_selected: is_focused && cursor == Some(&**path),
                 },
                 query,
                 width,
@@ -118,7 +118,17 @@ pub(super) fn draw(frame: &mut Frame, app: &App, layout: &Layout) {
             TreeNode::File { index, depth, .. } => app
                 .tree_row(*index)
                 .map(|file| {
-                    file_line(&file, query, *depth, width, theme, cursor)
+                    file_line(
+                        &file,
+                        query,
+                        *depth,
+                        width,
+                        theme,
+                        FileRowFocus {
+                            pane: is_focused,
+                            directory: cursor,
+                        },
+                    )
                 })
                 .unwrap_or_default(),
         })
@@ -227,15 +237,24 @@ fn directory_line(
     Line::from(spans)
 }
 
+/// Where the tree's cursor is, as one file row needs to know it.
+#[derive(Clone, Copy)]
+struct FileRowFocus<'a> {
+    /// Whether the tree is the pane holding the keys. The bar is what says
+    /// where typing lands, so only the focused pane draws one.
+    pane: bool,
+    /// The heading the cursor left the open file to rest on, if it did. Only
+    /// one row in the tree carries the cursor bar.
+    directory: Option<&'a str>,
+}
+
 fn file_line<'a>(
     row: &TreeRow<'a>,
     query: Option<Query<'_>>,
     depth: usize,
     width: usize,
     theme: Theme,
-    // The heading the cursor left the open file to rest on, if it did. Only one
-    // row in the tree carries the cursor bar.
-    cursor_directory: Option<&str>,
+    focus: FileRowFocus<'_>,
 ) -> Line<'a> {
     let TreeRow {
         file,
@@ -271,8 +290,9 @@ fn file_line<'a>(
 
     // Two things to say and no bar left to say one of them: the background is
     // where the cursor is, the weight is which file the diff is showing. They
-    // are the same row until the cursor steps up onto a heading.
-    let has_cursor = is_selected && cursor_directory.is_none();
+    // are the same row until the cursor steps up onto a heading — or until the
+    // diff takes the keys, which leaves the weight alone to say it.
+    let has_cursor = focus.pane && is_selected && focus.directory.is_none();
     let base = match (has_cursor, is_selected) {
         (true, _) => Style::default()
             .bg(theme.cursor)

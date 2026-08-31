@@ -255,27 +255,28 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn pane_block<'a>(title: String, is_focused: bool, theme: Theme) -> Block<'a> {
+/// The pane's title and the rule it sits on.
+///
+/// Which pane has the keys is the one thing a reader has to be able to see
+/// without pressing anything, so the focused title is a chip in the accent
+/// colour rather than the same text a shade brighter.
+fn pane_block<'a>(text: String, is_focused: bool, theme: Theme) -> Block<'a> {
+    let title = if is_focused {
+        Style::default()
+            .bg(theme.accent)
+            .fg(theme.ink)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+
     Block::default()
         .border_style(Style::default().fg(if is_focused {
             theme.accent
         } else {
             theme.dim
         }))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(if is_focused {
-                    theme.heading
-                } else {
-                    theme.muted
-                })
-                .add_modifier(if is_focused {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-        ))
+        .title(Span::styled(text, title))
 }
 
 /// Splits one run of text around the filter's hits, so a match reads in the
@@ -1324,7 +1325,7 @@ fn draw_bottom_bar(
 
     let mut spans = vec![
         mode_chip(app.mode, theme),
-        Span::styled(pane, bar.fg(theme.dim)),
+        Span::styled(pane, bar.fg(theme.accent).add_modifier(Modifier::BOLD)),
     ];
 
     // The `:` line and the search box are the same widget in the same place,

@@ -105,10 +105,12 @@ and last line. A count works where you would expect: `10j`.
 
 **Files** — `]`/`[` step through files, `f` shows or hides the tree, `<Tab>`
 swaps the focused pane, `h`/`l` move between them, `<CR>` opens what the cursor
-is on. `x` marks the open file as read — the same mark GitHub shows as viewed —
-and opens the next file you have not read, stepping over the ones you have. The
-file it left wears a tick in place of its icon. Pressing `x` again on a marked
-file clears the mark and stays there.
+is on. The pane holding the keys is the one wearing its title in the accent
+colour, and the only one drawing a cursor bar: the other keeps the open file in
+bold and nothing else. `x` marks the open file as read — the same mark GitHub
+shows as viewed — and opens the next file you have not read, stepping over the
+ones you have. The file it left wears a tick in place of its icon. Pressing `x`
+again on a marked file clears the mark and stays there.
 
 **Reading** — `/` searches whatever you are reading: an open panel, the tree,
 or the file, and starts clean each time. `n`/`N` walk the hits and `:noh`

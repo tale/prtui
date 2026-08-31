@@ -1632,6 +1632,55 @@ fn the_file_tree_marks_files_whose_threads_are_all_resolved() {
 }
 
 /// The tree filter and the diff search share a matcher, so the tree can show
+/// Two panes and one set of keys: whichever pane holds them draws the cursor
+/// bar and wears the accent title, so which one is live is never a guess.
+#[test]
+fn only_the_focused_pane_carries_the_cursor() {
+    use prtui::renderer::Theme;
+
+    let mut app = load();
+    app.is_files_visible = true;
+    app.selected_file = 1;
+
+    let theme = Theme::dark();
+    let layout = layout_of(&app);
+    let list = layout.files_list.expect("the tree is open");
+    let row = list.y + layout.files.row_of(app.selected_file).unwrap() as u16;
+
+    let painted = |app: &App| {
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| paint(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        // How much of a pane's title row is painted in the accent colour: the
+        // chip, wherever the block chose to start it.
+        let chip = |area: Rect| {
+            (area.x..area.x + area.width)
+                .filter(|&x| {
+                    buffer.cell((x, area.y)).unwrap().style().bg
+                        == Some(theme.accent)
+                })
+                .count()
+        };
+
+        (
+            buffer.cell((2, row)).unwrap().style().bg,
+            chip(layout.files_pane.unwrap()),
+            chip(layout.diff_pane),
+        )
+    };
+
+    app.pane = Pane::Files;
+    let (bar, files_chip, diff_chip) = painted(&app);
+    assert_eq!(bar, Some(theme.cursor), "the tree draws the cursor");
+    assert!(files_chip > 0 && diff_chip == 0, "and wears the chip");
+
+    app.pane = Pane::Diff;
+    let (bar, files_chip, diff_chip) = painted(&app);
+    assert_ne!(bar, Some(theme.cursor), "the bar goes with the keys");
+    assert!(diff_chip > 0 && files_chip == 0, "and so does the chip");
+}
+
 /// where the hit landed instead of only which files survived it.
 #[test]
 fn the_file_filter_paints_its_hit_in_the_path() {
