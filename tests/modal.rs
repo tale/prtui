@@ -1629,19 +1629,59 @@ fn comment_jump_crosses_files_and_skips_resolved_threads() {
     );
 }
 
+/// The conversations are a ring. Walking off the last one comes back to the
+/// first, so a review read from the middle never hides what is above it.
 #[test]
-fn comment_jump_reports_when_none_remain() {
+fn comment_jump_wraps_round_to_the_first() {
     let mut app = load();
     app.selected_file = 0;
     app.cursor = 0;
 
     press(&mut app, "}");
-    let landed = app.selected_file;
+    let first = (app.selected_file, app.focused_card.clone());
+
+    let wrapped = (0..20).any(|_| {
+        press(&mut app, "}");
+        (app.selected_file, app.focused_card.clone()) == first
+    });
+
+    assert!(wrapped, "walking on comes back to the first conversation");
+    assert_eq!(app.status, "wrapped to the top");
+}
+
+/// With nothing anywhere to jump to, the key still has to say why the reader
+/// did not move.
+#[test]
+fn comment_jump_reports_when_there_are_none() {
+    let mut app = App::new();
+    app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
+    app.pane = Pane::Diff;
 
     press(&mut app, "}");
 
-    assert_eq!(app.selected_file, landed);
     assert_eq!(app.status, "no more comments");
+}
+
+/// `]` and `[` treat the tree as a ring for the same reason `}` does.
+#[test]
+fn stepping_past_either_end_of_the_tree_comes_round() {
+    let mut app = load();
+    let last = layout_of(&app).files.files().count() - 1;
+    let order: Vec<usize> = layout_of(&app).files.files().collect();
+
+    app.selected_file = order[last];
+    press(&mut app, "]");
+    assert_eq!(app.selected_file, order[0]);
+    assert_eq!(app.status, "wrapped to the top");
+
+    press(&mut app, "[");
+    assert_eq!(app.selected_file, order[last]);
+    assert_eq!(app.status, "wrapped to the bottom");
+
+    // A count that laps the tree lands where a bare step would.
+    app.selected_file = order[0];
+    press(&mut app, &format!("{}]", order.len() + 1));
+    assert_eq!(app.selected_file, order[1]);
 }
 
 #[test]
@@ -2500,10 +2540,10 @@ fn marking_a_file_viewed_steps_over_the_ones_already_read() {
     assert_eq!(app.selected_file, 2);
 }
 
-/// Nothing left unread is not a failure, but the reader pressed a key and did
-/// not move, so the bar says why.
+/// The walk down the review is a lap: the file after the last one is the
+/// first file still unread, not a dead end.
 #[test]
-fn marking_the_last_unread_file_stays_on_it_and_says_so() {
+fn marking_the_last_file_comes_round_to_the_first_unread() {
     let mut app = load();
     let last = app.files.len() - 1;
     app.selected_file = last;
@@ -2511,8 +2551,37 @@ fn marking_the_last_unread_file_stays_on_it_and_says_so() {
     press(&mut app, "x");
 
     assert_eq!(app.take_requests().len(), 1);
+    assert_eq!(app.selected_file, 0);
+}
+
+/// Nothing left unread is not a failure, but the reader pressed a key and did
+/// not move, so the bar says why.
+#[test]
+fn marking_the_only_unread_file_stays_on_it_and_says_so() {
+    let mut app = load();
+    let last = app.files.len() - 1;
+    mark_viewed(&mut app, &(0..last).collect::<Vec<_>>());
+    app.selected_file = last;
+
+    press(&mut app, "x");
+
+    assert_eq!(app.take_requests().len(), 1);
     assert_eq!(app.selected_file, last);
     assert_eq!(app.status, "marking viewed… nothing left unread");
+}
+
+/// Takes the review's own marks over, the way a confirmation from GitHub
+/// would, so a test can say which files have been read through.
+fn mark_viewed(app: &mut App, files: &[usize]) {
+    for &index in files {
+        let path = app.files[index].path.clone();
+        app.finish(Ok(Sent::Viewed {
+            path,
+            is_viewed: true,
+        }));
+    }
+    app.take_requests();
+    app.status.clear();
 }
 
 /// The fixture as GitHub would send it back once `path` has been read through.

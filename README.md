@@ -112,6 +112,10 @@ shows as viewed — and opens the next file you have not read, stepping over the
 ones you have. The file it left wears a tick in place of its icon. Pressing `x`
 again on a marked file clears the mark and stays there.
 
+Every jump between files treats the tree as a ring. Step off the last file and
+you are on the first, and the bar says it wrapped, so a review opened in the
+middle never hides what is above the cursor.
+
 **Reading** — `/` searches whatever you are reading: an open panel, the tree,
 or the file, and starts clean each time. `n`/`N` walk the hits and `:noh`
 clears them. Inside `/` or `:` the arrows step what is under it and
@@ -137,8 +141,9 @@ Readline rather than Vim, where the two disagree: Vim's own command line spells
 prtui has no equivalent of. `<C-e>`, `<C-w>`, and `<C-u>` mean the same in both.
 There is no kill ring behind the four rubouts, so `<C-y>` puts nothing back.
 
-**Conversations** — `}`/`{` jump between unanswered threads and `R` resolves
-or reopens the one you are on.
+**Conversations** — `}`/`{` jump between unanswered threads, crossing into the
+next file with one once the open file runs out, and `R` resolves or reopens the
+one you are on.
 
 **Comments** — `c` comments on the line, on a visual span, or replies to the
 thread under the cursor. `v` selects lines first; `C` writes a note about the

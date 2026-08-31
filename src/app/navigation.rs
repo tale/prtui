@@ -62,29 +62,103 @@ impl App {
 
     /// `]` and `[` walk files only, skipping the headings `j` stops on, and in
     /// the order the tree lists them rather than the order GitHub sent them.
+    ///
+    /// The list is a ring: the file after the last one is the first. A review
+    /// is read in laps, and a reader who starts in the middle of the tree
+    /// would otherwise have to turn round to see what is above them.
     pub(super) fn step_file(
         &mut self,
         direction: isize,
         count: usize,
         layout: &Layout,
     ) {
-        let file_count = layout.files.file_count();
-        let Some(position) = layout
-            .files
-            .files()
-            .position(|index| index == self.selected_file)
+        let files: Vec<usize> = layout.files.files().collect();
+        let Some(position) =
+            files.iter().position(|&index| index == self.selected_file)
         else {
             return;
         };
 
-        let steps =
-            direction.saturating_mul(count.min(file_count).cast_signed());
-        let target = position
-            .saturating_add_signed(steps)
-            .min(file_count.saturating_sub(1));
-        if let Some(index) = layout.files.files().nth(target) {
-            self.select_file(index);
+        // A count larger than the tree would only lap it.
+        let stride = count % files.len();
+        let steps = direction.saturating_mul(stride.cast_signed());
+        let target = (position.cast_signed() + steps)
+            .rem_euclid(files.len().cast_signed())
+            as usize;
+
+        let is_forwards = direction > 0;
+        let wrapped = stride != 0
+            && if is_forwards {
+                position + stride >= files.len()
+            } else {
+                stride > position
+            };
+
+        self.select_file(files[target]);
+        self.status.clear();
+
+        if wrapped {
+            self.note_wrap(is_forwards);
         }
+    }
+
+    /// The visible files in tree order, starting after the open one and coming
+    /// back round to it. This is the order every file-level jump searches in,
+    /// which is what makes a stop above the cursor reachable by walking on.
+    fn file_ring(&self, direction: isize, layout: &Layout) -> Vec<usize> {
+        let files: Vec<usize> = layout.files.files().collect();
+        let Some(position) =
+            files.iter().position(|&index| index == self.selected_file)
+        else {
+            return files;
+        };
+
+        let mut ring: Vec<usize> = files[position + 1..]
+            .iter()
+            .chain(&files[..position])
+            .copied()
+            .collect();
+
+        // Reversing "everything below, then everything above" gives
+        // "everything above, then everything below", each walked upward.
+        if direction < 0 {
+            ring.reverse();
+        }
+
+        ring
+    }
+
+    /// Whether the file is one the reader has not marked read through.
+    fn is_unread(&self, index: usize) -> bool {
+        self.files
+            .get(index)
+            .is_some_and(|file| !self.viewed.contains(&file.path))
+    }
+
+    /// The next file the reader has not been through, in the order the tree
+    /// lists them, coming back round to the ones above.
+    ///
+    /// Files already marked are stepped over rather than landed on. `x` on a
+    /// marked file clears its mark, so stopping there would turn a walk down
+    /// the review into undoing the last session's work.
+    pub(super) fn unread_after_current(
+        &self,
+        layout: &Layout,
+    ) -> Option<usize> {
+        self.file_ring(1, layout)
+            .into_iter()
+            .find(|&index| self.is_unread(index))
+    }
+
+    /// Says that the jump came back round, the way `/` says a search did.
+    /// A jump that moves the reader somewhere they did not expect has to
+    /// account for itself.
+    fn note_wrap(&mut self, is_forwards: bool) {
+        self.status = if is_forwards {
+            "wrapped to the top".into()
+        } else {
+            "wrapped to the bottom".into()
+        };
     }
 
     pub(super) fn set_selected_file(
@@ -362,14 +436,37 @@ impl App {
             return true;
         }
 
-        let Some((index, row, card)) = self.comment_stop_elsewhere(direction)
-        else {
+        let is_forwards = direction > 0;
+        let from = layout.files.file_position(self.selected_file);
+
+        if let Some((index, row, card)) =
+            self.comment_stop_elsewhere(direction, layout)
+        {
+            let to = layout.files.file_position(index);
+            self.set_selected_file(index, false);
+            self.land_on(row, Some(card), layout);
+
+            if if is_forwards { to <= from } else { to >= from } {
+                self.note_wrap(is_forwards);
+            }
+            return true;
+        }
+
+        // All the way round the ring and back into the file it started in: the
+        // last conversation in a review still steps to the first.
+        let stops = self.comment_stops(self.selected_file);
+        let Some((row, card)) = if is_forwards {
+            stops.first()
+        } else {
+            stops.last()
+        }
+        .cloned() else {
             self.status = "no more comments".into();
             return false;
         };
 
-        self.set_selected_file(index, false);
         self.land_on(row, Some(card), layout);
+        self.note_wrap(is_forwards);
         true
     }
 
@@ -451,21 +548,18 @@ impl App {
         Some(stops[target].clone())
     }
 
+    /// The next stop outside the open file, searched round the ring: the
+    /// conversations above the cursor come after the ones below it rather than
+    /// being out of reach.
     fn comment_stop_elsewhere(
         &self,
         direction: isize,
+        layout: &Layout,
     ) -> Option<(usize, usize, Card)> {
-        let visible = self.filtered_file_indices();
-        let position = visible.iter().position(|&i| i == self.selected_file)?;
-
-        if direction > 0 {
-            self.comment_stop_in(visible[position + 1..].iter().copied(), true)
-        } else {
-            self.comment_stop_in(
-                visible[..position].iter().rev().copied(),
-                false,
-            )
-        }
+        self.comment_stop_in(
+            self.file_ring(direction, layout).into_iter(),
+            direction > 0,
+        )
     }
 
     fn comment_stop_in(

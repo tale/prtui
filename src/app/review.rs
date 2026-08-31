@@ -413,7 +413,7 @@ impl App {
             return;
         }
 
-        self.status = match self.next_unread_file(layout) {
+        self.status = match self.unread_after_current(layout) {
             Some(index) => {
                 self.select_file(index);
                 "marking viewed…".into()
@@ -435,19 +435,6 @@ impl App {
 
         self.viewed.remove(&path);
         "file marked unviewed".into()
-    }
-
-    /// The next file the reader has not been through, in the order the tree
-    /// lists them.
-    ///
-    /// Files already marked are stepped over rather than landed on. `x` on a
-    /// marked file clears its mark, so stopping there would turn a walk down
-    /// the review into undoing the last session's work.
-    fn next_unread_file(&self, layout: &Layout) -> Option<usize> {
-        let mut files = layout.files.files();
-        files.find(|&index| index == self.selected_file)?;
-
-        files.find(|&index| !self.viewed.contains(&self.files[index].path))
     }
 
     pub(super) fn start_submit(&mut self, layout: &Layout) {
