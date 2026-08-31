@@ -64,6 +64,21 @@ const DEFAULT: &[(&str, &str, &str)] = &[
     // spoken for in two of the three, stepping files and hits.
     ("fsc", "<C-p>", "history-prev"),
     ("fsc", "<C-n>", "history-next"),
+    // Readline's own editing, in every prompt there is. A prompt is a line of
+    // text in a terminal, and these are the chords a terminal has trained
+    // everyone to reach for on one.
+    ("ifscr", "<C-a>", "line-start"),
+    ("ifscr", "<C-e>", "line-end"),
+    ("ifscr", "<C-b>", "char-left"),
+    ("ifscr", "<C-f>", "char-right"),
+    ("ifscr", "<A-b>", "word-left"),
+    ("ifscr", "<A-f>", "word-right"),
+    ("ifscr", "<C-d>", "delete-char"),
+    ("ifscr", "<A-BS>", "delete-word-left"),
+    ("ifscr", "<C-w>", "delete-to-blank"),
+    ("ifscr", "<A-d>", "delete-word-right"),
+    ("ifscr", "<C-u>", "delete-to-start"),
+    ("ifscr", "<C-k>", "delete-to-end"),
     ("r", "<Tab>", "next-verdict"),
     ("r", "<S-Tab>", "prev-verdict"),
     ("n", "<CR>", "activate"),

@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use super::{
-    App, Card, CommentEditor, FileFilterSnapshot, Mode, Pane, Query,
+    App, Card, CommentEditor, Edit, FileFilterSnapshot, Mode, Pane, Query,
     ReviewThread, SearchOrigin, ex, search,
 };
 use crate::layout::Layout;
@@ -119,6 +119,21 @@ impl App {
         // the cursor, so the position is written after it.
         self.edit_prompt(layout, |editor| editor.set_text(&text));
         self.history_cursor = target;
+    }
+
+    /// Runs a readline edit against whichever line the mode is editing.
+    pub(super) fn edit_line(&mut self, edit: Edit, layout: &Layout) {
+        // A motion inside a recalled line is not a move off it, so only an
+        // edit that changes the text gives up the place in the history.
+        let recalled = self.history_cursor;
+
+        self.edit_prompt(layout, |editor| {
+            editor.edit(edit);
+        });
+
+        if !edit.is_destructive() {
+            self.history_cursor = recalled;
+        }
     }
 
     /// Feeds a key to whichever line the mode is editing. One route for the

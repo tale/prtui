@@ -22,7 +22,7 @@ use crate::model::{
 use crate::renderer::{Segment, Theme, ThemeMode};
 use action::Action;
 use draft::{Anchor, Attachment, Draft, Sync};
-use editor::CommentEditor;
+use editor::{CommentEditor, Edit};
 use effect::{Effect, FilesState, Loading, Message};
 use keymap::{Keymap, Resolution};
 use link::{Errand, Origin};
@@ -1244,6 +1244,7 @@ impl App {
             Action::WalkHistory(direction) => {
                 self.walk_history(direction, layout);
             }
+            Action::EditLine(edit) => self.edit_line(edit, layout),
         }
     }
 }

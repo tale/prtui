@@ -1,4 +1,4 @@
-use super::action::{Action, Motion};
+use super::action::{Action, Edit, Motion};
 use crate::expand::{self, Reveal};
 
 /// The count typed ahead of a command, and what it means to the kinds of
@@ -343,6 +343,78 @@ pub const COMMANDS: &[Command] = &[
         group: "command line",
         summary: "a newer command",
         build: |_| Action::WalkHistory(1),
+    },
+    Command {
+        name: "line-start",
+        group: "prompt",
+        summary: "the start of the line",
+        build: |_| Action::EditLine(Edit::LineStart),
+    },
+    Command {
+        name: "line-end",
+        group: "prompt",
+        summary: "the end of it",
+        build: |_| Action::EditLine(Edit::LineEnd),
+    },
+    Command {
+        name: "char-left",
+        group: "prompt",
+        summary: "back one character",
+        build: |_| Action::EditLine(Edit::CharLeft),
+    },
+    Command {
+        name: "char-right",
+        group: "prompt",
+        summary: "on one character",
+        build: |_| Action::EditLine(Edit::CharRight),
+    },
+    Command {
+        name: "word-left",
+        group: "prompt",
+        summary: "back one word",
+        build: |_| Action::EditLine(Edit::WordLeft),
+    },
+    Command {
+        name: "word-right",
+        group: "prompt",
+        summary: "on one word",
+        build: |_| Action::EditLine(Edit::WordRight),
+    },
+    Command {
+        name: "delete-char",
+        group: "prompt",
+        summary: "rub out the character ahead",
+        build: |_| Action::EditLine(Edit::DeleteChar),
+    },
+    Command {
+        name: "delete-word-left",
+        group: "prompt",
+        summary: "rub out the word behind",
+        build: |_| Action::EditLine(Edit::DeleteWordLeft),
+    },
+    Command {
+        name: "delete-word-right",
+        group: "prompt",
+        summary: "rub out the word ahead",
+        build: |_| Action::EditLine(Edit::DeleteWordRight),
+    },
+    Command {
+        name: "delete-to-blank",
+        group: "prompt",
+        summary: "rub out back to the last blank",
+        build: |_| Action::EditLine(Edit::DeleteToBlank),
+    },
+    Command {
+        name: "delete-to-start",
+        group: "prompt",
+        summary: "rub out to the start of the line",
+        build: |_| Action::EditLine(Edit::DeleteToStart),
+    },
+    Command {
+        name: "delete-to-end",
+        group: "prompt",
+        summary: "rub out to the end of it",
+        build: |_| Action::EditLine(Edit::DeleteToEnd),
     },
     Command {
         name: "open",

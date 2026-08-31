@@ -1184,6 +1184,93 @@ fn ctrl_s_no_longer_commits_anything() {
     }
 }
 
+const fn ctrl(character: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(character), Modifiers::CONTROL)
+}
+
+const fn alt(character: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(character), Modifiers::ALT)
+}
+
+fn type_line(input: &mut InputRouter, app: &mut App, text: &str) {
+    for character in text.chars() {
+        send(
+            input,
+            app,
+            KeyEvent::new(KeyCode::Char(character), Modifiers::NONE),
+        );
+    }
+}
+
+/// A prompt is a line of text in a terminal, so it answers to the chords a
+/// terminal edits a line with rather than to the arrow keys alone.
+#[test]
+fn a_prompt_answers_to_the_readline_chords() {
+    let mut app = load();
+    let mut input = InputRouter::default();
+
+    send(&mut input, &mut app, KeyEvent::from(KeyCode::Char(':')));
+    type_line(&mut input, &mut app, "open src/app/main.rs");
+
+    // Ctrl+W takes the whole path, the way the shell it came from does.
+    send(&mut input, &mut app, ctrl('w'));
+    assert_eq!(app.command_line.as_ref().unwrap().text(), "open ");
+
+    type_line(&mut input, &mut app, "src/app/main.rs");
+    send(&mut input, &mut app, alt('b'));
+    send(&mut input, &mut app, ctrl('k'));
+    assert_eq!(
+        app.command_line.as_ref().unwrap().text(),
+        "open src/app/main."
+    );
+
+    send(&mut input, &mut app, ctrl('a'));
+    type_line(&mut input, &mut app, "x");
+    assert_eq!(
+        app.command_line.as_ref().unwrap().text(),
+        "xopen src/app/main."
+    );
+
+    send(&mut input, &mut app, ctrl('e'));
+    send(&mut input, &mut app, ctrl('u'));
+    assert_eq!(app.command_line.as_ref().unwrap().text(), "");
+}
+
+/// The composer is the one prompt whose keys otherwise belong to the editor
+/// widget, and it takes the same chords.
+#[test]
+fn the_composer_answers_to_them_too() {
+    let mut app = load();
+    park_on_code(&mut app);
+    press(&mut app, "c");
+
+    let mut input = InputRouter::default();
+    type_line(&mut input, &mut app, "one two");
+    send(&mut input, &mut app, ctrl('a'));
+    type_line(&mut input, &mut app, "> ");
+
+    assert_eq!(app.composer.as_ref().unwrap().editor.text(), "> one two");
+}
+
+/// Moving around inside a recalled line is not typing over it, so the next
+/// recall goes on back through the history rather than starting again.
+#[test]
+fn a_motion_keeps_the_place_in_the_history() {
+    let mut app = load();
+    ex(&mut app, "12");
+    ex(&mut app, "nope");
+
+    let mut input = InputRouter::default();
+    send(&mut input, &mut app, KeyEvent::from(KeyCode::Char(':')));
+
+    send(&mut input, &mut app, ctrl('p'));
+    assert_eq!(app.command_line.as_ref().unwrap().text(), "nope");
+
+    send(&mut input, &mut app, ctrl('a'));
+    send(&mut input, &mut app, ctrl('p'));
+    assert_eq!(app.command_line.as_ref().unwrap().text(), "12");
+}
+
 #[test]
 fn paste_is_routed_only_to_an_open_composer() {
     let mut app = load();

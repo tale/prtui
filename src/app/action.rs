@@ -1,5 +1,6 @@
 use crate::expand::Reveal;
 
+pub use super::editor::Edit;
 pub use crate::vim::Motion;
 
 /// The application's verb vocabulary.
@@ -76,6 +77,8 @@ pub enum Action {
     CancelCommandLine,
     /// Walk the command history back (-1) or forward (1).
     WalkHistory(isize),
+    /// A readline edit inside whichever prompt is open.
+    EditLine(Edit),
 
     /// Open the key reference, open the description and the discussion, or
     /// close whichever of the two is being read.

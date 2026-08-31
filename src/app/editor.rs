@@ -1,5 +1,44 @@
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
+/// A readline edit.
+///
+/// Readline is the standard here rather than Vim: these are the chords bash,
+/// zsh, and every other terminal prompt answer to, and a prompt is a terminal
+/// prompt wherever it is drawn. A word is readline's own — a run of letters
+/// and digits — except in `DeleteToBlank`, which is Ctrl+W's, delimited by
+/// whitespace alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edit {
+    LineStart,
+    LineEnd,
+    CharLeft,
+    CharRight,
+    WordLeft,
+    WordRight,
+    DeleteChar,
+    DeleteWordLeft,
+    DeleteWordRight,
+    DeleteToBlank,
+    DeleteToStart,
+    DeleteToEnd,
+}
+
+impl Edit {
+    /// Whether the edit changes the text rather than only where the cursor
+    /// sits. Moving around inside a recalled line does not move off it.
+    pub const fn is_destructive(self) -> bool {
+        matches!(
+            self,
+            Self::DeleteChar
+                | Self::DeleteWordLeft
+                | Self::DeleteWordRight
+                | Self::DeleteToBlank
+                | Self::DeleteToStart
+                | Self::DeleteToEnd
+        )
+    }
+}
+
 /// Small multiline editor for draft comments. It deliberately implements only
 /// terminal-native insertion and cursor movement instead of carrying a full
 /// editor framework for a ten-line overlay.
@@ -119,6 +158,47 @@ impl CommentEditor {
             KeyCode::End => self.move_to(self.lines[self.row].len()),
             _ => false,
         }
+    }
+
+    /// Runs a readline edit. Returns whether the buffer or cursor changed.
+    ///
+    /// Every motion here stays on the row it started on: the ends of the line
+    /// are what the chords name, and the arrows already cross rows.
+    pub fn edit(&mut self, edit: Edit) -> bool {
+        let line = &self.lines[self.row];
+        let target = match edit {
+            Edit::CharLeft => return self.left(),
+            Edit::CharRight => return self.right(),
+            Edit::DeleteChar => return self.delete(),
+            Edit::LineStart | Edit::DeleteToStart => 0,
+            Edit::LineEnd | Edit::DeleteToEnd => line.len(),
+            Edit::WordLeft | Edit::DeleteWordLeft => {
+                word_start(line, self.column)
+            }
+            Edit::WordRight | Edit::DeleteWordRight => {
+                word_end(line, self.column)
+            }
+            Edit::DeleteToBlank => blank_word_start(line, self.column),
+        };
+
+        if edit.is_destructive() {
+            return self.cut_to(target);
+        }
+
+        self.move_to(target)
+    }
+
+    /// Drops the text between the cursor and a byte on the same line.
+    fn cut_to(&mut self, target: usize) -> bool {
+        if target == self.column {
+            return false;
+        }
+
+        let start = target.min(self.column);
+        let end = target.max(self.column);
+        self.lines[self.row].drain(start..end);
+        self.column = start;
+        true
     }
 
     fn insert_char(&mut self, character: char) {
@@ -247,6 +327,31 @@ fn next_boundary(text: &str, byte: usize) -> usize {
         .map_or(byte, |character| byte + character.len_utf8())
 }
 
+/// Readline's word: a run of letters and digits, whatever separates them.
+fn word_start(text: &str, byte: usize) -> usize {
+    text[..byte]
+        .trim_end_matches(|character: char| !character.is_alphanumeric())
+        .trim_end_matches(char::is_alphanumeric)
+        .len()
+}
+
+fn word_end(text: &str, byte: usize) -> usize {
+    let rest = text[byte..]
+        .trim_start_matches(|character: char| !character.is_alphanumeric())
+        .trim_start_matches(char::is_alphanumeric);
+
+    text.len() - rest.len()
+}
+
+/// Ctrl+W's word, which the shell delimits by whitespace alone, so one press
+/// takes back a whole path rather than the last name in it.
+fn blank_word_start(text: &str, byte: usize) -> usize {
+    text[..byte]
+        .trim_end_matches(char::is_whitespace)
+        .trim_end_matches(|character: char| !character.is_whitespace())
+        .len()
+}
+
 fn byte_at_character(text: &str, character: usize) -> usize {
     text.char_indices()
         .nth(character)
@@ -288,6 +393,88 @@ mod tests {
             editor.insert_text("two");
             assert_eq!(editor.text(), "one\ntwo");
         }
+    }
+
+    fn typed(text: &str) -> CommentEditor {
+        let mut editor = CommentEditor::default();
+        editor.insert_text(text);
+        editor
+    }
+
+    #[test]
+    fn readline_chords_walk_to_the_ends_of_the_line() {
+        let mut editor = typed("one two");
+        assert!(editor.edit(Edit::LineStart));
+        assert_eq!(editor.cursor(), (0, 0));
+        assert!(!editor.edit(Edit::LineStart));
+
+        assert!(editor.edit(Edit::LineEnd));
+        assert_eq!(editor.cursor(), (0, 7));
+
+        editor.insert_text("\nthree");
+        editor.edit(Edit::LineStart);
+        assert_eq!(editor.cursor(), (1, 0));
+    }
+
+    /// A word motion steps over what separates words before it steps over the
+    /// word, the way readline's does.
+    #[test]
+    fn a_word_motion_lands_between_words() {
+        let mut editor = typed("one two.three");
+        editor.edit(Edit::WordLeft);
+        assert_eq!(editor.cursor(), (0, 8));
+        editor.edit(Edit::WordLeft);
+        assert_eq!(editor.cursor(), (0, 4));
+
+        editor.edit(Edit::WordRight);
+        assert_eq!(editor.cursor(), (0, 7));
+        editor.edit(Edit::WordRight);
+        assert_eq!(editor.cursor(), (0, 13));
+    }
+
+    /// Ctrl+W is whitespace-delimited where the alt chords are not, so it
+    /// takes back a whole path and Alt+Backspace takes the name in it.
+    #[test]
+    fn the_kills_cut_what_their_chords_name() {
+        let mut editor = typed("look at src/app/editor.rs");
+        assert!(editor.edit(Edit::DeleteToBlank));
+        assert_eq!(editor.text(), "look at ");
+
+        let mut editor = typed("look at src/app/editor.rs");
+        editor.edit(Edit::DeleteWordLeft);
+        assert_eq!(editor.text(), "look at src/app/editor.");
+
+        let mut editor = typed("look at src/app/editor.rs");
+        editor.edit(Edit::DeleteToStart);
+        assert_eq!(editor.text(), "");
+        assert_eq!(editor.cursor(), (0, 0));
+
+        let mut editor = typed("one two");
+        editor.edit(Edit::LineStart);
+        editor.edit(Edit::DeleteWordRight);
+        assert_eq!(editor.text(), " two");
+        editor.edit(Edit::DeleteToEnd);
+        assert_eq!(editor.text(), "");
+    }
+
+    /// The kills stay on their own row: a comment is several lines and the
+    /// chord names the line the cursor is on.
+    #[test]
+    fn a_kill_leaves_the_neighbouring_lines_alone() {
+        let mut editor = typed("one\ntwo\nthree");
+        editor.edit(Edit::LineStart);
+        editor.edit(Edit::DeleteToEnd);
+        assert_eq!(editor.text(), "one\ntwo\n");
+        assert!(!editor.edit(Edit::DeleteToEnd));
+    }
+
+    #[test]
+    fn a_kill_cuts_on_character_boundaries() {
+        let mut editor = typed("café ☕");
+        editor.edit(Edit::DeleteToBlank);
+        assert_eq!(editor.text(), "café ");
+        editor.edit(Edit::DeleteToBlank);
+        assert_eq!(editor.text(), "");
     }
 
     #[test]

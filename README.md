@@ -112,11 +112,28 @@ file clears the mark and stays there.
 
 **Reading** — `/` searches whatever you are reading: an open panel, the tree,
 or the file, and starts clean each time. `n`/`N` walk the hits and `:noh`
-clears them. Inside any prompt — `/` or `:` — the arrows step what is under it
-and `<C-p>`/`<C-n>` recall what you typed there before. `za` reveals the
+clears them. Inside `/` or `:` the arrows step what is under it and
+`<C-p>`/`<C-n>` recall what you typed there before. `za` reveals the
 hidden lines under the cursor, `zj`/`zk` reveal downward or upward, and `zR`
 opens every gap in the file — the surrounding code is fetched from GitHub on
 demand.
+
+**Prompts** — every prompt edits with **readline**, the same chords bash and
+zsh answer to. `/`, `:`, a comment, and the submit form are all lines of text in
+a terminal, so they edit the way a terminal prompt does. `<C-a>`/`<C-e>` go to
+the ends of the line, `<C-b>`/`<C-f>` move a character, `<A-b>`/`<A-f>` a word —
+a word being a run of letters and digits, the way readline counts one. `<C-d>`
+rubs out the character ahead, `<A-BS>` the word behind it and `<A-d>` the word
+ahead, `<C-u>`/`<C-k>` everything behind or ahead on the line. `<C-w>` is
+delimited by whitespace alone, as it is in the shell, so one press takes back a
+whole path rather than the last name in it. In a comment, which is the one
+prompt with more than one line, every one of these stays on the line the cursor
+is on.
+
+Readline rather than Vim, where the two disagree: Vim's own command line spells
+`<C-b>` as the start of the line, and gives `<C-a>` and `<C-f>` to two things
+prtui has no equivalent of. `<C-e>`, `<C-w>`, and `<C-u>` mean the same in both.
+There is no kill ring behind the four rubouts, so `<C-y>` puts nothing back.
 
 **Conversations** — `}`/`{` jump between unanswered threads and `R` resolves
 or reopens the one you are on.
