@@ -263,6 +263,9 @@ const API_LIMIT: u64 = 64 * 1024 * 1024;
 /// Serves a blob as itself rather than as base64 inside a JSON envelope.
 const RAW_ACCEPT: &str = "application/vnd.github.raw";
 
+/// Serves a pull request as one unified diff, with no per-file size cap.
+const DIFF_ACCEPT: &str = "application/vnd.github.diff";
+
 /// A file big enough to exceed this is not one anybody expands into a terminal
 /// pane, and holding it would cost more than the diff it decorates.
 const BLOB_LIMIT: u64 = 8 * 1024 * 1024;
@@ -785,6 +788,60 @@ pub fn parse_meta(bytes: &[u8]) -> Result<Meta> {
     wire::meta_bytes(bytes)
 }
 
+/// Fills in the patches `/files` withheld, from the diff media type.
+///
+/// `/files` drops `patch` for a file whose own diff is large enough, which
+/// leaves the pane blank with nothing to say why. The whole pull request as
+/// one diff carries no such per-file cap, so one extra request recovers every
+/// patch that arrived missing.
+///
+/// A pull request too large for even that endpoint keeps the review it came
+/// with: those files stay as GitHub sent them rather than failing the load.
+async fn fill_withheld_patches(
+    repo: &Repo,
+    number: u32,
+    files: &mut [ChangedFile],
+) -> Result<()> {
+    if !files.iter().any(ChangedFile::is_patch_withheld) {
+        return Ok(());
+    }
+
+    let token = token(repo.host.as_deref()).await;
+    let url = repo.rest_url(&format!(
+        "/repos/{}/{}/pulls/{number}",
+        repo.namespace, repo.name
+    ));
+
+    let diff = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut response = get(&url, DIFF_ACCEPT, token.as_deref())?;
+        check(&mut response, "fetching the full diff")?;
+
+        response
+            .body_mut()
+            .with_config()
+            .limit(API_LIMIT)
+            .read_to_string()
+            .context("failed to read the full diff")
+    })
+    .await
+    .context("full-diff fetch panicked")??;
+
+    let wanted = files
+        .iter()
+        .filter(|file| file.is_patch_withheld())
+        .map(|file| &*file.path)
+        .collect();
+    let mut patches = wire::split_diff(&diff, &wanted);
+
+    for file in files.iter_mut().filter(|file| file.is_patch_withheld()) {
+        if let Some(lines) = patches.remove(&*file.path) {
+            file.lines = lines;
+        }
+    }
+
+    Ok(())
+}
+
 /// Changed files with their unified-diff patches. Measured faster than the
 /// `Accept: v3.diff` endpoint, and arrives pre-split per file.
 async fn fetch_files(repo: &Repo, number: u32) -> Result<Vec<ChangedFile>> {
@@ -795,7 +852,7 @@ async fn fetch_files(repo: &Repo, number: u32) -> Result<Vec<ChangedFile>> {
     ));
     let origin: Uri = first.parse().context("invalid GitHub API URL")?;
 
-    tokio::task::spawn_blocking(move || {
+    let pages = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut files = Vec::with_capacity(100);
         let mut next = Some(first);
 
@@ -815,9 +872,15 @@ async fn fetch_files(repo: &Repo, number: u32) -> Result<Vec<ChangedFile>> {
         }
 
         Ok(files)
-    })
-    .await
-    .context("changed-file fetch panicked")?
+    });
+
+    let mut files = pages.await.context("changed-file fetch panicked")??;
+
+    // A pull request too large for the diff endpoint keeps the review it came
+    // with: the files it withheld stay empty rather than failing the load.
+    let _ = fill_withheld_patches(repo, number, &mut files).await;
+
+    Ok(files)
 }
 
 /// Where a connection continues, or `None` when the page in hand is the last.

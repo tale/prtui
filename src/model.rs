@@ -136,6 +136,16 @@ pub struct ChangedFile {
     pub lines: Vec<DiffLine>,
 }
 
+impl ChangedFile {
+    /// Whether GitHub sent the file's stats but not its patch, which is what
+    /// it does once a single file's diff grows past its own size cap. A
+    /// binary, mode-only or pure-rename change reports no line changes at
+    /// all, so it reads as an honestly empty patch rather than a missing one.
+    pub const fn is_patch_withheld(&self) -> bool {
+        self.lines.is_empty() && (self.additions > 0 || self.deletions > 0)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Comment {
     /// The GraphQL node id, which is what editing and discarding a draft are

@@ -10,6 +10,7 @@ use crate::model::{
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Deserialize)]
 struct File {
@@ -87,6 +88,69 @@ fn parse_patch(patch: &str) -> Vec<DiffLine> {
     }
 
     lines
+}
+
+/// The path a `---`/`+++` header names, ignoring the side that is `/dev/null`.
+fn header_path(line: &str) -> Option<&str> {
+    line.strip_prefix("+++ b/")
+        .or_else(|| line.strip_prefix("--- a/"))
+}
+
+fn take_patch(
+    patches: &mut HashMap<String, Vec<DiffLine>>,
+    path: Option<&str>,
+    body: &mut String,
+) {
+    if let Some(path) = path
+        && !body.is_empty()
+    {
+        patches.insert(path.to_string(), parse_patch(body));
+    }
+
+    body.clear();
+}
+
+/// Splits a whole-pull-request unified diff into a patch per wanted path.
+///
+/// A `diff --git` line can only be the next file's header, since every line of
+/// a hunk carries a ` `, `+`, `-` or `\` prefix, and a `---` or `+++` line can
+/// only name a path before the file's first hunk. A file nobody asked for is
+/// skipped rather than parsed: the whole diff is fetched to recover the two or
+/// three patches inside it that arrived empty.
+pub(super) fn split_diff(
+    diff: &str,
+    wanted: &HashSet<&str>,
+) -> HashMap<String, Vec<DiffLine>> {
+    let mut patches = HashMap::new();
+    let mut path = None;
+    let mut is_in_hunk = false;
+    let mut body = String::new();
+
+    for raw in diff.lines() {
+        if raw.starts_with("diff --git ") {
+            take_patch(&mut patches, path.take(), &mut body);
+            is_in_hunk = false;
+            continue;
+        }
+
+        if !is_in_hunk && !raw.starts_with("@@") {
+            path = header_path(raw)
+                .filter(|named| wanted.contains(named))
+                .or(path);
+            continue;
+        }
+
+        is_in_hunk = true;
+
+        if path.is_some() {
+            body.push_str(raw);
+            body.push('\n');
+        }
+    }
+
+    take_patch(&mut patches, path, &mut body);
+
+    patches
 }
 
 fn convert_files(files: Vec<File>) -> Vec<ChangedFile> {
@@ -524,6 +588,90 @@ mod tests {
         assert_eq!(input["subjectType"], "FILE");
         assert!(input.get("line").is_none());
         assert!(input.get("side").is_none());
+    }
+
+    /// The diff endpoint is only reached for the files `/files` left empty, so
+    /// what it hands back has to survive being cut apart by path — including a
+    /// hunk line that looks like a header, and the `/dev/null` side of a file
+    /// that was added or deleted.
+    #[test]
+    fn a_full_diff_yields_a_patch_for_each_file_asked_for() {
+        let diff = "\
+diff --git a/src/skipped.rs b/src/skipped.rs
+index 1111111..2222222 100644
+--- a/src/skipped.rs
++++ b/src/skipped.rs
+@@ -1,2 +1,2 @@
+-gone
++here
+diff --git a/src/huge.rs b/src/huge.rs
+index 3333333..4444444 100644
+--- a/src/huge.rs
++++ b/src/huge.rs
+@@ -10,3 +10,3 @@ fn context() {
+ kept
+--- a/not/a/header
++++ b/not/a/header
+diff --git a/src/added.rs b/src/added.rs
+new file mode 100644
+index 0000000..5555555
+--- /dev/null
++++ b/src/added.rs
+@@ -0,0 +1,1 @@
++fresh
+diff --git a/src/gone.rs b/src/gone.rs
+deleted file mode 100644
+index 6666666..0000000
+--- a/src/gone.rs
++++ /dev/null
+@@ -1,1 +0,0 @@
+-old
+";
+        let wanted =
+            HashSet::from(["src/huge.rs", "src/added.rs", "src/gone.rs"]);
+        let patches = split_diff(diff, &wanted);
+
+        assert_eq!(patches.len(), 3);
+        assert!(!patches.contains_key("src/skipped.rs"));
+
+        let huge = &patches["src/huge.rs"];
+        assert_eq!(huge.len(), 4);
+        assert_eq!(huge[0].kind, LineKind::Hunk);
+        assert_eq!(huge[1].text, "kept");
+        assert_eq!(huge[1].new_line, Some(10));
+        // The one that reads as a header: a removed line whose own text starts
+        // with `--`, and the added line under it.
+        assert_eq!(huge[2].kind, LineKind::Removed);
+        assert_eq!(huge[2].text, "-- a/not/a/header");
+        assert_eq!(huge[3].kind, LineKind::Added);
+        assert_eq!(huge[3].text, "++ b/not/a/header");
+
+        assert_eq!(patches["src/added.rs"][1].text, "fresh");
+        assert_eq!(patches["src/gone.rs"][1].kind, LineKind::Removed);
+        assert_eq!(patches["src/gone.rs"][1].old_line, Some(1));
+    }
+
+    #[test]
+    fn only_a_file_with_changes_and_no_lines_is_a_withheld_patch() {
+        let file = |additions, deletions, lines: Vec<DiffLine>| ChangedFile {
+            path: "src/state.zig".into(),
+            status: "modified".into(),
+            additions,
+            deletions,
+            lines,
+        };
+        let line = DiffLine {
+            kind: LineKind::Added,
+            text: "x".into(),
+            old_line: None,
+            new_line: Some(1),
+        };
+
+        assert!(file(6187, 0, vec![]).is_patch_withheld());
+        assert!(file(0, 551, vec![]).is_patch_withheld());
+        // A binary, mode-only or pure-rename change: nothing was withheld.
+        assert!(!file(0, 0, vec![]).is_patch_withheld());
+        assert!(!file(1, 0, vec![line]).is_patch_withheld());
     }
 
     #[test]
