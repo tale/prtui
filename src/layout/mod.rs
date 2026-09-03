@@ -117,6 +117,14 @@ impl Layout {
         self.diff.height as usize
     }
 
+    /// The row list the next frame will draw, for a keystroke that has moved
+    /// the ground under this one. Opening another file or unfolding a card
+    /// changes the list, and a scroll measured against the drawn one lands
+    /// nowhere near what the reader asked for.
+    pub fn rebuild_rows(&self, app: &App) -> Rows {
+        build_rows(app, self.diff, &app.gaps())
+    }
+
     pub fn files_viewport(&self) -> usize {
         self.files_list.map_or(0, |list| list.height as usize)
     }

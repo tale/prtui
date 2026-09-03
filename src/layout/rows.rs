@@ -478,6 +478,21 @@ impl Rows {
             .map(|(_, row)| *row)
     }
 
+    /// Rows a card occupies: its summary, plus the conversation unfolded under
+    /// it while it is the open one.
+    pub fn card_height(&self, card: &Card) -> usize {
+        let Some(row) = self.card_row(card) else {
+            return 0;
+        };
+
+        let body = self.all[row + 1..]
+            .iter()
+            .take_while(|row| matches!(row, Row::Body { .. }))
+            .count();
+
+        body + 1
+    }
+
     pub fn body(&self, index: usize) -> Option<&BodyRow> {
         self.body.get(index)
     }

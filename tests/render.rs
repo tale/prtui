@@ -629,6 +629,59 @@ fn motion_leaves_a_conversation_that_cannot_scroll() {
     assert_eq!(app.cursor, line + 1);
 }
 
+/// A jump crosses files, so the scroll it asks for has to be measured against
+/// the file it landed in and not the one the last frame drew: the card used to
+/// be left off the pane entirely.
+#[test]
+fn a_comment_jump_scrolls_the_card_it_landed_on_into_view() {
+    let mut app = load();
+
+    press(&mut app, "}");
+
+    let layout = layout_of(&app);
+    let card = app.focused_card.clone().expect("a card to land on");
+    let row = layout.rows.card_row(&card).expect("the card to be drawn");
+
+    assert!(row >= app.diff_scroll);
+    assert!(row < app.diff_scroll + layout.diff_viewport());
+    assert!(draw(&app).contains("Lol not suspicious of coupling at all."));
+}
+
+/// A conversation unfolds downwards, so one opened at the foot of the pane
+/// would open straight off it — and the keys that would scroll it back are the
+/// ones the open conversation takes for itself.
+#[test]
+fn unfolding_a_card_makes_room_for_its_conversation() {
+    let mut app = load();
+    let mut thread = fixture_threads()
+        .into_iter()
+        .find(|thread| !thread.is_resolved)
+        .unwrap();
+    thread.comments[0].body = paragraphs(18, "Paragraph");
+    app.threads_by_path
+        .insert(thread.path.clone(), vec![thread.clone()]);
+
+    press(&mut app, "}");
+    act(&mut app, &Action::Activate);
+
+    let layout = layout_of(&app);
+    let card = app.focused_card.clone().expect("a card to land on");
+    let row = layout.rows.card_row(&card).expect("the card to be drawn");
+
+    // Anchored near the top, with a little of the code it hangs under above it.
+    assert_eq!(row, app.diff_scroll + 3);
+    assert!(
+        row + layout.rows.card_height(&card)
+            <= app.diff_scroll + layout.diff_viewport()
+    );
+
+    // Opening it again where it already fits leaves the pane where it is.
+    let settled = app.diff_scroll;
+    act(&mut app, &Action::Activate);
+    act(&mut app, &Action::Activate);
+    assert_eq!(app.diff_scroll, settled);
+}
+
 /// The seams have to rank: a break between two conversations reads as bigger
 /// than a break between two comments inside one of them. Both used to be
 /// nothing, and when only the inner one existed the hierarchy ran backwards.

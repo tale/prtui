@@ -2,6 +2,7 @@
 
 use super::action::Motion;
 use super::{App, Card, Draft, Mode, Pane};
+use crate::layout::rows::Rows;
 use crate::layout::tree::Row as TreeNode;
 use crate::layout::{Layout, rows};
 use crate::vim::step;
@@ -33,12 +34,19 @@ impl App {
         let Some(card) = self.focused_card.as_ref() else {
             return;
         };
+        self.thread_scroll = 0;
+
         if self.expanded_card.as_ref() == Some(card) {
             self.expanded_card = None;
-        } else {
-            self.expanded_card = Some(card.clone());
+            return;
         }
-        self.thread_scroll = 0;
+
+        self.expanded_card = Some(card.clone());
+
+        // The conversation this just unfolded is not in the drawn row list, so
+        // the room it needs has to be measured against a fresh one.
+        let rows = layout.rebuild_rows(self);
+        self.reveal_card(&rows, layout.diff_viewport());
     }
 
     pub(super) fn focus_files(&mut self) {
@@ -482,7 +490,11 @@ impl App {
         self.selection = None;
         self.cursor = row;
         self.set_focus(card);
-        self.follow_cursor(layout);
+
+        // A landing may have opened another file, whose rows the drawn layout
+        // knows nothing about.
+        let rows = layout.rebuild_rows(self);
+        self.reveal_card(&rows, layout.diff_viewport());
         self.status.clear();
     }
 
@@ -599,13 +611,51 @@ impl App {
 
     /// The row the cursor sits on: a focused thread's summary when one is
     /// focused, otherwise the source line itself.
-    fn cursor_row(&self, layout: &Layout) -> usize {
+    fn cursor_row(&self, rows: &Rows) -> usize {
         let focused = self
             .focused_card
             .as_ref()
-            .and_then(|card| layout.rows.card_row(card));
+            .and_then(|card| rows.card_row(card));
 
-        focused.unwrap_or_else(|| layout.rows.code_row(self.cursor))
+        focused.unwrap_or_else(|| rows.code_row(self.cursor))
+    }
+
+    /// Scrolls a landing into view, and gives a card the room its conversation
+    /// needs below it.
+    ///
+    /// A card unfolds downwards, so one brought only just into view opens off
+    /// the foot of the pane: the reader would have to scroll it before reading
+    /// it, and while it is open the keys that scroll the pane are the ones it
+    /// takes for itself. A card that cannot fit open where it stands is
+    /// anchored near the top instead, with a little of the code it hangs under
+    /// left above it.
+    fn reveal_card(&mut self, rows: &Rows, viewport: usize) {
+        if viewport == 0 {
+            return;
+        }
+
+        let placed = self.focused_card.as_ref().and_then(|card| {
+            Some((rows.card_row(card)?, rows.card_height(card)))
+        });
+
+        let Some((row, height)) = placed else {
+            self.keep_in_view(rows, viewport);
+            return;
+        };
+
+        let needed =
+            height.max(rows::thread_window(viewport) + 1).min(viewport);
+
+        if row >= self.diff_scroll
+            && row + needed <= self.diff_scroll + viewport
+        {
+            return;
+        }
+
+        let context = 3.min(viewport / 4);
+        self.diff_scroll = row
+            .saturating_sub(context)
+            .min(rows.len().saturating_sub(viewport));
     }
 
     /// Keeps the cursor inside the viewport with a small scroll-off margin.
@@ -622,11 +672,17 @@ impl App {
         layout: &Layout,
         viewport: usize,
     ) {
+        self.keep_in_view(&layout.rows, viewport);
+    }
+
+    /// Keeps the cursor inside `viewport` with a small scroll-off margin,
+    /// moving no further than it has to.
+    fn keep_in_view(&mut self, rows: &Rows, viewport: usize) {
         if viewport == 0 {
             return;
         }
 
-        let row = self.cursor_row(layout);
+        let row = self.cursor_row(rows);
         let margin = 3.min(viewport / 4);
 
         if row < self.diff_scroll + margin {
