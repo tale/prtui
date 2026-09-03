@@ -1,16 +1,16 @@
-use prtui::app::action::{Action, Motion};
-use prtui::app::draft::Parent;
-use prtui::app::input::DispatchResult;
-use prtui::app::input::InputRouter;
-use prtui::app::review::{Failure, Request, Sent};
-use prtui::app::{App, Card, Pane};
-use prtui::expand::{Place, Reveal, STEP};
-use prtui::layout::Layout;
-use prtui::layout::rows::{GUTTER, Row};
-use prtui::model::{LineKind, Side};
-use prtui::provider::github::{parse_files, parse_meta};
-use prtui::renderer::ThemeMode;
-use prtui::ui;
+use prtui_core::{LineKind, Side};
+use prtui_github::{parse_files, parse_meta};
+use prtui_tui::app::action::{Action, Motion};
+use prtui_tui::app::draft::Parent;
+use prtui_tui::app::input::DispatchResult;
+use prtui_tui::app::input::InputRouter;
+use prtui_tui::app::review::{Failure, Request, Sent};
+use prtui_tui::app::{App, Card, Pane};
+use prtui_tui::expand::{Place, Reveal, STEP};
+use prtui_tui::layout::Layout;
+use prtui_tui::layout::rows::{GUTTER, Row};
+use prtui_tui::renderer::ThemeMode;
+use prtui_tui::ui;
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -141,7 +141,7 @@ fn paragraphs(count: usize, label: &str) -> String {
 /// the only path into the highlight store.
 fn highlight(app: &mut App) {
     let file = &app.files[app.selected_file];
-    let styled = prtui::renderer::highlight_file(
+    let styled = prtui_tui::renderer::highlight_file(
         &file.path,
         &file.lines,
         app.theme().mode,
@@ -153,7 +153,7 @@ fn highlight(app: &mut App) {
 
 /// The fixture's threads in wire order. The app files them by path, so a test
 /// that wants one as a template reaches for the fixture rather than the app.
-fn fixture_threads() -> Vec<prtui::model::ReviewThread> {
+fn fixture_threads() -> Vec<prtui_core::ReviewThread> {
     parse_meta(include_bytes!("fixtures/meta.json"))
         .unwrap()
         .threads
@@ -389,7 +389,7 @@ fn parses_files_and_threads() {
     assert_eq!(thread.comments[0].created_at, "2024-04-29T14:06:54Z");
 }
 
-fn show_thread(app: &mut App, thread: &prtui::model::ReviewThread) {
+fn show_thread(app: &mut App, thread: &prtui_core::ReviewThread) {
     app.selected_file = app
         .files
         .iter()
@@ -1125,8 +1125,8 @@ fn scrolling_stays_in_bounds() {
 
 #[test]
 fn word_diff_marks_only_changed_tokens() {
-    use prtui::model::DiffLine;
-    use prtui::renderer::ThemeMode;
+    use prtui_core::DiffLine;
+    use prtui_tui::renderer::ThemeMode;
 
     let line = |kind, text: &str| DiffLine {
         kind,
@@ -1141,15 +1141,16 @@ fn word_diff_marks_only_changed_tokens() {
     ];
 
     let styled =
-        prtui::renderer::highlight_file("x.rs", &lines, ThemeMode::Dark);
+        prtui_tui::renderer::highlight_file("x.rs", &lines, ThemeMode::Dark);
 
-    let marked =
-        |row: &Vec<prtui::renderer::Segment>, source: &str| -> Vec<String> {
-            row.iter()
-                .filter(|segment| segment.is_emphasis)
-                .map(|segment| source[segment.range.clone()].to_string())
-                .collect()
-        };
+    let marked = |row: &Vec<prtui_tui::renderer::Segment>,
+                  source: &str|
+     -> Vec<String> {
+        row.iter()
+            .filter(|segment| segment.is_emphasis)
+            .map(|segment| source[segment.range.clone()].to_string())
+            .collect()
+    };
 
     // Whitespace-only tokenization used to flag `compute(alpha,` wholesale.
     assert_eq!(marked(&styled[0], &lines[0].text), vec!["alpha", "10"]);
@@ -1158,7 +1159,7 @@ fn word_diff_marks_only_changed_tokens() {
 
 #[test]
 fn light_mode_uses_light_diff_and_syntax_palettes() {
-    use prtui::renderer::{Theme, ThemeMode};
+    use prtui_tui::renderer::{Theme, ThemeMode};
 
     let mut app = App::with_theme(Theme::for_mode(ThemeMode::Light));
     app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
@@ -1273,7 +1274,7 @@ fn hiding_the_tree_forces_focus_to_the_diff() {
 
 #[test]
 fn visual_selection_paints_every_row_in_the_span() {
-    use prtui::app::mode::Selection;
+    use prtui_tui::app::mode::Selection;
 
     let mut app = load();
     app.pane = Pane::Diff;
@@ -1622,7 +1623,7 @@ fn a_refused_draft_names_the_reason() {
 
 const IMAGE_URL: &str = "https://github.com/user-attachments/assets/shot.png";
 
-fn thread_with_image(app: &mut App) -> prtui::model::ReviewThread {
+fn thread_with_image(app: &mut App) -> prtui_core::ReviewThread {
     let mut thread = fixture_threads()
         .into_iter()
         .find(|thread| !thread.is_resolved)
@@ -1689,7 +1690,7 @@ fn the_file_tree_marks_files_whose_threads_are_all_resolved() {
 /// bar and wears the accent title, so which one is live is never a guess.
 #[test]
 fn only_the_focused_pane_carries_the_cursor() {
-    use prtui::renderer::Theme;
+    use prtui_tui::renderer::Theme;
 
     let mut app = load();
     app.is_files_visible = true;
@@ -1737,8 +1738,8 @@ fn only_the_focused_pane_carries_the_cursor() {
 /// where the hit landed instead of only which files survived it.
 #[test]
 fn the_file_filter_paints_its_hit_in_the_path() {
-    use prtui::app::input::InputRouter;
-    use prtui::renderer::Theme;
+    use prtui_tui::app::input::InputRouter;
+    use prtui_tui::renderer::Theme;
 
     let mut app = load();
     app.is_files_visible = true;
@@ -1992,8 +1993,8 @@ fn the_tree_keeps_the_rule_between_the_panes() {
 
 #[test]
 fn search_paints_only_the_matched_bytes_of_a_diff_line() {
-    use prtui::app::input::InputRouter;
-    use prtui::renderer::Theme;
+    use prtui_tui::app::input::InputRouter;
+    use prtui_tui::renderer::Theme;
 
     const NEEDLE: &str = "DisableAuthCheckFlag";
 
@@ -2160,7 +2161,7 @@ fn the_status_bar_paints_failures_and_outages_as_trouble() {
     app.status = "error: fetching changed files failed: HTTP 404".into();
     assert!(app.is_status_alarming());
 
-    app.status = "github major outage".into();
+    app.status = "outage: provider unavailable".into();
     assert!(app.is_status_alarming());
 
     // Ordinary notes stay quiet; "no more comments" is not a failure.
@@ -2267,7 +2268,7 @@ fn shift_c_writes_a_note_about_the_whole_file() {
     app.pane = Pane::Diff;
 
     press(&mut app, "C");
-    assert_eq!(app.mode, prtui::app::mode::Mode::Insert);
+    assert_eq!(app.mode, prtui_tui::app::mode::Mode::Insert);
     assert!(draw(&app).contains("file note"));
 
     paste(
@@ -2432,7 +2433,7 @@ fn a_file_note_ships_without_a_line() {
 
 /// A patch whose every line names itself, so a test can assert on the exact
 /// line it expects to find on screen rather than on a rect.
-fn numbered_file(count: usize) -> prtui::model::ChangedFile {
+fn numbered_file(count: usize) -> prtui_core::ChangedFile {
     let mut patch = format!("@@ -1,{count} +1,{count} @@\n");
     for index in 0..count {
         let _ = writeln!(patch, "+line_{index:03}_marker");
@@ -2503,7 +2504,7 @@ fn the_submit_form_leaves_the_diff_readable_behind_it() {
 }
 
 /// A patch of exactly one added line, so a test can say what that line holds.
-fn single_line_file(text: &str) -> prtui::model::ChangedFile {
+fn single_line_file(text: &str) -> prtui_core::ChangedFile {
     let page = serde_json::json!([[{
         "filename": "wide.rs",
         "status": "modified",

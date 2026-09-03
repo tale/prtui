@@ -162,4 +162,8 @@ jobs:
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish --locked
+        run: |
+          cargo publish --locked -p prtui-core
+          cargo publish --locked -p prtui-github
+          cargo publish --locked -p prtui-tui
+          cargo publish --locked -p prtui

@@ -1,0 +1,17 @@
+[package]
+name = "prtui-core"
+version.workspace = true
+edition.workspace = true
+description = "Provider-neutral models and provider contract for prtui"
+readme = "README.md"
+categories = ["development-tools"]
+keywords = ["code-review", "provider", "tui"]
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"

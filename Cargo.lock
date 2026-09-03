@@ -917,18 +917,51 @@ dependencies = [
  "anyhow",
  "clap",
  "devicons",
- "futures-core",
- "pulldown-cmark",
+ "prtui-core",
+ "prtui-github",
+ "prtui-tui",
  "ratatui",
+ "serde_json",
+ "termina",
+ "tokio",
+ "unicode-width",
+]
+
+[[package]]
+name = "prtui-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "prtui-github"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "prtui-core",
  "serde",
  "serde_json",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
+name = "prtui-tui"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "devicons",
+ "futures-core",
+ "prtui-core",
+ "pulldown-cmark",
+ "ratatui",
  "similar",
  "syntect",
  "termina",
  "tokio",
  "two-face",
  "unicode-width",
- "ureq",
 ]
 
 [[package]]

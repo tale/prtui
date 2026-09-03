@@ -57,7 +57,7 @@ new generation. The arbitration is unit-tested without the runtime.
 ### `serde_json::Value` as the inter-layer transport — *resolved (D)*
 
 The old boundary handed fetch results back as `Value` for `main` to parse and
-stored pre-serialized draft JSON inside `Request`. `provider::github::wire` now
+stored pre-serialized draft JSON inside `Request`. `prtui-github::wire` now
 owns the derived response schemas and outbound field names; fetches return
 domain models and application requests carry typed draft data.
 
@@ -105,8 +105,8 @@ is not mistaken for one the code already keeps.
    Metadata requests carry a generation so a stale response drops instead of
    clobbering state.
 4. **Domain types at boundaries.** *(Live since D.)* `serde_json::Value` never
-   leaves `provider::github`; its `wire` module owns review schemas and
-   serialization. The runtime is generic over the `provider::Provider` trait;
+   leaves `prtui-github`; its `wire` module owns review schemas and
+   serialization. The runtime is generic over `prtui_core::Provider`;
    host clients return `Meta` / `Vec<ChangedFile>` and serialize
    drafts at the edge, never inside `app`.
 5. **Grouped private state.** *(Planned, E.)* `App` owns sub-structs (`Focus`,
@@ -117,42 +117,31 @@ is not mistaken for one the code already keeps.
 
 ```
 src/
-  main.rs           args -> session -> run          (~60 lines)
-  cli.rs            Args, ThemeChoice, ImageChoice
-  model/            PullRequest, ChangedFile, DiffLine, ReviewThread, Draft, Anchor
-  provider/
-    mod.rs          host trait
-    github/
-      mod.rs        GitHub client and API operations
-      transport.rs  agent, token, HTTP, pagination, error detail
-      wire.rs       Deserialize structs + patch parsing
-  app/
-    mod.rs          App: state + apply(Action | Msg) -> Effect
-    effect.rs       one Effect enum
-    focus.rs        cursor, pane, focused/expanded thread
-    find.rs         filter + search (one concept, two targets)
-    drafts.rs  review.rs  editor.rs  mode.rs
-    keys.rs    keymap.rs  command.rs  ex.rs  input.rs
-  layout/
-    mod.rs          Layout::compute -> rects, viewports, rows
-    rows.rs         Row enum + build() -> Vec<Row>         <- the key abstraction
-    measure.rs      clip / width / truncate                <- pure, unit-testable
-  view/
-    mod.rs          draw(&App, &Layout)                    <- read-only
-    diff.rs  files.rs  thread.rs  overlay.rs  statusbar.rs
-  runtime/
-    loop.rs  effects.rs  terminal.rs  images.rs
+  main.rs             CLI, provider switch, generic runtime
+crates/
+  prtui-core/src/
+    lib.rs            provider-neutral view model
+    provider.rs       statically-dispatched host contract
+  prtui-github/src/
+    lib.rs            GitHub client and API operations
+    transport.rs      agent, token, HTTP, pagination, error detail
+    wire.rs           deserialize structs + model conversion
+  prtui-tui/src/
+    app/              state machine and effects
+    selector.rs       selector state, rendering, and runtime
+    highlighter.rs    syntax worker
+    layout/           frame layout and virtual rows
+    renderer/         markdown, syntax highlighting, theme
+    summary.rs        selector summary rendering
+    terminal.rs       terminal lifecycle
+    text/             measurement and wrapping
+    ui.rs             read-only view
 ```
 
-Net effect: `app/` shrinks as logic moves to `layout/`, `ui.rs` splits about
-five ways, `main.rs` loses ~400 lines, and `model.rs` splits into `model/` plus
-the provider wire modules.
-
-Where it stands: `layout/` and `app/effect.rs` exist as drawn. `provider/mod.rs`
-owns the host-neutral types and trait; `provider/github/` owns
-the GitHub client, transport, and wire types. `ui.rs` is read-only and
-row-driven but is still one file, so `view/` is the shape it splits into. The
-remaining physical splits are step E.
+`prtui-core` is the only shared boundary: providers depend on it to produce the
+models, while `prtui-tui` depends on it to consume them. Provider crates and
+the TUI do not depend on one another. The root binary chooses a concrete
+provider once, then enters a generic runtime with static dispatch.
 
 ## The virtual row model
 

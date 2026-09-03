@@ -1,0 +1,28 @@
+[package]
+name = "prtui-tui"
+version.workspace = true
+edition.workspace = true
+description = "Provider-independent terminal UI for prtui"
+readme = "README.md"
+categories = ["command-line-utilities", "development-tools"]
+keywords = ["code-review", "terminal", "tui"]
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+devicons = "0.6.13"
+futures-core = { version = "0.3.31", default-features = false }
+prtui-core = { version = "0.2.0", path = "../prtui-core" }
+pulldown-cmark = { version = "0.13.4", default-features = false }
+ratatui = { version = "0.30.2", default-features = false, features = ["layout-cache", "termina"] }
+similar = "3.1.2"
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+termina = { version = "0.3.3", features = ["event-stream"] }
+tokio = { version = "1.53.1", features = ["process", "sync", "time"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
+unicode-width = "0.2.2"

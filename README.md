@@ -75,6 +75,7 @@ reviewing and never sends one host's credential to another.
 ```
 Options:
   -R, --repo <[HOST/]OWNER/REPO>  Select another repository
+      --provider <github>         Code-review host [default: github]
       --theme <auto|dark|light>   Color theme [default: auto]
   -h, --help                      Print help
   -V, --version                   Print version

@@ -1,16 +1,16 @@
-use prtui::app::action::{Action, Motion};
-use prtui::app::draft::{Parent, Side, Sync};
-use prtui::app::editor::CommentEditor;
-use prtui::app::input::{DispatchResult, InputRouter};
-use prtui::app::keymap::{Keymap, Resolution};
-use prtui::app::link::{Errand, Origin};
-use prtui::app::mode::Mode;
-use prtui::app::review::{Failure, Request, ReviewEvent, Sent};
-use prtui::app::search::Match;
-use prtui::app::{App, Card, Pane};
-use prtui::expand::{Reveal, STEP};
-use prtui::layout::Layout;
-use prtui::provider::github::{parse_files, parse_meta};
+use prtui_github::{parse_files, parse_meta};
+use prtui_tui::app::action::{Action, Motion};
+use prtui_tui::app::draft::{Parent, Side, Sync};
+use prtui_tui::app::editor::CommentEditor;
+use prtui_tui::app::input::{DispatchResult, InputRouter};
+use prtui_tui::app::keymap::{Keymap, Resolution};
+use prtui_tui::app::link::{Errand, Link};
+use prtui_tui::app::mode::Mode;
+use prtui_tui::app::review::{Failure, Request, ReviewEvent, Sent};
+use prtui_tui::app::search::Match;
+use prtui_tui::app::{App, Card, Pane};
+use prtui_tui::expand::{Reveal, STEP};
+use prtui_tui::layout::Layout;
 use ratatui::layout::Rect;
 use std::fmt::Write;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
@@ -50,7 +50,7 @@ fn act(app: &mut App, action: &Action) {
     app.apply(action, &layout);
 }
 
-fn found(app: &App) -> Vec<prtui::app::search::Match> {
+fn found(app: &App) -> Vec<prtui_tui::app::search::Match> {
     app.search_matches(&layout_of(app))
 }
 
@@ -60,7 +60,7 @@ fn summary(app: &App) -> (usize, usize) {
 
 /// The fixture's threads in wire order. The app files them by path, so a test
 /// that wants one as a template reaches for the fixture rather than the app.
-fn fixture_threads() -> Vec<prtui::model::ReviewThread> {
+fn fixture_threads() -> Vec<prtui_core::ReviewThread> {
     parse_meta(include_bytes!("fixtures/meta.json"))
         .unwrap()
         .threads
@@ -104,10 +104,6 @@ fn load() -> App {
     let mut app = App::new();
     app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
     app.set_meta(parse_meta(include_bytes!("fixtures/meta.json")).unwrap());
-    app.set_origin(Origin {
-        repo_url: "https://github.com/cli/cli".to_owned(),
-        number: 9000,
-    });
     app.pane = Pane::Diff;
 
     // The first fixture file is only 8 rows; motions need room to breathe.
@@ -126,11 +122,11 @@ fn park_on_code(app: &mut App) {
     app.cursor = app.files[app.selected_file]
         .lines
         .iter()
-        .position(|l| l.kind != prtui::model::LineKind::Hunk)
+        .position(|l| l.kind != prtui_core::LineKind::Hunk)
         .unwrap();
 }
 
-fn park_on_unresolved_thread(app: &mut App) -> prtui::model::ReviewThread {
+fn park_on_unresolved_thread(app: &mut App) -> prtui_core::ReviewThread {
     let thread = fixture_threads()
         .into_iter()
         .find(|thread| !thread.is_resolved)
@@ -156,7 +152,7 @@ fn open_patch(app: &mut App, patch: &str) {
     app.set_files(files);
 }
 
-fn file_from(patch: &str) -> prtui::model::ChangedFile {
+fn file_from(patch: &str) -> prtui_core::ChangedFile {
     let page = serde_json::json!([[{
         "filename": "synthetic.go",
         "status": "modified",
@@ -358,7 +354,7 @@ fn the_command_line_remembers_what_was_run() {
 /// carries still has to be listed under the name `:` reaches it by.
 #[test]
 fn the_reference_lists_every_command_and_the_keys_bound_to_it() {
-    use prtui::app::keymap::Reference;
+    use prtui_tui::app::keymap::Reference;
 
     let app = load();
     let reference = app.keymap().reference();
@@ -434,7 +430,7 @@ fn the_overview_reads_the_description_and_the_discussion() {
 
 /// The panel's lines, as the view would paint them.
 fn drawn_lines(layout: &Layout) -> Vec<String> {
-    use prtui::layout::Content;
+    use prtui_tui::layout::Content;
 
     let overlay = layout.overlay.as_ref().expect("a panel is open");
     match &overlay.content {
@@ -459,12 +455,13 @@ fn yanking_a_line_links_to_the_file_at_head() {
 
     assert_eq!(
         errand(&mut app),
-        Errand::Copy(format!(
-            "https://github.com/cli/cli/blob/{}/{path}#L{line}",
-            app.pr.as_ref().unwrap().head_oid
-        ))
+        Errand::Copy(Link::Blob {
+            commit: app.pr.as_ref().unwrap().head_oid.clone(),
+            path,
+            lines: Some((line, line)),
+        })
     );
-    assert!(app.status.starts_with("yanked https://"));
+    assert_eq!(app.status, "yanked link");
 }
 
 /// A span links to the whole span, and the selection has done its job once it
@@ -478,11 +475,13 @@ fn yanking_a_visual_span_links_every_line_and_drops_the_selection() {
     assert_eq!(app.mode, Mode::Visual);
     press(&mut app, "y");
 
-    let Errand::Copy(url) = errand(&mut app) else {
+    let Errand::Copy(Link::Blob { lines, .. }) = errand(&mut app) else {
         panic!("a yank copies");
     };
-    assert!(url.contains("#L"), "{url}");
-    assert!(url.contains("-L"), "a span names both ends: {url}");
+    let Some((start, end)) = lines else {
+        panic!("a span names its lines");
+    };
+    assert_ne!(start, end, "a span names both ends");
 
     assert_eq!(app.mode, Mode::Normal);
     assert!(app.selection.is_none());
@@ -494,20 +493,16 @@ fn yanking_a_visual_span_links_every_line_and_drops_the_selection() {
 fn yanking_a_conversation_links_the_comment() {
     let mut app = load();
     let thread = park_on_unresolved_thread(&mut app);
-    let rest_id = thread.comments[0]
-        .rest_id
-        .expect("the fixture's comments carry their REST ids");
+    let reply_target = thread.comments[0]
+        .reply_target
+        .clone()
+        .expect("the fixture's comments carry reply targets");
 
     press(&mut app, "j");
     assert!(app.focused_card.is_some(), "the card takes the focus");
 
     press(&mut app, "y");
-    assert_eq!(
-        errand(&mut app),
-        Errand::Copy(format!(
-            "https://github.com/cli/cli/pull/9000#discussion_r{rest_id}"
-        ))
-    );
+    assert_eq!(errand(&mut app), Errand::Copy(Link::Comment(reply_target)));
 }
 
 /// A yank is addressed at the cursor; the browser is not. Opening a blob page
@@ -515,7 +510,7 @@ fn yanking_a_conversation_links_the_comment() {
 #[test]
 fn gx_opens_the_pull_request_wherever_the_cursor_is() {
     let mut app = load();
-    let pull = Errand::Open("https://github.com/cli/cli/pull/9000".to_owned());
+    let pull = Errand::Open(Link::PullRequest);
 
     park_on_code(&mut app);
     press(&mut app, "gx");
@@ -949,7 +944,7 @@ fn commenting_a_selection_produces_one_multiline_draft() {
     let added = app.files[app.selected_file]
         .lines
         .iter()
-        .position(|l| l.kind == prtui::model::LineKind::Added)
+        .position(|l| l.kind == prtui_core::LineKind::Added)
         .unwrap();
     app.cursor = added;
 
@@ -1699,10 +1694,10 @@ fn comment_jump_steps_through_every_thread_in_a_file() {
         .collect();
 
     let template = fixture_threads().remove(0);
-    let threads: Vec<prtui::model::ReviewThread> = rows
+    let threads: Vec<prtui_core::ReviewThread> = rows
         .iter()
         .enumerate()
-        .map(|(index, &row)| prtui::model::ReviewThread {
+        .map(|(index, &row)| prtui_core::ReviewThread {
             id: format!("thread-{index}").into(),
             path: file.path.clone(),
             line: file.lines[row].new_line,
@@ -2146,7 +2141,7 @@ fn every_draft_is_filed_against_one_pending_review() {
         .lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| l.kind == prtui::model::LineKind::Added)
+        .filter(|(_, l)| l.kind == prtui_core::LineKind::Added)
         .map(|(row, _)| row)
         .collect();
 
@@ -2585,7 +2580,7 @@ fn mark_viewed(app: &mut App, files: &[usize]) {
 }
 
 /// The fixture as GitHub would send it back once `path` has been read through.
-fn meta_marking_viewed(path: &str) -> prtui::model::Meta {
+fn meta_marking_viewed(path: &str) -> prtui_core::Meta {
     let mut meta: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
     let files = meta["data"]["repository"]["pullRequest"]["files"]["nodes"]
@@ -2982,7 +2977,7 @@ fn jumping_between_comments_stops_on_drafts() {
 
 /// The fixture's metadata with one pending thread bolted on, standing in for a
 /// fetch that still believes in a draft.
-fn meta_with_pending(comment: &str, body: &str) -> prtui::model::Meta {
+fn meta_with_pending(comment: &str, body: &str) -> prtui_core::Meta {
     let mut meta: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/meta.json")).unwrap();
     let pr = &mut meta["data"]["repository"]["pullRequest"];
@@ -3007,7 +3002,7 @@ fn meta_with_pending(comment: &str, body: &str) -> prtui::model::Meta {
 /// enough for what the keymap and the command table actually hold.
 #[test]
 fn the_reference_fits_the_columns_it_is_drawn_in() {
-    use prtui::app::keymap::Reference;
+    use prtui_tui::app::keymap::Reference;
 
     let app = load();
     for line in app.keymap().reference() {

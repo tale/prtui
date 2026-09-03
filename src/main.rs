@@ -1,31 +1,24 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
-use futures_core::Stream;
-use prtui::app::App;
-use prtui::app::effect::{Effect, Message as AppMessage};
-use prtui::app::input::InputRouter;
-use prtui::app::link::{Errand, Origin};
-use prtui::app::review::{Failure, Request, Sent};
-use prtui::layout::Layout;
-use prtui::model::{PullRequestTarget, Repo};
-use prtui::provider::Provider;
-use prtui::provider::github::GitHub;
-use prtui::renderer::{self, Theme, ThemeMode};
-use prtui::ui;
-use std::{
-    future::poll_fn, pin::Pin, process::Stdio, sync::Arc, time::Duration,
-};
+use prtui_core::Provider;
+use prtui_core::{PullRequestTarget, Repo};
+use prtui_github::GitHub;
+use prtui_tui::app::App;
+use prtui_tui::app::effect::{Effect, Message as AppMessage};
+use prtui_tui::app::input::InputRouter;
+use prtui_tui::app::link::{Errand, Link};
+use prtui_tui::app::review::{Failure, Request, Sent};
+use prtui_tui::layout::Layout;
+use prtui_tui::renderer::{self, Theme, ThemeMode};
+use prtui_tui::ui;
+use prtui_tui::{highlighter, selector, terminal};
+use std::{sync::Arc, time::Duration};
 use termina::escape::csi::{
     Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode,
 };
 use termina::event::KeyEventKind;
 use termina::{Event, EventStream};
 use tokio::sync::mpsc;
-
-mod highlighter;
-mod selector;
-mod summary;
-mod terminal;
 
 #[derive(Parser)]
 #[command(
@@ -41,6 +34,10 @@ struct Args {
     #[arg(short = 'R', long = "repo", value_name = "[HOST/]OWNER/REPO")]
     repo: Option<String>,
 
+    /// Code-review host
+    #[arg(long, value_enum, default_value_t = ProviderChoice::Github)]
+    provider: ProviderChoice,
+
     /// Color theme; auto queries the terminal's actual background
     #[arg(long, value_enum, default_value_t = ThemeChoice::Auto)]
     theme: ThemeChoice,
@@ -51,6 +48,11 @@ enum ThemeChoice {
     Auto,
     Dark,
     Light,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ProviderChoice {
+    Github,
 }
 
 impl ThemeChoice {
@@ -70,6 +72,25 @@ impl ThemeChoice {
 enum Message {
     App(AppMessage),
     Highlight(highlighter::Output),
+}
+
+fn resolve_link<P: Provider>(
+    provider: P,
+    repo: &Repo,
+    number: u32,
+    link: &Link,
+) -> String {
+    match link {
+        Link::PullRequest => provider.pull_request_url(repo, number),
+        Link::Comment(reply_target) => {
+            provider.comment_url(repo, number, reply_target)
+        }
+        Link::Blob {
+            commit,
+            path,
+            lines,
+        } => provider.blob_url(repo, commit, path, *lines),
+    }
 }
 
 /// Pull metadata again so a posted reply or a resolved thread shows up in the
@@ -204,25 +225,6 @@ fn spawn_request<P: Provider>(
     });
 }
 
-// Nothing waits on the child; tokio reaps it when the handle drops.
-fn open_url(url: &str) -> Result<()> {
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-
-    tokio::process::Command::new(opener)
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("failed to spawn {opener}"))?;
-
-    Ok(())
-}
-
 enum Launch {
     Review {
         repo: Repo,
@@ -251,8 +253,14 @@ impl ReviewExit {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    match args.provider {
+        ProviderChoice::Github => start(args, GitHub).await,
+    }
+}
+
+async fn start<P: Provider>(args: Args, provider: P) -> Result<()> {
     let follow_terminal = args.theme.follows_terminal();
-    let provider = GitHub;
 
     let repo = match &args.repo {
         Some(slug) => Some(provider.parse_repo(slug)?),
@@ -356,10 +364,6 @@ async fn event_loop<P: Provider>(
     let number = target.number;
     let repo = target.repo;
     let mut app = App::with_theme(*theme);
-    app.set_origin(Origin {
-        repo_url: provider.repo_url(&repo),
-        number,
-    });
     app.start();
     let mut input = InputRouter::default();
     let highlighter = highlighter::Highlighter::new({
@@ -415,13 +419,15 @@ async fn event_loop<P: Provider>(
                         highlighter.one(file, app.theme().mode);
                     }
                 }
-                Effect::Errand(Errand::Open(url)) => {
-                    if let Err(err) = open_url(&url) {
+                Effect::Errand(Errand::Open(link)) => {
+                    let url = resolve_link(provider, &repo, number, &link);
+                    if let Err(err) = terminal::open_url(&url) {
                         app.status = format!("error: {err}");
                     }
                 }
-                Effect::Errand(Errand::Copy(text)) => {
-                    terminal::copy(terminal, &text)
+                Effect::Errand(Errand::Copy(link)) => {
+                    let url = resolve_link(provider, &repo, number, &link);
+                    terminal::copy(terminal, &url)
                         .context("copying to the clipboard")?;
                 }
             }
@@ -462,7 +468,7 @@ async fn event_loop<P: Provider>(
 
                 is_dirty |= affects_display;
             }
-            event = next_event(events) => {
+            event = terminal::next_event(events) => {
                 let event = event
                     .context("terminal event stream closed")?
                     .context("reading terminal event")?;
@@ -528,12 +534,6 @@ fn present_frame(
     .context("drawing a frame")?;
 
     Ok(layout)
-}
-
-async fn next_event(
-    events: &mut EventStream,
-) -> Option<std::io::Result<Event>> {
-    poll_fn(|cx| Pin::new(&mut *events).poll_next(cx)).await
 }
 
 #[cfg(test)]
