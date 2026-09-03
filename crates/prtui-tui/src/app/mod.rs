@@ -282,16 +282,17 @@ fn attachment_for(
     Some(Attachment::Lines { rows, anchor })
 }
 
-pub struct App {
-    pub pr: Option<PullRequest>,
+#[derive(Default)]
+struct ReviewState {
+    pr: Option<PullRequest>,
     /// Each file is shared independently with the syntax worker. A reveal can
     /// therefore replace or copy only the patch it changes instead of cloning
     /// every changed file to preserve one worker's snapshot.
-    pub files: Vec<Arc<ChangedFile>>,
-    pub threads_by_path: HashMap<Arc<str>, Vec<ReviewThread>>,
+    files: Vec<Arc<ChangedFile>>,
+    threads_by_path: HashMap<Arc<str>, Vec<ReviewThread>>,
     /// The pending review's comments, mirrored locally so they can be drawn
     /// before GitHub has answered for them.
-    pub drafts: Vec<Draft>,
+    drafts: Vec<Draft>,
     /// The review the drafts hang off. Absent until the first draft opens one.
     pending_review: Option<Arc<str>>,
     /// Pending threads exactly as GitHub last reported them. Held apart from
@@ -307,53 +308,80 @@ pub struct App {
     viewed: HashSet<Arc<str>>,
     next_draft_id: u64,
 
-    pub mode: Mode,
-    pub selection: Option<Selection>,
-    pub composer: Option<Composer>,
-    pub submission: Option<Submission>,
+    discussion: Vec<Comment>,
+}
+
+struct NavigationState {
+    mode: Mode,
+    selection: Option<Selection>,
+    selected_file: usize,
+    collapsed: HashSet<Arc<str>>,
+    tree_directory: Option<Arc<str>>,
+    cursor: usize,
+    focused_card: Option<Card>,
+    expanded_card: Option<Card>,
+    thread_scroll: usize,
+    diff_scroll: usize,
+    pane: Pane,
+    is_files_visible: bool,
+    overlay_scroll: usize,
+    overlay_match: Option<usize>,
+}
+
+impl Default for NavigationState {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Normal,
+            selection: None,
+            selected_file: 0,
+            collapsed: HashSet::new(),
+            tree_directory: None,
+            cursor: 0,
+            focused_card: None,
+            expanded_card: None,
+            thread_scroll: 0,
+            diff_scroll: 0,
+            pane: Pane::Files,
+            is_files_visible: true,
+            overlay_scroll: 0,
+            overlay_match: None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct PromptState {
+    composer: Option<Composer>,
+    submission: Option<Submission>,
     /// The review handed to the network, held so a rejection can give the
     /// summary back instead of making the user retype it.
     sending: Option<Submission>,
-    pub file_filter: Option<CommentEditor>,
-    pub search: Option<CommentEditor>,
-    /// The `:` line, while one is open.
-    pub command_line: Option<CommentEditor>,
-    pub selected_file: usize,
-    /// Directories the reader has folded away, keyed by path with its trailing
-    /// slash. Held here rather than in the tree so a fold survives a refetch.
-    collapsed: HashSet<Arc<str>>,
-    /// The heading the tree cursor is resting on, when it is on one rather than
-    /// on a file. The same shape as `focused_thread` in the diff: a cursor plus
-    /// an optional thing above it that captures the keys.
-    tree_directory: Option<Arc<str>>,
-    pub cursor: usize,
-    /// The conversation the cursor is resting on, if it is on one rather than
-    /// on the code. A draft of the reader's own counts: it is a card the same
-    /// as any thread.
-    pub focused_card: Option<Card>,
-    pub expanded_card: Option<Card>,
-    pub thread_scroll: usize,
-    /// First virtual row of the diff pane on screen. Rows are not source lines:
-    /// a line's threads occupy rows of their own, so the offset addresses the
-    /// row list the layout builds rather than the patch.
-    pub diff_scroll: usize,
-    pub pane: Pane,
-    pub is_files_visible: bool,
+    file_filter: Option<CommentEditor>,
+    search: Option<CommentEditor>,
+    command_line: Option<CommentEditor>,
+    filter_snapshot: Option<FileFilterSnapshot>,
+    search_origin: Option<SearchOrigin>,
+    command_history: Vec<String>,
+    search_history: Vec<String>,
+    filter_history: Vec<String>,
+    history_cursor: Option<usize>,
+}
 
-    /// The comments made about the change as a whole, which the overview
-    /// reads under the description.
-    pub discussion: Vec<Comment>,
-
-    pub status: String,
-    pub loading_frame: usize,
-    pub should_quit: bool,
-    /// Requests handed to the event loop but not yet answered.
-    pub in_flight: usize,
-
-    /// The single boundary for work leaving the model. The event loop drains
-    /// and executes it without owning any of the ordering policy.
+#[derive(Default)]
+struct RuntimeState {
+    status: String,
+    loading_frame: usize,
+    should_quit: bool,
+    in_flight: usize,
     effects: Vec<Effect>,
     loading: Loading,
+}
+
+pub struct App {
+    review: ReviewState,
+    navigation: NavigationState,
+    prompts: PromptState,
+    runtime: RuntimeState,
     theme: Theme,
     /// The bindings. Configuration the app owns and the view reads, the same
     /// way the theme is.
@@ -370,20 +398,6 @@ pub struct App {
     /// The expansion waiting on a file's contents. One at a time: a gap is
     /// named by where it sits in the patch, and revealing one moves the rest.
     deferred: Option<(Arc<str>, Wanted)>,
-    filter_snapshot: Option<FileFilterSnapshot>,
-    search_origin: Option<SearchOrigin>,
-    /// Every `:` line run this session, oldest first.
-    /// What each prompt has been given this session, oldest first. `/` and `:`
-    /// open clean, so recall is the only way back to an earlier one.
-    command_history: Vec<String>,
-    search_history: Vec<String>,
-    filter_history: Vec<String>,
-    /// How far back through the history the open `:` line has been walked.
-    history_cursor: Option<usize>,
-    /// How far the open panel has been scrolled.
-    pub overlay_scroll: usize,
-    /// Which of the panel's hits `n` last landed on, as an index into them.
-    overlay_match: Option<usize>,
 }
 
 impl Default for App {
@@ -399,54 +413,16 @@ impl App {
 
     pub fn with_theme(theme: Theme) -> Self {
         Self {
-            pr: None,
-            files: Vec::new(),
-            threads_by_path: HashMap::new(),
-            drafts: Vec::new(),
-            pending_review: None,
-            pending_threads: Vec::new(),
-            retired: HashSet::new(),
-            viewed: HashSet::new(),
-            next_draft_id: 0,
-            mode: Mode::Normal,
-            selection: None,
-            composer: None,
-            submission: None,
-            sending: None,
-            file_filter: None,
-            search: None,
-            command_line: None,
-            selected_file: 0,
-            collapsed: HashSet::new(),
-            tree_directory: None,
-            cursor: 0,
-            focused_card: None,
-            expanded_card: None,
-            thread_scroll: 0,
-            diff_scroll: 0,
-            pane: Pane::Files,
-            is_files_visible: true,
-            discussion: Vec::new(),
-            status: String::new(),
-            loading_frame: 0,
-            should_quit: false,
-            in_flight: 0,
-            effects: Vec::new(),
-            loading: Loading::default(),
+            review: ReviewState::default(),
+            navigation: NavigationState::default(),
+            prompts: PromptState::default(),
+            runtime: RuntimeState::default(),
             theme,
             keymap: Keymap::default(),
             highlights: HashMap::new(),
             blobs: HashMap::new(),
             fetching: HashSet::new(),
             deferred: None,
-            filter_snapshot: None,
-            search_origin: None,
-            command_history: Vec::new(),
-            search_history: Vec::new(),
-            filter_history: Vec::new(),
-            history_cursor: None,
-            overlay_scroll: 0,
-            overlay_match: None,
         }
     }
 
@@ -461,7 +437,7 @@ impl App {
     /// Feeds one key to the bindings. The mode is the keymap's addressing, so
     /// the app supplies it rather than the caller.
     pub fn resolve_key(&mut self, key: KeyEvent) -> Resolution {
-        self.keymap.resolve(self.mode, key)
+        self.keymap.resolve(self.navigation.mode, key)
     }
 
     /// Drops a half-typed command, which is what a mode change means for one.
@@ -474,35 +450,35 @@ impl App {
     }
 
     pub const fn is_loading(&self) -> bool {
-        self.loading.is_files_pending()
+        self.runtime.loading.is_files_pending()
     }
 
     pub const fn advance_loading(&mut self) {
-        self.loading_frame = self.loading_frame.wrapping_add(1);
+        self.runtime.loading_frame = self.runtime.loading_frame.wrapping_add(1);
     }
 
     /// Starts the two independent initial reads exactly once.
     pub fn start(&mut self) {
-        let Some(generation) = self.loading.start() else {
+        let Some(generation) = self.runtime.loading.start() else {
             return;
         };
 
-        self.effects.reserve(2);
-        self.effects.push(Effect::FetchFiles);
-        self.effects.push(Effect::FetchMeta { generation });
+        self.runtime.effects.reserve(2);
+        self.runtime.effects.push(Effect::FetchFiles);
+        self.runtime.effects.push(Effect::FetchMeta { generation });
     }
 
     /// The event loop is the only executor; all policy has already happened by
     /// the time it drains this list.
     pub fn take_effects(&mut self) -> Vec<Effect> {
-        std::mem::take(&mut self.effects)
+        std::mem::take(&mut self.runtime.effects)
     }
 
     fn take_selected<T>(
         &mut self,
         mut select: impl FnMut(Effect) -> Result<T, Effect>,
     ) -> Vec<T> {
-        let held = std::mem::take(&mut self.effects);
+        let held = std::mem::take(&mut self.runtime.effects);
         let mut retained = Vec::with_capacity(held.len());
         let mut selected = Vec::with_capacity(held.len());
 
@@ -513,13 +489,13 @@ impl App {
             }
         }
 
-        self.effects = retained;
+        self.runtime.effects = retained;
         selected
     }
 
     fn record_initial_failure(&mut self, failure: String) {
-        if self.loading.fail(failure) {
-            self.effects.push(Effect::ProbeOutage);
+        if self.runtime.loading.fail(failure) {
+            self.runtime.effects.push(Effect::ProbeOutage);
         }
     }
 
@@ -528,38 +504,38 @@ impl App {
     pub fn receive(&mut self, message: Message) -> bool {
         match message {
             Message::Files(outcome) => {
-                let pending_before = self.loading.pending();
+                let pending_before = self.runtime.loading.pending();
 
                 match outcome {
                     Ok(files) => {
                         self.set_files(files);
-                        self.effects.push(Effect::HighlightAll);
+                        self.runtime.effects.push(Effect::HighlightAll);
                     }
                     Err(error) => {
                         self.fail_files();
                         self.record_initial_failure(error);
-                        self.status = self.loading.status();
+                        self.runtime.status = self.runtime.loading.status();
                     }
                 }
 
-                if pending_before != 0 && self.loading.pending() == 0 {
-                    self.status = self.loading.status();
+                if pending_before != 0 && self.runtime.loading.pending() == 0 {
+                    self.runtime.status = self.runtime.loading.status();
                 }
                 true
             }
             Message::Meta {
                 generation,
                 outcome,
-            } => match self.loading.complete_meta(generation) {
+            } => match self.runtime.loading.complete_meta(generation) {
                 effect::MetaCompletion::Ignore => false,
                 effect::MetaCompletion::Retry(generation) => {
-                    self.effects.push(Effect::FetchMeta { generation });
+                    self.runtime.effects.push(Effect::FetchMeta { generation });
                     false
                 }
                 effect::MetaCompletion::Accept => {
-                    let pending_before = self.loading.pending();
-                    let is_initial = self.loading.is_meta_pending();
-                    self.loading.meta_ready();
+                    let pending_before = self.runtime.loading.pending();
+                    let is_initial = self.runtime.loading.is_meta_pending();
+                    self.runtime.loading.meta_ready();
 
                     match outcome {
                         Ok(meta) => self.set_meta(*meta),
@@ -567,13 +543,15 @@ impl App {
                             self.record_initial_failure(error);
                         }
                         Err(error) => {
-                            self.status =
+                            self.runtime.status =
                                 format!("error: refreshing comments: {error}");
                         }
                     }
 
-                    if pending_before != 0 && self.loading.pending() == 0 {
-                        self.status = self.loading.status();
+                    if pending_before != 0
+                        && self.runtime.loading.pending() == 0
+                    {
+                        self.runtime.status = self.runtime.loading.status();
                     }
                     true
                 }
@@ -585,25 +563,34 @@ impl App {
                 self.finish(outcome);
 
                 if invalidates {
-                    self.loading.invalidate_meta();
+                    self.runtime.loading.invalidate_meta();
                 }
                 if needs_refetch
-                    && let Some(generation) = self.loading.request_meta()
+                    && let Some(generation) =
+                        self.runtime.loading.request_meta()
                 {
-                    self.effects.push(Effect::FetchMeta { generation });
+                    self.runtime.effects.push(Effect::FetchMeta { generation });
                 }
                 true
             }
             Message::Outage(summary) => {
-                self.loading.set_outage(summary);
-                self.status = self.loading.status();
+                self.runtime.loading.set_outage(summary);
+                self.runtime.status = self.runtime.loading.status();
+                true
+            }
+            Message::ExternalFailure(error) => {
+                self.runtime.status = format!("error: {error}");
                 true
             }
         }
     }
 
+    pub const fn should_quit(&self) -> bool {
+        self.runtime.should_quit
+    }
+
     pub const fn take_failure(&mut self) -> Option<String> {
-        self.loading.take_failure()
+        self.runtime.loading.take_failure()
     }
 
     /// File patches are the only data required to make the main review surface
@@ -615,24 +602,25 @@ impl App {
     {
         // A path that comes back with a new patch cannot keep its old colors.
         self.highlights.clear();
-        self.files = files.into_iter().map(Into::into).collect();
-        self.loading.files = FilesState::Loaded;
+        self.review.files = files.into_iter().map(Into::into).collect();
+        self.runtime.loading.files = FilesState::Loaded;
         self.reseed_drafts();
     }
 
     /// A failed diff still leaves the independently loaded metadata visible.
     pub fn fail_files(&mut self) {
-        self.files.clear();
-        self.loading.files = FilesState::Failed;
+        self.review.files.clear();
+        self.runtime.loading.files = FilesState::Failed;
     }
 
     /// Whether the status bar should paint its text as a failure.
     pub fn is_status_alarming(&self) -> bool {
-        self.status.starts_with("error:") || self.status.starts_with("outage:")
+        self.runtime.status.starts_with("error:")
+            || self.runtime.status.starts_with("outage:")
     }
 
     pub const fn files_placeholder(&self) -> &'static str {
-        match self.loading.files {
+        match self.runtime.loading.files {
             FilesState::Failed => "diff unavailable",
             _ => "no changed files",
         }
@@ -647,7 +635,7 @@ impl App {
 
         self.theme = Theme::for_mode(mode);
         self.highlights.clear();
-        self.effects.push(Effect::HighlightAll);
+        self.runtime.effects.push(Effect::HighlightAll);
         true
     }
 
@@ -675,16 +663,16 @@ impl App {
             }
         }
 
-        self.retired.retain(|id| {
+        self.review.retired.retain(|id| {
             pending.iter().any(|thread| thread.comments[0].id == *id)
         });
 
-        self.threads_by_path = by_path;
-        self.pending_threads = pending;
-        self.viewed = meta.viewed;
-        self.pending_review = meta.pending_review;
-        self.discussion = meta.discussion;
-        self.pr = Some(meta.pr);
+        self.review.threads_by_path = by_path;
+        self.review.pending_threads = pending;
+        self.review.viewed = meta.viewed;
+        self.review.pending_review = meta.pending_review;
+        self.review.discussion = meta.discussion;
+        self.review.pr = Some(meta.pr);
         self.reseed_drafts();
         self.create_drafts();
     }
@@ -693,7 +681,7 @@ impl App {
         thread
             .comments
             .first()
-            .is_some_and(|first| self.retired.contains(&first.id))
+            .is_some_and(|first| self.review.retired.contains(&first.id))
     }
 
     /// Rebuilds the drafts from what GitHub last reported.
@@ -708,19 +696,21 @@ impl App {
     /// pull the cursor off the card under it.
     fn reseed_drafts(&mut self) {
         let known: HashMap<Arc<str>, u64> = self
+            .review
             .drafts
             .iter()
             .filter_map(|draft| Some((draft.remote.clone()?, draft.id)))
             .collect();
 
         let files: HashMap<&str, &ChangedFile> = self
+            .review
             .files
             .iter()
             .map(|file| (&*file.path, &**file))
             .collect();
 
         let mut seeded: Vec<Draft> = Vec::new();
-        for thread in &self.pending_threads {
+        for thread in &self.review.pending_threads {
             let Some(comment) = thread.comments.first() else {
                 continue;
             };
@@ -738,7 +728,7 @@ impl App {
             });
         }
 
-        let mut in_flight: Vec<Draft> = std::mem::take(&mut self.drafts)
+        let mut in_flight: Vec<Draft> = std::mem::take(&mut self.review.drafts)
             .into_iter()
             .filter(|draft| !draft.sync.is_settled())
             .collect();
@@ -755,7 +745,7 @@ impl App {
         }
 
         seeded.append(&mut in_flight);
-        self.drafts = seeded;
+        self.review.drafts = seeded;
         self.prune_focus();
     }
 
@@ -763,7 +753,9 @@ impl App {
     /// rests on takes the cursor with it, so one that stopped existing would
     /// leave nothing on screen marked at all.
     fn prune_focus(&mut self) {
-        let Some(id) = self.focused_card.as_ref().and_then(Card::draft) else {
+        let Some(id) =
+            self.navigation.focused_card.as_ref().and_then(Card::draft)
+        else {
             return;
         };
 
@@ -773,12 +765,15 @@ impl App {
     }
 
     const fn take_draft_id(&mut self) -> u64 {
-        self.next_draft_id += 1;
-        self.next_draft_id
+        self.review.next_draft_id += 1;
+        self.review.next_draft_id
     }
 
     pub fn current_file(&self) -> Option<&ChangedFile> {
-        self.files.get(self.selected_file).map(AsRef::as_ref)
+        self.review
+            .files
+            .get(self.navigation.selected_file)
+            .map(AsRef::as_ref)
     }
 
     pub fn current_path(&self) -> Option<&str> {
@@ -786,32 +781,33 @@ impl App {
     }
 
     pub const fn collapsed(&self) -> &HashSet<Arc<str>> {
-        &self.collapsed
+        &self.navigation.collapsed
     }
 
     pub fn tree_directory(&self) -> Option<&str> {
-        self.tree_directory.as_deref()
+        self.navigation.tree_directory.as_deref()
     }
 
     /// Conversations on a file that are still open, which is what the tree
     /// marks and what a folded directory has to answer for.
     pub fn unresolved_threads(&self, path: &str) -> usize {
-        self.threads_by_path.get(path).map_or(0, |threads| {
+        self.review.threads_by_path.get(path).map_or(0, |threads| {
             threads.iter().filter(|thread| !thread.is_resolved).count()
         })
     }
 
     pub fn tree_row(&self, index: usize) -> Option<TreeRow<'_>> {
-        let file = self.files.get(index)?;
+        let file = self.review.files.get(index)?;
         let threads = self
+            .review
             .threads_by_path
             .get(&file.path)
             .map_or(&[][..], Vec::as_slice);
 
         Some(TreeRow {
             file,
-            is_selected: index == self.selected_file,
-            is_viewed: self.viewed.contains(&file.path),
+            is_selected: index == self.navigation.selected_file,
+            is_viewed: self.review.viewed.contains(&file.path),
             threads: threads.len(),
             unresolved: threads.iter().filter(|t| !t.is_resolved).count(),
         })
@@ -819,11 +815,11 @@ impl App {
 
     pub fn focus(&self) -> Focus<'_> {
         Focus {
-            cursor: self.cursor,
-            selection: self.selection,
-            pane: self.pane,
-            card: self.focused_card.as_ref(),
-            expanded: self.expanded_card.as_ref(),
+            cursor: self.navigation.cursor,
+            selection: self.navigation.selection,
+            pane: self.navigation.pane,
+            card: self.navigation.focused_card.as_ref(),
+            expanded: self.navigation.expanded_card.as_ref(),
             query: self.live_query(),
         }
     }
@@ -834,6 +830,7 @@ impl App {
         Some(OpenFile {
             patch,
             threads: self
+                .review
                 .threads_by_path
                 .get(&patch.path)
                 .map_or(&[], Vec::as_slice),
@@ -882,7 +879,7 @@ impl App {
     /// so the last line of the patch stands in for it.
     fn gap_at_cursor(&self) -> Option<usize> {
         let last = self.current_file()?.lines.len().checked_sub(1)?;
-        let cursor = self.cursor;
+        let cursor = self.navigation.cursor;
 
         self.gaps().into_iter().position(|gap| match gap.place {
             Place::Trailing => cursor == last,
@@ -893,7 +890,7 @@ impl App {
     /// Pulls part of the run under the cursor into the diff.
     pub fn expand(&mut self, reveal: Reveal) {
         let Some(gap) = self.gap_at_cursor() else {
-            self.status = "no hidden lines here".into();
+            self.runtime.status = "no hidden lines here".into();
             return;
         };
 
@@ -918,27 +915,28 @@ impl App {
         // A deleted file is not at head to be read, and the patch already
         // carries every line it had.
         if file.status == "removed" {
-            self.status = "no file at head to expand".into();
+            self.runtime.status = "no file at head to expand".into();
             return;
         }
 
         if let Some(content) = self.blobs.get(&path).cloned() {
-            self.status = self.reveal(&path, wanted, &content);
+            self.runtime.status = self.reveal(&path, wanted, &content);
             return;
         }
 
         // The commit to read the file at comes with the metadata, which is a
         // separate fetch and may not have landed yet.
-        let Some(commit) = self.pr.as_ref().map(|pr| pr.head_oid.clone())
+        let Some(commit) =
+            self.review.pr.as_ref().map(|pr| pr.head_oid.clone())
         else {
-            self.status = "still loading the pull request".into();
+            self.runtime.status = "still loading the pull request".into();
             return;
         };
 
         self.deferred = Some((path.clone(), wanted));
         if self.fetching.insert(path.clone()) {
             self.send(Request::Blob { path, commit });
-            self.status = "loading the file…".into();
+            self.runtime.status = "loading the file…".into();
         }
     }
 
@@ -972,14 +970,14 @@ impl App {
     }
 
     fn comment_link(&self) -> Option<Link> {
-        let id = self.focused_card.as_ref()?.thread()?;
+        let id = self.navigation.focused_card.as_ref()?.thread()?;
         let comment = self.thread(id)?.comments.first()?;
 
         comment.reply_target.clone().map(Link::Comment)
     }
 
     fn code_link(&self) -> Option<Link> {
-        let commit = &self.pr.as_ref()?.head_oid;
+        let commit = &self.review.pr.as_ref()?.head_oid;
         let file = self.current_file()?;
 
         // A file the change deletes is not at head to be linked to.
@@ -987,7 +985,7 @@ impl App {
             return None;
         }
 
-        let lines = match self.pane {
+        let lines = match self.navigation.pane {
             Pane::Files => None,
             Pane::Diff => self.cursor_lines(),
         };
@@ -1003,9 +1001,10 @@ impl App {
     /// nothing on the new side is a run of deletions, which has no line at
     /// head to name, so the link falls back to the file itself.
     fn cursor_lines(&self) -> Option<(u32, u32)> {
-        let rows = self
-            .selection
-            .map_or(self.cursor..=self.cursor, |selection| selection.range());
+        let rows = self.navigation.selection.map_or(
+            self.navigation.cursor..=self.navigation.cursor,
+            |selection| selection.range(),
+        );
         let lines = self.current_file()?.lines.get(rows)?;
         let numbers: Vec<u32> =
             lines.iter().filter_map(|line| line.new_line).collect();
@@ -1017,19 +1016,22 @@ impl App {
     /// opened mid-review drops the reader out of the review; the page they
     /// want is the one they are already reading.
     fn open_link(&mut self) {
-        self.status = "opening the pull request".into();
-        self.effects
+        self.runtime.status = "opening the pull request".into();
+        self.runtime
+            .effects
             .push(Effect::Errand(Errand::Open(Link::PullRequest)));
     }
 
     fn yank_link(&mut self) {
         let link = self.permalink();
-        self.status = "yanked link".into();
-        self.effects.push(Effect::Errand(Errand::Copy(link)));
+        self.runtime.status = "yanked link".into();
+        self.runtime
+            .effects
+            .push(Effect::Errand(Errand::Copy(link)));
 
-        if self.mode == Mode::Visual {
-            self.mode = Mode::Normal;
-            self.selection = None;
+        if self.navigation.mode == Mode::Visual {
+            self.navigation.mode = Mode::Normal;
+            self.navigation.selection = None;
         }
     }
 
@@ -1060,7 +1062,8 @@ impl App {
         wanted: Wanted,
         content: &[String],
     ) -> String {
-        let Some(index) = self.files.iter().position(|file| file.path == *path)
+        let Some(index) =
+            self.review.files.iter().position(|file| file.path == *path)
         else {
             return String::new();
         };
@@ -1068,7 +1071,7 @@ impl App {
         // The worker owns an Arc to this file while it colors it. Copy-on-write
         // preserves that snapshot when necessary, but never touches any other
         // file in the review.
-        let file = Arc::make_mut(&mut self.files[index]);
+        let file = Arc::make_mut(&mut self.review.files[index]);
         let mut count = 0;
 
         // Each splice moves only what is below it, so the cursor follows one
@@ -1081,13 +1084,15 @@ impl App {
             };
 
             count += revealed.count;
-            if revealed.at > self.cursor {
+            if revealed.at > self.navigation.cursor {
                 continue;
             }
 
             let shift = file.lines.len().cast_signed() - before.cast_signed();
-            self.cursor = self.cursor.saturating_add_signed(shift);
-            self.diff_scroll = self.diff_scroll.saturating_add_signed(shift);
+            self.navigation.cursor =
+                self.navigation.cursor.saturating_add_signed(shift);
+            self.navigation.diff_scroll =
+                self.navigation.diff_scroll.saturating_add_signed(shift);
         }
 
         if count == 0 {
@@ -1097,7 +1102,7 @@ impl App {
         // Colors are held per line and drafts are anchored by line number, so
         // both are stale from the reveal downward.
         self.highlights.remove(path);
-        self.effects.push(Effect::Highlight(path.clone()));
+        self.runtime.effects.push(Effect::Highlight(path.clone()));
         self.reanchor_drafts();
 
         format!("expanded {count} lines")
@@ -1106,9 +1111,9 @@ impl App {
     /// Recomputes the rows each draft covers. A draft names its lines by
     /// number, so a reveal leaves the rows it was drawn on pointing elsewhere.
     fn reanchor_drafts(&mut self) {
-        let files = &self.files;
+        let files = &self.review.files;
 
-        for draft in &mut self.drafts {
+        for draft in &mut self.review.drafts {
             let Some(anchor) = draft.anchor().copied() else {
                 continue;
             };
@@ -1128,25 +1133,26 @@ impl App {
         // Only a second escape discards, so every other key stands the composer
         // back down.
         if !matches!(action, Action::CancelComment)
-            && let Some(composer) = self.composer.as_mut()
+            && let Some(composer) = self.prompts.composer.as_mut()
         {
             composer.is_discard_armed = false;
         }
         if !matches!(action, Action::CancelSubmit)
-            && let Some(submission) = self.submission.as_mut()
+            && let Some(submission) = self.prompts.submission.as_mut()
         {
             submission.is_discard_armed = false;
         }
 
         match *action {
-            Action::Quit => self.should_quit = true,
+            Action::Quit => self.runtime.should_quit = true,
             Action::TogglePane => self.toggle_pane(),
             Action::ToggleTree => {
-                self.is_files_visible = !self.is_files_visible;
-                if self.is_files_visible {
-                    self.pane = Pane::Files;
+                self.navigation.is_files_visible =
+                    !self.navigation.is_files_visible;
+                if self.navigation.is_files_visible {
+                    self.navigation.pane = Pane::Files;
                 } else {
-                    self.pane = Pane::Diff;
+                    self.navigation.pane = Pane::Diff;
                 }
             }
             Action::Activate => self.activate(layout),
@@ -1173,15 +1179,16 @@ impl App {
             Action::Move(motion) => self.travel(motion, layout),
 
             Action::EnterVisual => {
-                if self.pane == Pane::Diff {
+                if self.navigation.pane == Pane::Diff {
                     self.set_focus(None);
-                    self.mode = Mode::Visual;
-                    self.selection = Some(Selection::at(self.cursor));
+                    self.navigation.mode = Mode::Visual;
+                    self.navigation.selection =
+                        Some(Selection::at(self.navigation.cursor));
                 }
             }
             Action::LeaveVisual => {
-                self.mode = Mode::Normal;
-                self.selection = None;
+                self.navigation.mode = Mode::Normal;
+                self.navigation.selection = None;
             }
 
             Action::StartComment => self.start_comment(layout),
@@ -1199,23 +1206,23 @@ impl App {
             Action::CommitSubmit => self.commit_submit(),
             Action::CancelSubmit => self.cancel_submit(),
             Action::CycleEvent(direction) => {
-                if let Some(submission) = self.submission.as_mut() {
+                if let Some(submission) = self.prompts.submission.as_mut() {
                     submission.event = submission.event.step(direction);
                 }
             }
 
             Action::OpenHelp => {
-                self.mode = Mode::Help;
-                self.overlay_scroll = 0;
+                self.navigation.mode = Mode::Help;
+                self.navigation.overlay_scroll = 0;
             }
             Action::OpenOverview => {
-                self.mode = Mode::Overview;
-                self.overlay_scroll = 0;
+                self.navigation.mode = Mode::Overview;
+                self.navigation.overlay_scroll = 0;
             }
             Action::CloseOverlay => {
-                self.mode = Mode::Normal;
-                self.overlay_scroll = 0;
-                self.overlay_match = None;
+                self.navigation.mode = Mode::Normal;
+                self.navigation.overlay_scroll = 0;
+                self.navigation.overlay_match = None;
             }
             Action::OpenInBrowser => self.open_link(),
             Action::YankLink => self.yank_link(),

@@ -2,6 +2,7 @@ use prtui_core::{LineKind, Side};
 use prtui_github::{parse_files, parse_meta};
 use prtui_tui::app::action::{Action, Motion};
 use prtui_tui::app::draft::Parent;
+use prtui_tui::app::effect::Message as AppMessage;
 use prtui_tui::app::input::DispatchResult;
 use prtui_tui::app::input::InputRouter;
 use prtui_tui::app::review::{Failure, Request, Sent};
@@ -59,6 +60,157 @@ fn paste(input: &mut InputRouter, app: &mut App, text: &str) -> DispatchResult {
 fn act(app: &mut App, action: &Action) {
     let layout = layout_of(app);
     app.apply(action, &layout);
+}
+
+fn act_at(app: &mut App, action: &Action, area: Rect) {
+    let layout = Layout::compute(area, app.view());
+    app.apply(action, &layout);
+}
+
+fn focus_pane(app: &mut App, pane: Pane) {
+    let action = match pane {
+        Pane::Files => Action::FocusFiles,
+        Pane::Diff => Action::FocusDiff,
+    };
+    act(app, &action);
+}
+
+fn set_tree_visible(app: &mut App, is_visible: bool) {
+    if app.view().is_files_visible != is_visible {
+        act(app, &Action::ToggleTree);
+    }
+}
+
+fn select_file(app: &mut App, target: usize) {
+    for _ in 0..app.view().files.len() {
+        if app.view().selected_file == target {
+            return;
+        }
+        act(app, &Action::NextFile(1));
+    }
+
+    panic!("file {target} is not in the tree");
+}
+
+fn move_to(app: &mut App, target: usize) {
+    focus_pane(app, Pane::Diff);
+    act(app, &Action::Move(Motion::Top));
+
+    let limit = layout_of(app).rows.len() + app.diff_len();
+    for _ in 0..limit {
+        if app.view().cursor == target && app.view().focused_card.is_none() {
+            return;
+        }
+        act(app, &Action::Move(Motion::Down(1)));
+    }
+
+    panic!("diff row {target} is not reachable");
+}
+
+fn replace_threads(app: &mut App, mut threads: Vec<prtui_core::ReviewThread>) {
+    for thread in &mut threads {
+        if let Some(first) = thread.comments.first_mut() {
+            first.is_pending = false;
+        }
+    }
+
+    let view = app.view();
+    let pr = view.pr.cloned().unwrap_or_default();
+    let discussion = view.discussion.to_vec();
+    let viewed = view
+        .files
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            app.tree_row(*index).is_some_and(|row| row.is_viewed)
+        })
+        .map(|(_, file)| file.path.clone())
+        .collect();
+
+    app.set_meta(prtui_core::Meta {
+        pr,
+        threads,
+        discussion,
+        pending_review: None,
+        viewed,
+    });
+}
+
+fn set_threads_for_path(
+    app: &mut App,
+    path: &str,
+    mut threads: Vec<prtui_core::ReviewThread>,
+) {
+    for thread in &mut threads {
+        thread.path = path.into();
+    }
+
+    let mut all: Vec<_> = app
+        .view()
+        .threads_by_path
+        .values()
+        .flatten()
+        .filter(|thread| &*thread.path != path)
+        .cloned()
+        .collect();
+    all.extend(threads);
+    replace_threads(app, all);
+}
+
+fn replace_prompt(app: &mut App, text: &str) {
+    let current = {
+        let view = app.view();
+        view.composer
+            .map(|composer| composer.editor.text())
+            .or_else(|| {
+                view.submission.map(|submission| submission.editor.text())
+            })
+            .expect("an editor is open")
+    };
+
+    for _ in current.chars() {
+        let layout = layout_of(app);
+        assert!(app.type_key(
+            KeyEvent::new(KeyCode::Backspace, Modifiers::NONE),
+            &layout,
+        ));
+    }
+
+    let layout = layout_of(app);
+    assert!(app.type_text(text, &layout));
+}
+
+fn focus_card_at(app: &mut App, card: &Card, area: Rect) {
+    let limit = layout_of(app).rows.len().max(1);
+    for _ in 0..limit {
+        if app.view().focused_card == Some(card) {
+            return;
+        }
+        act_at(app, &Action::Move(Motion::Down(1)), area);
+    }
+
+    panic!("card is not reachable");
+}
+
+fn expand_card(app: &mut App, card: &Card) {
+    let area = Rect::new(0, 0, 100, 20);
+    focus_card_at(app, card, area);
+    if app.view().expanded_card != Some(card) {
+        act_at(app, &Action::Activate, area);
+    }
+}
+
+fn scroll_thread_to(app: &mut App, target: usize) {
+    let current = app.view().thread_scroll;
+    let motion = if current < target {
+        Motion::Down(target - current)
+    } else {
+        Motion::Up(current - target)
+    };
+    let layout = Layout::compute(Rect::new(0, 0, 100, 24), app.view());
+    app.apply(&Action::Move(motion), &layout);
+
+    assert_eq!(app.view().thread_scroll, target);
 }
 
 fn summary(app: &App) -> (usize, usize) {
@@ -142,7 +294,7 @@ fn paragraphs(count: usize, label: &str) -> String {
 /// Colors the open file the way the background thread does, since that is now
 /// the only path into the highlight store.
 fn highlight(app: &mut App) {
-    let file = &app.files[app.selected_file];
+    let file = &app.view().files[app.view().selected_file];
     let styled = prtui_tui::renderer::highlight_file(
         &file.path,
         &file.lines,
@@ -172,7 +324,7 @@ fn load() -> App {
 /// The text is not the real file's, which nothing here depends on: a reveal is
 /// addressed by line number.
 fn head_of(app: &App) -> Arc<[String]> {
-    let file = &app.files[app.selected_file];
+    let file = &app.view().files[app.view().selected_file];
     let longest = file
         .lines
         .iter()
@@ -190,17 +342,17 @@ fn head_of(app: &App) -> Arc<[String]> {
 #[test]
 fn opening_a_gap_fetches_the_file_and_then_reveals_it() {
     let mut app = load();
-    app.pane = Pane::Diff;
-    let untouched = app.files[1].clone();
-    let path = app.files[app.selected_file].path.clone();
-    let before = app.files[app.selected_file].lines.len();
+    focus_pane(&mut app, Pane::Diff);
+    let untouched = app.view().files[1].clone();
+    let path = app.view().files[app.view().selected_file].path.clone();
+    let before = app.view().files[app.view().selected_file].lines.len();
 
     // The fixture's first patch starts at line 127, so everything above it is
     // hidden, and the header on the cursor's line is what names that run.
     let gaps = app.gaps();
     assert_eq!(gaps[0].place, Place::Leading);
     assert_eq!(gaps[0].len, Some(126));
-    assert_eq!(app.cursor, 0);
+    assert_eq!(app.view().cursor, 0);
 
     act(&mut app, &Action::Expand(Reveal::Up(STEP)));
 
@@ -218,16 +370,22 @@ fn opening_a_gap_fetches_the_file_and_then_reveals_it() {
     }
 
     // Nothing is revealed until the file is in hand.
-    assert_eq!(app.files[app.selected_file].lines.len(), before);
+    assert_eq!(
+        app.view().files[app.view().selected_file].lines.len(),
+        before
+    );
 
     app.finish(Ok(Sent::Blob {
         path: path.clone(),
         lines: head_of(&app),
     }));
 
-    assert_eq!(app.files[app.selected_file].lines.len(), before + 20);
-    assert!(Arc::ptr_eq(&untouched, &app.files[1]));
-    assert_eq!(app.status, "expanded 20 lines");
+    assert_eq!(
+        app.view().files[app.view().selected_file].lines.len(),
+        before + 20
+    );
+    assert!(Arc::ptr_eq(&untouched, &app.view().files[1]));
+    assert_eq!(app.view().status, "expanded 20 lines");
     assert!(draw(&app).contains("head line 107"));
 
     // The patch grew, so the colors held for it no longer describe it.
@@ -235,11 +393,15 @@ fn opening_a_gap_fetches_the_file_and_then_reveals_it() {
 
     // The file is kept, so the next gap opens without another round trip. The
     // trailing one has no header, so the last line of the patch names it.
-    app.cursor = app.files[app.selected_file].lines.len() - 1;
+    let last = app.view().files[app.view().selected_file].lines.len() - 1;
+    move_to(&mut app, last);
     act(&mut app, &Action::Expand(Reveal::Down(4)));
 
     assert!(app.take_requests().is_empty());
-    assert_eq!(app.files[app.selected_file].lines.len(), before + 24);
+    assert_eq!(
+        app.view().files[app.view().selected_file].lines.len(),
+        before + 24
+    );
 }
 
 /// A gap is named by the header the cursor rests on, so that header has to
@@ -247,13 +409,13 @@ fn opening_a_gap_fetches_the_file_and_then_reveals_it() {
 #[test]
 fn a_reveal_keeps_the_header_it_opened_under_the_cursor() {
     let mut app = load();
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
     // The second file's patch has two hunks, so it has a gap between them.
-    app.selected_file = 1;
-    app.cursor = 8;
+    select_file(&mut app, 1);
+    move_to(&mut app, 8);
 
-    let path = app.files[1].path.clone();
-    assert_eq!(app.files[1].lines[8].kind, LineKind::Hunk);
+    let path = app.view().files[1].path.clone();
+    assert_eq!(app.view().files[1].lines[8].kind, LineKind::Hunk);
 
     act(&mut app, &Action::Expand(Reveal::Down(4)));
     app.take_requests();
@@ -262,9 +424,9 @@ fn a_reveal_keeps_the_header_it_opened_under_the_cursor() {
         lines: head_of(&app),
     }));
 
-    assert_eq!(app.cursor, 12);
-    assert_eq!(app.files[1].lines[12].kind, LineKind::Hunk);
-    assert_eq!(app.files[1].lines[8].text, "head line 21");
+    assert_eq!(app.view().cursor, 12);
+    assert_eq!(app.view().files[1].lines[12].kind, LineKind::Hunk);
+    assert_eq!(app.view().files[1].lines[8].text, "head line 21");
 }
 
 /// `zR` in the diff: every run at once, which is the whole file rather than
@@ -272,8 +434,8 @@ fn a_reveal_keeps_the_header_it_opened_under_the_cursor() {
 #[test]
 fn expanding_the_file_opens_every_gap_at_once() {
     let mut app = load();
-    app.pane = Pane::Diff;
-    let path = app.files[0].path.clone();
+    focus_pane(&mut app, Pane::Diff);
+    let path = app.view().files[0].path.clone();
 
     act(&mut app, &Action::ExpandFile);
     app.take_requests();
@@ -282,7 +444,7 @@ fn expanding_the_file_opens_every_gap_at_once() {
         lines: head_of(&app),
     }));
 
-    let lines = &app.files[0].lines;
+    let lines = &app.view().files[0].lines;
     // Nothing is hidden any more, so no header is left to say that it is.
     assert!(lines.iter().all(|line| line.kind != LineKind::Hunk));
     assert_eq!(lines[0].text, "head line 1");
@@ -292,8 +454,8 @@ fn expanding_the_file_opens_every_gap_at_once() {
 
     // The cursor followed the reveal above it and not the one below it: the
     // header it sat on closed, leaving it on the last line pulled in over it.
-    assert_eq!(app.cursor, 125);
-    assert_eq!(app.files[0].lines[125].new_line, Some(126));
+    assert_eq!(app.view().cursor, 125);
+    assert_eq!(app.view().files[0].lines[125].new_line, Some(126));
 }
 
 /// The cursor names the gap, so resting somewhere that hides nothing asks for
@@ -301,13 +463,13 @@ fn expanding_the_file_opens_every_gap_at_once() {
 #[test]
 fn a_line_that_hides_nothing_expands_nothing() {
     let mut app = load();
-    app.pane = Pane::Diff;
-    app.cursor = 3;
+    focus_pane(&mut app, Pane::Diff);
+    move_to(&mut app, 3);
 
     act(&mut app, &Action::Expand(Reveal::Up(STEP)));
 
     assert!(app.take_requests().is_empty());
-    assert_eq!(app.status, "no hidden lines here");
+    assert_eq!(app.view().status, "no hidden lines here");
 }
 
 /// A deleted file is not at head to be read, and its patch already carries
@@ -315,15 +477,15 @@ fn a_line_that_hides_nothing_expands_nothing() {
 #[test]
 fn a_deleted_file_has_nothing_to_expand_into() {
     let mut app = load();
-    let mut files = app.files.clone();
+    let mut files = app.view().files.to_vec();
     Arc::make_mut(&mut files[0]).status = "removed".into();
-    app.files = files;
-    app.selected_file = 0;
+    app.set_files(files);
+    select_file(&mut app, 0);
 
     act(&mut app, &Action::Expand(Reveal::Up(STEP)));
 
     assert!(app.take_requests().is_empty());
-    assert_eq!(app.status, "no file at head to expand");
+    assert_eq!(app.view().status, "no file at head to expand");
 }
 
 /// A run of hidden lines gets a band of its own, above the hunk that follows
@@ -331,8 +493,8 @@ fn a_deleted_file_has_nothing_to_expand_into() {
 #[test]
 fn a_hidden_run_is_drawn_as_its_own_band() {
     let mut app = load();
-    app.pane = Pane::Diff;
-    app.is_files_visible = false;
+    focus_pane(&mut app, Pane::Diff);
+    set_tree_visible(&mut app, false);
 
     let screen = draw(&app);
     assert!(screen.contains("⋯  126 lines hidden"), "{screen}");
@@ -351,9 +513,9 @@ fn a_hidden_run_is_drawn_as_its_own_band() {
 #[test]
 fn the_trailing_band_learns_the_length_of_the_file() {
     let mut app = load();
-    app.pane = Pane::Diff;
-    app.is_files_visible = false;
-    let path = app.files[0].path.clone();
+    focus_pane(&mut app, Pane::Diff);
+    set_tree_visible(&mut app, false);
+    let path = app.view().files[0].path.clone();
 
     // Head holds 40 lines past the end of the patch.
     app.finish(Ok(Sent::Blob {
@@ -378,9 +540,9 @@ fn the_trailing_band_learns_the_length_of_the_file() {
 fn parses_files_and_threads() {
     let app = load();
 
-    assert_eq!(app.files.len(), 4);
-    assert_eq!(app.pr.as_ref().unwrap().number, 9000);
-    assert_eq!(app.threads_by_path.values().flatten().count(), 2);
+    assert_eq!(app.view().files.len(), 4);
+    assert_eq!(app.view().pr.as_ref().unwrap().number, 9000);
+    assert_eq!(app.view().threads_by_path.values().flatten().count(), 2);
 
     let threads = fixture_threads();
     let thread = &threads[0];
@@ -392,19 +554,25 @@ fn parses_files_and_threads() {
 }
 
 fn show_thread(app: &mut App, thread: &prtui_core::ReviewThread) {
-    app.selected_file = app
+    let selected = app
+        .view()
         .files
         .iter()
         .position(|file| file.path == thread.path)
         .unwrap();
-    app.cursor = app.files[app.selected_file]
+    select_file(app, selected);
+    let row = app.view().files[app.view().selected_file]
         .lines
         .iter()
         .position(|line| thread.anchors_to(line))
         .unwrap();
-    app.diff_scroll = app.cursor.saturating_sub(3);
-    app.pane = Pane::Diff;
-    app.is_files_visible = false;
+    move_to(app, row);
+    let area = Rect::new(0, 0, 100, 20);
+    focus_card_at(app, &Card::Thread(thread.id.clone()), area);
+    act_at(app, &Action::Move(Motion::Up(1)), area);
+    assert_eq!(app.view().cursor, row);
+    assert!(app.view().focused_card.is_none());
+    set_tree_visible(app, false);
 }
 
 #[test]
@@ -419,8 +587,7 @@ fn renders_unresolved_thread_summary_inline() {
     reply.body = "A reply inside the same review thread.".into();
     reply.created_at = "2024-04-29T15:01:00Z".into();
     thread.comments.push(reply);
-    app.threads_by_path
-        .insert(thread.path.clone(), vec![thread.clone()]);
+    set_threads_for_path(&mut app, &thread.path, vec![thread.clone()]);
     show_thread(&mut app, &thread);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
@@ -431,7 +598,10 @@ fn renders_unresolved_thread_summary_inline() {
         .unwrap();
     let rendered = terminal.backend().to_string();
 
-    assert!(rendered.contains("Lol not suspicious of coupling at all."));
+    assert!(
+        rendered.contains("Lol not suspicious of coupling at all."),
+        "{rendered}"
+    );
     assert!(rendered.contains("@williammartin"));
     assert!(rendered.contains("1 reply"));
 }
@@ -445,8 +615,7 @@ fn collapsed_thread_summary_uses_rendered_gfm_text() {
         .unwrap();
     thread.comments[0].body =
         "_Minor_ and **important** with `inline code`".into();
-    app.threads_by_path
-        .insert(thread.path.clone(), vec![thread.clone()]);
+    set_threads_for_path(&mut app, &thread.path, vec![thread.clone()]);
     show_thread(&mut app, &thread);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
@@ -456,11 +625,10 @@ fn collapsed_thread_summary_uses_rendered_gfm_text() {
         })
         .unwrap();
 
+    let rendered = terminal.backend().to_string();
     assert!(
-        terminal
-            .backend()
-            .to_string()
-            .contains("Minor and important with inline code")
+        rendered.contains("Minor and important with inline code"),
+        "{rendered}"
     );
 }
 
@@ -475,11 +643,9 @@ fn focused_thread_expands_into_its_full_conversation() {
     reply.author = "andyfeller".into();
     reply.body = "This is the full reply body.".into();
     thread.comments.push(reply);
-    app.threads_by_path
-        .insert(thread.path.clone(), vec![thread.clone()]);
+    set_threads_for_path(&mut app, &thread.path, vec![thread.clone()]);
     show_thread(&mut app, &thread);
-    app.focused_card = Some(Card::Thread(thread.id.clone()));
-    app.expanded_card = Some(Card::Thread(thread.id.clone()));
+    expand_card(&mut app, &Card::Thread(thread.id.clone()));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
@@ -509,11 +675,9 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
         .unwrap();
     thread.comments[0].body =
         paragraphs(18, "Paragraph") + "TAIL CONTENT IS REACHABLE";
-    app.threads_by_path
-        .insert(thread.path.clone(), vec![thread.clone()]);
+    set_threads_for_path(&mut app, &thread.path, vec![thread.clone()]);
     show_thread(&mut app, &thread);
-    app.focused_card = Some(Card::Thread(thread.id.clone()));
-    app.expanded_card = Some(Card::Thread(thread.id.clone()));
+    expand_card(&mut app, &Card::Thread(thread.id.clone()));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
@@ -529,7 +693,7 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
     // a thumb rather than stealing rows for a marker.
     assert!(first_page.contains("┃"));
 
-    app.thread_scroll = small_viewport_limit;
+    scroll_thread_to(&mut app, small_viewport_limit);
     terminal
         .draw(|frame| {
             paint(frame, &app);
@@ -540,7 +704,7 @@ fn expanded_thread_can_scroll_to_its_complete_conversation() {
     assert!(last_page.contains("TAIL CONTENT IS REACHABLE"));
     assert_eq!(rail_rows(&first_page), rail_rows(&last_page));
 
-    app.thread_scroll = 0;
+    scroll_thread_to(&mut app, 0);
     let mut large_terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     large_terminal
         .draw(|frame| {
@@ -571,11 +735,9 @@ fn long_reply_keeps_its_identity_visible_while_scrolling() {
     reply.author = "andyfeller".into();
     reply.body = paragraphs(24, "Reply paragraph");
     thread.comments.push(reply);
-    app.threads_by_path
-        .insert(thread.path.clone(), vec![thread.clone()]);
+    set_threads_for_path(&mut app, &thread.path, vec![thread.clone()]);
     show_thread(&mut app, &thread);
-    app.focused_card = Some(Card::Thread(thread.id.clone()));
-    app.expanded_card = Some(Card::Thread(thread.id.clone()));
+    expand_card(&mut app, &Card::Thread(thread.id.clone()));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
@@ -585,7 +747,7 @@ fn long_reply_keeps_its_identity_visible_while_scrolling() {
         .unwrap();
     assert!(thread_limit(&app, 100, 24) > 5);
 
-    app.thread_scroll = 5;
+    scroll_thread_to(&mut app, 5);
     terminal
         .draw(|frame| {
             paint(frame, &app);
@@ -617,18 +779,16 @@ fn motion_leaves_a_conversation_that_cannot_scroll() {
         .find(|thread| !thread.is_resolved)
         .unwrap();
     thread.comments[0].body = "Short enough to need no scrolling.".into();
-    app.threads_by_path
-        .insert(thread.path.clone(), vec![thread.clone()]);
+    set_threads_for_path(&mut app, &thread.path, vec![thread.clone()]);
     show_thread(&mut app, &thread);
-    app.focused_card = Some(Card::Thread(thread.id.clone()));
-    app.expanded_card = Some(Card::Thread(thread.id.clone()));
+    expand_card(&mut app, &Card::Thread(thread.id.clone()));
 
-    let line = app.cursor;
+    let line = app.view().cursor;
     press(&mut app, "j");
 
-    assert_eq!(app.expanded_card, None);
-    assert_eq!(app.focused_card, None);
-    assert_eq!(app.cursor, line + 1);
+    assert_eq!(app.view().expanded_card, None);
+    assert_eq!(app.view().focused_card, None);
+    assert_eq!(app.view().cursor, line + 1);
 }
 
 /// A jump crosses files, so the scroll it asks for has to be measured against
@@ -641,11 +801,11 @@ fn a_comment_jump_scrolls_the_card_it_landed_on_into_view() {
     press(&mut app, "}");
 
     let layout = layout_of(&app);
-    let card = app.focused_card.clone().expect("a card to land on");
+    let card = app.view().focused_card.cloned().expect("a card to land on");
     let row = layout.rows.card_row(&card).expect("the card to be drawn");
 
-    assert!(row >= app.diff_scroll);
-    assert!(row < app.diff_scroll + layout.diff_viewport());
+    assert!(row >= app.view().diff_scroll);
+    assert!(row < app.view().diff_scroll + layout.diff_viewport());
     assert!(draw(&app).contains("Lol not suspicious of coupling at all."));
 }
 
@@ -660,28 +820,27 @@ fn unfolding_a_card_makes_room_for_its_conversation() {
         .find(|thread| !thread.is_resolved)
         .unwrap();
     thread.comments[0].body = paragraphs(18, "Paragraph");
-    app.threads_by_path
-        .insert(thread.path.clone(), vec![thread.clone()]);
+    set_threads_for_path(&mut app, &thread.path, vec![thread.clone()]);
 
     press(&mut app, "}");
     act(&mut app, &Action::Activate);
 
     let layout = layout_of(&app);
-    let card = app.focused_card.clone().expect("a card to land on");
+    let card = app.view().focused_card.cloned().expect("a card to land on");
     let row = layout.rows.card_row(&card).expect("the card to be drawn");
 
     // Anchored near the top, with a little of the code it hangs under above it.
-    assert_eq!(row, app.diff_scroll + 3);
+    assert_eq!(row, app.view().diff_scroll + 3);
     assert!(
         row + layout.rows.card_height(&card)
-            <= app.diff_scroll + layout.diff_viewport()
+            <= app.view().diff_scroll + layout.diff_viewport()
     );
 
     // Opening it again where it already fits leaves the pane where it is.
-    let settled = app.diff_scroll;
+    let settled = app.view().diff_scroll;
     act(&mut app, &Action::Activate);
     act(&mut app, &Action::Activate);
-    assert_eq!(app.diff_scroll, settled);
+    assert_eq!(app.view().diff_scroll, settled);
 }
 
 /// The seams have to rank: a break between two conversations reads as bigger
@@ -708,11 +867,13 @@ fn a_thread_seam_outranks_a_comment_seam() {
     second.comments[0].body =
         "A separate conversation on the same line.".into();
 
-    app.threads_by_path
-        .insert(base.path, vec![first.clone(), second.clone()]);
+    set_threads_for_path(
+        &mut app,
+        &base.path,
+        vec![first.clone(), second.clone()],
+    );
     show_thread(&mut app, &first);
-    app.focused_card = Some(Card::Thread(first.id.clone()));
-    app.expanded_card = Some(Card::Thread(first.id.clone()));
+    expand_card(&mut app, &Card::Thread(first.id.clone()));
 
     let rendered = draw(&app);
     // The backend prints each row quoted, which is not part of the frame.
@@ -773,7 +934,7 @@ fn multiple_threads_on_one_line_render_as_one_group() {
         thread.comments[0].body = format!("Discussion number {index}");
         threads.push(thread);
     }
-    app.threads_by_path.insert(base.path, threads.clone());
+    set_threads_for_path(&mut app, &base.path, threads.clone());
     show_thread(&mut app, &threads[0]);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
@@ -796,8 +957,7 @@ fn multiple_threads_on_one_line_render_as_one_group() {
     }
     assert!(!rendered.contains("open threads"));
 
-    app.focused_card = Some(Card::Thread(threads[3].id.clone()));
-    app.expanded_card = Some(Card::Thread(threads[3].id.clone()));
+    expand_card(&mut app, &Card::Thread(threads[3].id.clone()));
     terminal
         .draw(|frame| {
             paint(frame, &app);
@@ -837,35 +997,27 @@ fn resolved_threads_render_as_compact_rows() {
 #[test]
 fn left_side_threads_anchor_to_removed_lines() {
     let mut app = load();
-    let (file_index, line_index, old_line) = app
+    let (file_index, old_line) = app
+        .view()
         .files
         .iter()
         .enumerate()
         .find_map(|(file_index, file)| {
-            file.lines
-                .iter()
-                .enumerate()
-                .find_map(|(line_index, line)| {
-                    (line.kind == LineKind::Removed).then(|| {
-                        (file_index, line_index, line.old_line.unwrap())
-                    })
-                })
+            file.lines.iter().find_map(|line| {
+                (line.kind == LineKind::Removed)
+                    .then(|| (file_index, line.old_line.unwrap()))
+            })
         })
         .unwrap();
-    let path = app.files[file_index].path.clone();
+    let path = app.view().files[file_index].path.clone();
     let mut thread = fixture_threads().remove(1);
-    thread.path = path.clone();
+    thread.path = path;
     thread.line = Some(old_line);
     thread.original_line = Some(old_line);
     thread.side = Side::Left;
     thread.comments[0].body = "This belongs to the removed side.".into();
-    app.threads_by_path.clear();
-    app.threads_by_path.insert(path, vec![thread]);
-    app.selected_file = file_index;
-    app.cursor = line_index;
-    app.diff_scroll = line_index.saturating_sub(2);
-    app.pane = Pane::Diff;
-    app.is_files_visible = false;
+    replace_threads(&mut app, vec![thread.clone()]);
+    show_thread(&mut app, &thread);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
@@ -878,7 +1030,9 @@ fn left_side_threads_anchor_to_removed_lines() {
         terminal
             .backend()
             .to_string()
-            .contains("This belongs to the removed side.")
+            .contains("This belongs to the removed side."),
+        "{}",
+        terminal.backend()
     );
 }
 
@@ -886,24 +1040,24 @@ fn left_side_threads_anchor_to_removed_lines() {
 fn outdated_threads_render_compactly_after_the_diff() {
     let mut app = load();
     let file_index = app
+        .view()
         .files
         .iter()
         .position(|file| !file.lines.is_empty())
         .unwrap();
-    let path = app.files[file_index].path.clone();
+    let path = app.view().files[file_index].path.clone();
     let mut thread = fixture_threads().remove(1);
-    thread.path = path.clone();
+    thread.path = path;
     thread.line = None;
     thread.original_line = Some(999_999);
     thread.is_outdated = true;
     thread.comments[0].body = "Discussion from an earlier diff.".into();
-    app.threads_by_path.clear();
-    app.threads_by_path.insert(path, vec![thread]);
-    app.selected_file = file_index;
-    app.cursor = app.files[file_index].lines.len() - 1;
-    app.diff_scroll = app.cursor.saturating_sub(3);
-    app.pane = Pane::Diff;
-    app.is_files_visible = false;
+    replace_threads(&mut app, vec![thread]);
+    select_file(&mut app, file_index);
+    let last = app.view().files[file_index].lines.len() - 1;
+    move_to(&mut app, last);
+    focus_pane(&mut app, Pane::Diff);
+    set_tree_visible(&mut app, false);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
     terminal
@@ -921,7 +1075,12 @@ fn outdated_threads_render_compactly_after_the_diff() {
 #[test]
 fn hunk_line_numbers_advance_correctly() {
     let app = load();
-    let file = app.files.iter().find(|f| !f.lines.is_empty()).unwrap();
+    let file = app
+        .view()
+        .files
+        .iter()
+        .find(|f| !f.lines.is_empty())
+        .unwrap();
 
     for line in &file.lines {
         match line.kind {
@@ -978,7 +1137,8 @@ fn renders_header_and_diff() {
         "status bar should show the active pane"
     );
     assert!(
-        app.files
+        app.view()
+            .files
             .iter()
             .any(|f| rendered.contains(f.path.split('/').next_back().unwrap())),
         "file list should show at least one changed file"
@@ -988,9 +1148,9 @@ fn renders_header_and_diff() {
 #[test]
 fn multi_digit_thread_badge_keeps_diff_counts_visible() {
     let mut app = load();
-    let path = app.files[0].path.clone();
+    let path = app.view().files[0].path.clone();
     let thread = fixture_threads().remove(1);
-    app.threads_by_path.insert(path, vec![thread; 10]);
+    set_threads_for_path(&mut app, &path, vec![thread; 10]);
 
     let mut terminal = Terminal::new(TestBackend::new(52, 12)).unwrap();
     terminal
@@ -1110,19 +1270,19 @@ fn the_filter_prompt_renders_while_typing_and_stays_after_commit() {
 #[test]
 fn scrolling_stays_in_bounds() {
     let mut app = load();
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
 
     for _ in 0..10_000 {
         press(&mut app, "j");
     }
-    assert!(app.diff_scroll <= app.diff_len());
-    assert!(app.cursor < app.diff_len());
+    assert!(app.view().diff_scroll <= app.diff_len());
+    assert!(app.view().cursor < app.diff_len());
 
     for _ in 0..10_000 {
         press(&mut app, "k");
     }
-    assert_eq!(app.diff_scroll, 0);
-    assert_eq!(app.cursor, 0);
+    assert_eq!(app.view().diff_scroll, 0);
+    assert_eq!(app.view().cursor, 0);
 }
 
 #[test]
@@ -1165,7 +1325,7 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
 
     let mut app = App::with_theme(Theme::for_mode(ThemeMode::Light));
     app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
-    app.is_files_visible = false;
+    set_tree_visible(&mut app, false);
     highlight(&mut app);
 
     let added = app
@@ -1221,6 +1381,7 @@ fn highlights_are_addressed_by_path_not_position() {
     let mut app = load();
     let open = app.current_file().unwrap().path.clone();
     let other = app
+        .view()
         .files
         .iter()
         .map(|file| file.path.clone())
@@ -1238,7 +1399,7 @@ fn highlights_are_addressed_by_path_not_position() {
 
     // The same path can come back carrying a different patch, so a reload
     // cannot keep colors computed against the old one.
-    let files = app.files.clone();
+    let files = app.view().files.to_vec();
     app.set_files(files);
     assert!(app.open().unwrap().segments(0).is_none());
 }
@@ -1257,37 +1418,37 @@ fn switching_terminal_appearance_invalidates_old_syntax_colors() {
 #[test]
 fn hiding_the_tree_forces_focus_to_the_diff() {
     let mut app = load();
-    assert!(app.is_files_visible);
-    assert_eq!(app.pane, Pane::Files);
+    assert!(app.view().is_files_visible);
+    assert_eq!(app.view().pane, Pane::Files);
 
     press(&mut app, "f");
-    assert!(!app.is_files_visible);
-    assert_eq!(app.pane, Pane::Diff);
+    assert!(!app.view().is_files_visible);
+    assert_eq!(app.view().pane, Pane::Diff);
 
     // Tab is also the recovery path: it reopens and focuses the tree.
     act(&mut app, &Action::TogglePane);
-    assert!(app.is_files_visible);
-    assert_eq!(app.pane, Pane::Files);
+    assert!(app.view().is_files_visible);
+    assert_eq!(app.view().pane, Pane::Files);
 
     press(&mut app, "f");
-    assert!(!app.is_files_visible);
-    assert_eq!(app.pane, Pane::Diff);
+    assert!(!app.view().is_files_visible);
+    assert_eq!(app.view().pane, Pane::Diff);
 }
 
 #[test]
 fn visual_selection_paints_every_row_in_the_span() {
-    use prtui_tui::app::mode::Selection;
-
     let mut app = load();
-    app.pane = Pane::Diff;
-    app.selected_file = app
+    focus_pane(&mut app, Pane::Diff);
+    let selected_file = app
+        .view()
         .files
         .iter()
         .enumerate()
         .max_by_key(|(_, f)| f.lines.len())
         .map(|(i, _)| i)
         .unwrap();
-    app.cursor = 4;
+    select_file(&mut app, selected_file);
+    move_to(&mut app, 4);
 
     let snapshot = |app: &mut App| -> Vec<Option<ratatui::style::Color>> {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -1303,7 +1464,9 @@ fn visual_selection_paints_every_row_in_the_span() {
     };
 
     let plain = snapshot(&mut app);
-    app.selection = Some(Selection { anchor: 2, head: 6 });
+    move_to(&mut app, 2);
+    act(&mut app, &Action::EnterVisual);
+    act(&mut app, &Action::Move(Motion::Down(4)));
     let selected = snapshot(&mut app);
 
     // The header, the pane title, and the band standing in for the lines
@@ -1330,15 +1493,16 @@ fn visual_selection_paints_every_row_in_the_span() {
 #[test]
 fn the_composer_opens_over_the_diff_with_its_anchor_in_the_title() {
     let mut app = load();
-    app.pane = Pane::Diff;
-    app.cursor = app.files[app.selected_file]
+    focus_pane(&mut app, Pane::Diff);
+    let row = app.view().files[app.view().selected_file]
         .lines
         .iter()
         .position(|l| l.kind != LineKind::Hunk)
         .unwrap();
+    move_to(&mut app, row);
 
     act(&mut app, &Action::StartComment);
-    assert!(app.composer.is_some());
+    assert!(app.view().composer.is_some());
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
@@ -1364,17 +1528,20 @@ fn the_composer_opens_over_the_diff_with_its_anchor_in_the_title() {
 #[test]
 fn the_composer_names_the_old_side_and_only_that() {
     let mut app = load();
-    app.pane = Pane::Diff;
-    app.selected_file = app
+    focus_pane(&mut app, Pane::Diff);
+    let selected_file = app
+        .view()
         .files
         .iter()
         .position(|file| file.lines.iter().any(|l| l.kind == LineKind::Removed))
         .expect("a file with a deletion");
-    app.cursor = app.files[app.selected_file]
+    select_file(&mut app, selected_file);
+    let row = app.view().files[app.view().selected_file]
         .lines
         .iter()
         .position(|l| l.kind == LineKind::Removed)
         .unwrap();
+    move_to(&mut app, row);
 
     act(&mut app, &Action::StartComment);
     let rendered = draw(&app);
@@ -1390,12 +1557,13 @@ fn the_composer_names_the_old_side_and_only_that() {
 #[test]
 fn the_selection_counts_one_row_in_the_singular() {
     let mut app = load();
-    app.pane = Pane::Diff;
-    app.cursor = app.files[app.selected_file]
+    focus_pane(&mut app, Pane::Diff);
+    let row = app.view().files[app.view().selected_file]
         .lines
         .iter()
         .position(|l| l.kind != LineKind::Hunk)
         .unwrap();
+    move_to(&mut app, row);
 
     act(&mut app, &Action::EnterVisual);
     assert!(draw(&app).contains(" 1 line "), "{}", draw(&app));
@@ -1556,19 +1724,20 @@ fn the_header_ends_on_an_ellipsis_rather_than_mid_word() {
 
 /// Commits `body` as a draft on the first commentable line and reports it.
 fn write_draft(app: &mut App, body: &str) -> usize {
-    app.pane = Pane::Diff;
-    app.cursor = app.files[app.selected_file]
+    focus_pane(app, Pane::Diff);
+    let row = app.view().files[app.view().selected_file]
         .lines
         .iter()
         .position(|l| l.kind != LineKind::Hunk)
         .unwrap();
+    move_to(app, row);
 
     act(app, &Action::StartComment);
-    app.composer.as_mut().unwrap().editor.set_text(body);
+    replace_prompt(app, body);
     act(app, &Action::CommitComment);
-    assert_eq!(app.drafts.len(), 1);
+    assert_eq!(app.view().drafts.len(), 1);
 
-    app.cursor
+    app.view().cursor
 }
 
 /// The review being written has to be readable in the diff. Before, a draft was
@@ -1609,7 +1778,7 @@ fn a_saved_draft_shows_its_body_under_the_line() {
 fn a_refused_draft_names_the_reason() {
     let mut app = load();
     write_draft(&mut app, "needs a guard");
-    let id = app.drafts[0].id;
+    let id = app.view().drafts[0].id;
 
     app.finish(Err(Failure::Draft(
         id,
@@ -1632,8 +1801,7 @@ fn thread_with_image(app: &mut App) -> prtui_core::ReviewThread {
         .unwrap();
     thread.comments[0].body =
         format!("Before and after:\n\n![shot]({IMAGE_URL})");
-    app.threads_by_path
-        .insert(thread.path.clone(), vec![thread.clone()]);
+    set_threads_for_path(app, &thread.path, vec![thread.clone()]);
     thread
 }
 
@@ -1644,8 +1812,7 @@ fn an_attachment_renders_as_its_alt_text() {
     let mut app = load();
     let thread = thread_with_image(&mut app);
     show_thread(&mut app, &thread);
-    app.focused_card = Some(Card::Thread(thread.id.clone()));
-    app.expanded_card = Some(Card::Thread(thread.id.clone()));
+    expand_card(&mut app, &Card::Thread(thread.id.clone()));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal.draw(|frame| paint(frame, &app)).unwrap();
@@ -1656,10 +1823,10 @@ fn an_attachment_renders_as_its_alt_text() {
 #[test]
 fn the_file_tree_marks_files_whose_threads_are_all_resolved() {
     let mut app = load();
-    let path = app.files[0].path.clone();
+    let path = app.view().files[0].path.clone();
     let mut thread = fixture_threads().remove(1);
     thread.is_resolved = true;
-    app.threads_by_path.insert(path, vec![thread; 2]);
+    set_threads_for_path(&mut app, &path, vec![thread; 2]);
 
     let mut terminal = Terminal::new(TestBackend::new(52, 12)).unwrap();
     terminal
@@ -1695,13 +1862,14 @@ fn only_the_focused_pane_carries_the_cursor() {
     use prtui_tui::renderer::Theme;
 
     let mut app = load();
-    app.is_files_visible = true;
-    app.selected_file = 1;
+    set_tree_visible(&mut app, true);
+    select_file(&mut app, 1);
 
     let theme = Theme::dark();
     let layout = layout_of(&app);
     let list = layout.files_list.expect("the tree is open");
-    let row = list.y + layout.files.row_of(app.selected_file).unwrap() as u16;
+    let row =
+        list.y + layout.files.row_of(app.view().selected_file).unwrap() as u16;
 
     let painted = |app: &App| {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -1726,12 +1894,12 @@ fn only_the_focused_pane_carries_the_cursor() {
         )
     };
 
-    app.pane = Pane::Files;
+    focus_pane(&mut app, Pane::Files);
     let (bar, files_chip, diff_chip) = painted(&app);
     assert_eq!(bar, Some(theme.cursor), "the tree draws the cursor");
     assert!(files_chip > 0 && diff_chip == 0, "and wears the chip");
 
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
     let (bar, files_chip, diff_chip) = painted(&app);
     assert_ne!(bar, Some(theme.cursor), "the bar goes with the keys");
     assert!(diff_chip > 0 && files_chip == 0, "and so does the chip");
@@ -1744,8 +1912,8 @@ fn the_file_filter_paints_its_hit_in_the_path() {
     use prtui_tui::renderer::Theme;
 
     let mut app = load();
-    app.is_files_visible = true;
-    app.pane = Pane::Files;
+    set_tree_visible(&mut app, true);
+    focus_pane(&mut app, Pane::Files);
 
     let mut input = InputRouter::default();
     send(
@@ -1896,7 +2064,7 @@ fn an_unbranching_directory_chain_is_one_heading() {
 #[test]
 fn a_folded_directory_hides_its_files_and_says_how_many() {
     let mut app = load();
-    app.pane = Pane::Files;
+    focus_pane(&mut app, Pane::Files);
 
     // Down onto the first heading, then fold it.
     press(&mut app, "gg");
@@ -1926,7 +2094,7 @@ fn a_folded_directory_hides_its_files_and_says_how_many() {
 #[test]
 fn a_folded_directory_carries_its_files_conversation_mark() {
     let mut app = load();
-    app.pane = Pane::Files;
+    focus_pane(&mut app, Pane::Files);
 
     // The fixture's open thread is on auth_check_test.go, under `cmdutil/`.
     press(&mut app, "G");
@@ -1964,7 +2132,7 @@ fn a_folded_directory_carries_its_files_conversation_mark() {
 #[test]
 fn a_fold_survives_a_refetch() {
     let mut app = load();
-    app.pane = Pane::Files;
+    focus_pane(&mut app, Pane::Files);
     press(&mut app, "gg");
     act(&mut app, &Action::Activate);
 
@@ -1988,7 +2156,7 @@ fn the_tree_keeps_the_rule_between_the_panes() {
     let rules = rendered.lines().filter(|line| line.contains('│')).count();
 
     assert!(
-        rules >= app.files.len(),
+        rules >= app.view().files.len(),
         "every file row still shows the rule:\n{rendered}"
     );
 }
@@ -2001,8 +2169,8 @@ fn search_paints_only_the_matched_bytes_of_a_diff_line() {
     const NEEDLE: &str = "DisableAuthCheckFlag";
 
     let mut app = load();
-    app.is_files_visible = false;
-    app.pane = Pane::Diff;
+    set_tree_visible(&mut app, false);
+    focus_pane(&mut app, Pane::Diff);
     highlight(&mut app);
 
     let row = app
@@ -2022,7 +2190,7 @@ fn search_paints_only_the_matched_bytes_of_a_diff_line() {
     paste(&mut input, &mut app, NEEDLE);
     send(&mut input, &mut app, KeyCode::Enter.into());
 
-    assert_eq!(app.cursor, row, "search lands on the only match");
+    assert_eq!(app.view().cursor, row, "search lands on the only match");
     assert_eq!(summary(&app), (1, 1));
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -2057,19 +2225,16 @@ fn search_paints_only_the_matched_bytes_of_a_diff_line() {
 #[test]
 fn the_submit_overlay_shows_the_verdict_and_the_draft_count() {
     let mut app = load();
-    app.pane = Pane::Diff;
-    app.cursor = app.files[app.selected_file]
+    focus_pane(&mut app, Pane::Diff);
+    let row = app.view().files[app.view().selected_file]
         .lines
         .iter()
         .position(|l| l.kind != LineKind::Hunk)
         .unwrap();
+    move_to(&mut app, row);
 
     act(&mut app, &Action::StartComment);
-    app.composer
-        .as_mut()
-        .unwrap()
-        .editor
-        .set_text("needs a test");
+    replace_prompt(&mut app, "needs a test");
     act(&mut app, &Action::CommitComment);
 
     press(&mut app, "s");
@@ -2094,7 +2259,7 @@ fn the_submit_overlay_shows_the_verdict_and_the_draft_count() {
     );
 
     act(&mut app, &Action::CycleEvent(1));
-    app.submission.as_mut().unwrap().editor.set_text("ship it");
+    replace_prompt(&mut app, "ship it");
     let rendered = draw(&app);
     assert!(rendered.contains("ship it"), "{rendered}");
     assert!(!rendered.contains("summary (optional"), "{rendered}");
@@ -2105,14 +2270,10 @@ fn the_submit_overlay_shows_the_verdict_and_the_draft_count() {
 #[test]
 fn a_rejected_review_shows_what_github_said_above_the_summary() {
     let mut app = load();
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
 
     act(&mut app, &Action::StartSubmit);
-    app.submission
-        .as_mut()
-        .unwrap()
-        .editor
-        .set_text("please fix");
+    replace_prompt(&mut app, "please fix");
     act(&mut app, &Action::CommitSubmit);
     app.take_requests();
 
@@ -2134,18 +2295,8 @@ fn a_rejected_review_shows_what_github_said_above_the_summary() {
 #[test]
 fn a_reply_composer_names_the_thread_it_answers() {
     let mut app = load();
-    app.pane = Pane::Diff;
     let thread = fixture_threads().remove(0);
-    app.selected_file = app
-        .files
-        .iter()
-        .position(|file| file.path == thread.path)
-        .unwrap();
-    app.cursor = app.files[app.selected_file]
-        .lines
-        .iter()
-        .position(|line| thread.anchors_to(line))
-        .unwrap();
+    show_thread(&mut app, &thread);
     press(&mut app, "j");
 
     act(&mut app, &Action::StartComment);
@@ -2160,17 +2311,16 @@ fn the_status_bar_paints_failures_and_outages_as_trouble() {
     let mut app = App::new();
     assert!(!app.is_status_alarming());
 
-    app.status = "error: fetching changed files failed: HTTP 404".into();
+    app.receive(AppMessage::ExternalFailure(
+        "fetching changed files failed: HTTP 404".into(),
+    ));
     assert!(app.is_status_alarming());
 
-    app.status = "outage: provider unavailable".into();
+    app.receive(AppMessage::Outage("provider unavailable".into()));
     assert!(app.is_status_alarming());
 
-    // Ordinary notes stay quiet; "no more comments" is not a failure.
-    for note in ["draft saved", "review submitted", "no more comments"] {
-        app.status = note.into();
-        assert!(!app.is_status_alarming(), "{note} should not alarm");
-    }
+    let app = App::new();
+    assert!(!app.is_status_alarming());
 }
 
 /// Draws a frame and reports the cells alongside where the caret was parked,
@@ -2213,7 +2363,7 @@ fn a_long_comment_folds_and_carries_the_caret_with_it() {
     let mut app = load();
     // Numbered lines so no diff content can collide with the words typed below.
     app.set_files(vec![numbered_file(20)]);
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
     press(&mut app, "j");
     act(&mut app, &Action::StartComment);
 
@@ -2251,7 +2401,7 @@ fn a_long_comment_folds_and_carries_the_caret_with_it() {
 fn a_hard_newline_keeps_its_own_row() {
     let mut app = load();
     app.set_files(vec![numbered_file(20)]);
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
     press(&mut app, "j");
     act(&mut app, &Action::StartComment);
 
@@ -2267,10 +2417,10 @@ fn a_hard_newline_keeps_its_own_row() {
 #[test]
 fn shift_c_writes_a_note_about_the_whole_file() {
     let mut app = load();
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
 
     press(&mut app, "C");
-    assert_eq!(app.mode, prtui_tui::app::mode::Mode::Insert);
+    assert_eq!(app.view().mode, prtui_tui::app::mode::Mode::Insert);
     assert!(draw(&app).contains("file note"));
 
     paste(
@@ -2280,7 +2430,7 @@ fn shift_c_writes_a_note_about_the_whole_file() {
     );
     act(&mut app, &Action::CommitComment);
 
-    let draft = app.drafts.first().expect("a draft was saved");
+    let draft = app.view().drafts.first().expect("a draft was saved");
     assert!(draft.is_file_level());
     assert!(draft.rows().is_none(), "a file note owns no rows");
     assert_eq!(draft.body, "this file needs splitting");
@@ -2293,7 +2443,7 @@ fn shift_c_writes_a_note_about_the_whole_file() {
 #[test]
 fn a_file_note_is_revised_rather_than_stacked() {
     let mut app = load();
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
 
     press(&mut app, "C");
     paste(&mut InputRouter::default(), &mut app, "first thought");
@@ -2301,15 +2451,15 @@ fn a_file_note_is_revised_rather_than_stacked() {
 
     press(&mut app, "C");
     assert_eq!(
-        app.composer.as_ref().map(|composer| composer.editor.text()),
+        app.view().composer.map(|composer| composer.editor.text()),
         Some("first thought".to_string()),
         "reopening loads the existing note"
     );
     paste(&mut InputRouter::default(), &mut app, " and a second");
     act(&mut app, &Action::CommitComment);
 
-    assert_eq!(app.drafts.len(), 1, "one note per file");
-    assert_eq!(app.drafts[0].body, "first thought and a second");
+    assert_eq!(app.view().drafts.len(), 1, "one note per file");
+    assert_eq!(app.view().drafts[0].body, "first thought and a second");
 }
 
 /// The lines the note answers to keep a mark of their own while it is written.
@@ -2318,15 +2468,17 @@ fn a_file_note_is_revised_rather_than_stacked() {
 #[test]
 fn composing_paints_the_rows_the_comment_will_cover() {
     let mut app = load();
-    app.pane = Pane::Diff;
-    app.selected_file = app
+    focus_pane(&mut app, Pane::Diff);
+    let selected_file = app
+        .view()
         .files
         .iter()
         .enumerate()
         .max_by_key(|(_, f)| f.lines.len())
         .map(|(i, _)| i)
         .unwrap();
-    app.cursor = 4;
+    select_file(&mut app, selected_file);
+    move_to(&mut app, 4);
 
     let background = |app: &App| -> Option<ratatui::style::Color> {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -2363,7 +2515,7 @@ fn composing_paints_the_rows_the_comment_will_cover() {
 #[test]
 fn a_draft_expands_into_its_whole_body() {
     let mut app = load();
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
 
     press(&mut app, "C");
     paste(
@@ -2374,7 +2526,10 @@ fn a_draft_expands_into_its_whole_body() {
     act(&mut app, &Action::CommitComment);
 
     // Committing leaves the focus on what was just written.
-    assert_eq!(app.focused_card, Some(Card::Draft(app.drafts[0].id)));
+    assert_eq!(
+        app.view().focused_card.cloned(),
+        Some(Card::Draft(app.view().drafts[0].id))
+    );
 
     let collapsed = draw(&app);
     assert!(collapsed.contains("first line"));
@@ -2395,7 +2550,7 @@ fn a_draft_expands_into_its_whole_body() {
 #[test]
 fn a_focused_file_note_takes_the_edit_and_discard_keys() {
     let mut app = load();
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
 
     press(&mut app, "C");
     paste(&mut InputRouter::default(), &mut app, "needs splitting");
@@ -2404,7 +2559,7 @@ fn a_focused_file_note_takes_the_edit_and_discard_keys() {
 
     press(&mut app, "e");
     assert_eq!(
-        app.composer.as_ref().map(|composer| composer.editor.text()),
+        app.view().composer.map(|composer| composer.editor.text()),
         Some("needs splitting".to_string())
     );
     act(&mut app, &Action::CancelComment);
@@ -2412,8 +2567,11 @@ fn a_focused_file_note_takes_the_edit_and_discard_keys() {
 
     press(&mut app, "d");
     settle(&mut app);
-    assert!(app.drafts.is_empty(), "the note is discarded");
-    assert!(app.focused_card.is_none(), "the card it sat on is gone");
+    assert!(app.view().drafts.is_empty(), "the note is discarded");
+    assert!(
+        app.view().focused_card.is_none(),
+        "the card it sat on is gone"
+    );
 }
 
 /// A file-level remark is a thread with `subjectType: FILE`, which is the only
@@ -2422,12 +2580,13 @@ fn a_focused_file_note_takes_the_edit_and_discard_keys() {
 #[test]
 fn a_file_note_ships_without_a_line() {
     let mut app = load();
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
     press(&mut app, "C");
     paste(&mut InputRouter::default(), &mut app, "whole-file remark");
     act(&mut app, &Action::CommitComment);
 
-    let thread = app.drafts[0].new_thread(Parent::Review("PRR_1".into()));
+    let thread =
+        app.view().drafts[0].new_thread(Parent::Review("PRR_1".into()));
 
     assert!(thread.anchor.is_none(), "no line to point at");
     assert_eq!(thread.body, "whole-file remark");
@@ -2458,7 +2617,7 @@ fn numbered_file(count: usize) -> prtui_core::ChangedFile {
 fn an_open_composer_leaves_the_line_it_anchors_to_on_screen() {
     let mut app = load();
     app.set_files(vec![numbered_file(80)]);
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
     press(&mut app, "G");
 
     let anchored = "line_079_marker";
@@ -2480,7 +2639,7 @@ fn an_open_composer_leaves_the_line_it_anchors_to_on_screen() {
 fn the_submit_form_leaves_the_diff_readable_behind_it() {
     let mut app = load();
     app.set_files(vec![numbered_file(80)]);
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
     press(&mut app, "G");
     act(&mut app, &Action::StartSubmit);
 
@@ -2537,8 +2696,8 @@ fn a_diff_line_wider_than_the_pane_folds_instead_of_being_cut_off() {
     let mut app = load();
     let line = format!("HEAD_{}_TAIL", "0123456789".repeat(30));
     app.set_files(vec![single_line_file(&line)]);
-    app.is_files_visible = false;
-    app.pane = Pane::Diff;
+    set_tree_visible(&mut app, false);
+    focus_pane(&mut app, Pane::Diff);
 
     let rendered = draw(&app);
 
@@ -2561,8 +2720,8 @@ fn a_diff_line_wider_than_the_pane_folds_instead_of_being_cut_off() {
 fn only_the_first_row_of_a_folded_line_carries_its_number() {
     let mut app = load();
     app.set_files(vec![single_line_file(&"x".repeat(400))]);
-    app.is_files_visible = false;
-    app.pane = Pane::Diff;
+    set_tree_visible(&mut app, false);
+    focus_pane(&mut app, Pane::Diff);
 
     let (cells, _) = draw_cells(&app);
     let layout = Layout::compute(FRAME, app.view());
@@ -2596,7 +2755,7 @@ fn only_the_first_row_of_a_folded_line_carries_its_number() {
 fn a_hunk_header_stays_on_one_row() {
     let mut app = load();
     app.set_files(vec![single_line_file(&"y".repeat(400))]);
-    app.is_files_visible = false;
+    set_tree_visible(&mut app, false);
 
     // The header draws a rule across the pane; folding it would break the rule
     // into pieces for no gain.
@@ -2608,8 +2767,8 @@ fn a_hunk_header_stays_on_one_row() {
 fn the_cursor_covers_every_row_of_the_line_it_is_on() {
     let mut app = load();
     app.set_files(vec![single_line_file(&"z".repeat(300))]);
-    app.is_files_visible = false;
-    app.pane = Pane::Diff;
+    set_tree_visible(&mut app, false);
+    focus_pane(&mut app, Pane::Diff);
     press(&mut app, "j");
 
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -2672,12 +2831,16 @@ fn pending_threads_come_back_as_drafts() {
     app.set_files(parse_files(&serde_json::to_vec(&files).unwrap()).unwrap());
     app.set_meta(parse_meta(&serde_json::to_vec(&meta).unwrap()).unwrap());
 
-    assert_eq!(app.drafts.len(), 1, "the pending thread is a draft");
-    assert_eq!(app.drafts[0].body, "not sent yet");
-    assert_eq!(app.drafts[0].remote.as_deref(), Some("PRRC_pending"));
-    assert!(app.drafts[0].rows().is_some(), "it found its rows again");
+    assert_eq!(app.view().drafts.len(), 1, "the pending thread is a draft");
+    assert_eq!(app.view().drafts[0].body, "not sent yet");
+    assert_eq!(app.view().drafts[0].remote.as_deref(), Some("PRRC_pending"));
+    assert!(
+        app.view().drafts[0].rows().is_some(),
+        "it found its rows again"
+    );
 
     // And it is not also drawn on the diff as a conversation.
-    let threads: usize = app.threads_by_path.values().map(Vec::len).sum();
+    let threads: usize =
+        app.view().threads_by_path.values().map(Vec::len).sum();
     assert_eq!(threads, 1);
 }

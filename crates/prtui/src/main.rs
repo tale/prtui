@@ -4,6 +4,7 @@ use prtui_core::Provider;
 use prtui_core::{PullRequestTarget, Repo};
 use prtui_github::GitHub;
 use prtui_tui::app::App;
+use prtui_tui::app::action::Action;
 use prtui_tui::app::effect::{Effect, Message as AppMessage};
 use prtui_tui::app::input::InputRouter;
 use prtui_tui::app::link::{Errand, Link};
@@ -382,7 +383,7 @@ async fn event_loop<P: Provider>(
     let mut animation = tokio::time::interval(Duration::from_millis(90));
     animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    while !app.should_quit {
+    while !app.should_quit() {
         for effect in app.take_effects() {
             match effect {
                 Effect::FetchFiles => {
@@ -410,22 +411,28 @@ async fn event_loop<P: Provider>(
                     number,
                     tx.clone(),
                 ),
-                Effect::HighlightAll => highlighter.all(
-                    &app.files,
-                    app.selected_file,
-                    app.theme().mode,
-                ),
+                Effect::HighlightAll => {
+                    let view = app.view();
+                    highlighter.all(
+                        view.files,
+                        view.selected_file,
+                        view.theme().mode,
+                    );
+                }
                 Effect::Highlight(path) => {
+                    let view = app.view();
                     if let Some(file) =
-                        app.files.iter().find(|file| file.path == path)
+                        view.files.iter().find(|file| file.path == path)
                     {
-                        highlighter.one(file, app.theme().mode);
+                        highlighter.one(file, view.theme().mode);
                     }
                 }
                 Effect::Errand(Errand::Open(link)) => {
                     let url = resolve_link(provider, &repo, number, &link);
                     if let Err(err) = external::open_url(&url) {
-                        app.status = format!("error: {err}");
+                        app.receive(AppMessage::ExternalFailure(
+                            err.to_string(),
+                        ));
                     }
                 }
                 Effect::Errand(Errand::Copy(link)) => {
@@ -442,7 +449,7 @@ async fn event_loop<P: Provider>(
         }
 
         tokio::select! {
-            _ = animation.tick(), if app.is_loading() || app.in_flight > 0 => {
+            _ = animation.tick(), if app.is_loading() || app.view().in_flight > 0 => {
                 app.advance_loading();
                 is_dirty = true;
             }
@@ -484,7 +491,7 @@ async fn event_loop<P: Provider>(
                                 && key.modifiers.contains(termina::event::Modifiers::CONTROL)
                             {
                                 exit = ReviewExit::Process;
-                                app.should_quit = true;
+                                app.apply(&Action::Quit, &layout);
                             } else {
                                 input.dispatch_key(&mut app, key, &layout);
                             }

@@ -1,8 +1,8 @@
 # Architecture
 
 Where code lives, what the boundaries are, and which of them exist yet. Steps A
-through D have landed; E remains planned, so parts of what follows are a target
-rather than a description. Every section marks which is which.
+through D and the state boundary from E have landed; the remaining UI split is
+still planned. Every section marks which is which.
 
 **Rules** is the contract, **Tree** is the map, and **Why** is the reasoning —
 a record of the boundary problems that motivated the work, with the resolved
@@ -81,7 +81,8 @@ own.
   at each call site — a widget struct asking to exist. *Partly resolved: layout
   and measurement have moved out and both bags are gone; splitting what is left
   into `view/` is step E.*
-- `App` exposes ~25 public fields and 64 public items.
+- `App` exposes ~25 public fields and 64 public items. *Resolved: state is
+  private and grouped by review, navigation, prompt, and runtime concerns.*
 
 ## Rules
 
@@ -107,9 +108,9 @@ is not mistaken for one the code already keeps.
    serialization. The runtime is generic over `prtui_core::Provider`;
    host clients return `Meta` / `Vec<ChangedFile>` and serialize
    drafts at the edge, never inside `app`.
-5. **Grouped private state.** *(Planned, E.)* `App` owns sub-structs (`Focus`,
-   `Drafts`, `Find`, `Loading`) that keep their own invariants, rather than 25
-   public fields any caller can desynchronize.
+5. **Grouped private state.** *(Live since E.)* `App` owns private review,
+   navigation, prompt, and runtime state. Callers inspect a borrowed `View` and
+   change state only through actions, messages, and narrow ingestion methods.
 
 ## Tree
 
@@ -190,8 +191,9 @@ independent and can lead if the refetch race needs fixing first.
 - **D. `model/` + `github/wire.rs`** — **done at the boundary.** `Value` is out
   of `app` and `model`; derived deserialization fails loudly. Splitting the
   remaining single-file modules is deferred to E.
-- **E. Split `ui.rs`, extract `measure.rs`, collapse `travel`.** Mostly
-  mechanical once A through C land.
+- **E. Seal `App`, then split the remaining UI.** **State boundary done:**
+  grouped state is private, the executable consumes `View`, and integration
+  tests drive actions and messages. Splitting `ui.rs` remains.
 
 ## Testing
 
@@ -203,6 +205,9 @@ Extracting `layout/` is what makes that arithmetic addressable, so it gets
 direct tests as it moves — 27 lib unit tests now, up from 10.
 
 Two things the extraction changed in the tests themselves, both worth keeping:
+
+- Tests inspect the borrowed view and drive actions or messages. They cannot
+  manufacture states by writing `App` fields directly.
 
 - Tests used to dispatch keys with a hardcoded `viewport_height: 20` while
   rendering at a height of 27. They now compute a real `Layout` from the frame

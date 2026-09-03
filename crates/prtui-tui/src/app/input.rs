@@ -29,13 +29,13 @@ impl InputRouter {
         key: KeyEvent,
         layout: &Layout,
     ) -> DispatchResult {
-        let mode = app.mode;
+        let mode = app.view().mode;
         self.sync_mode(app, mode);
 
         match app.resolve_key(key) {
             Resolution::Action(action) => {
                 app.apply(&action, layout);
-                let mode = app.mode;
+                let mode = app.view().mode;
                 self.sync_mode(app, mode);
                 DispatchResult::Applied(action)
             }
@@ -53,7 +53,7 @@ impl InputRouter {
         text: &str,
         layout: &Layout,
     ) -> DispatchResult {
-        let mode = app.mode;
+        let mode = app.view().mode;
         self.sync_mode(app, mode);
 
         if app.type_text(text, layout) {

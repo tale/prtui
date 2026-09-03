@@ -50,6 +50,115 @@ fn act(app: &mut App, action: &Action) {
     app.apply(action, &layout);
 }
 
+fn focus_pane(app: &mut App, pane: Pane) {
+    let action = match pane {
+        Pane::Files => Action::FocusFiles,
+        Pane::Diff => Action::FocusDiff,
+    };
+    act(app, &action);
+}
+
+fn set_tree_visible(app: &mut App, is_visible: bool) {
+    if app.view().is_files_visible != is_visible {
+        act(app, &Action::ToggleTree);
+    }
+}
+
+fn select_file(app: &mut App, target: usize) {
+    for _ in 0..app.view().files.len() {
+        if app.view().selected_file == target {
+            return;
+        }
+        act(app, &Action::NextFile(1));
+    }
+
+    panic!("file {target} is not in the tree");
+}
+
+fn move_to(app: &mut App, target: usize) {
+    focus_pane(app, Pane::Diff);
+    act(app, &Action::Move(Motion::Top));
+
+    let limit = layout_of(app).rows.len() + app.diff_len();
+    for _ in 0..limit {
+        if app.view().cursor == target && app.view().focused_card.is_none() {
+            return;
+        }
+        act(app, &Action::Move(Motion::Down(1)));
+    }
+
+    panic!("diff row {target} is not reachable");
+}
+
+fn replace_threads(app: &mut App, mut threads: Vec<prtui_core::ReviewThread>) {
+    for thread in &mut threads {
+        if let Some(first) = thread.comments.first_mut() {
+            first.is_pending = false;
+        }
+    }
+
+    let view = app.view();
+    let pr = view.pr.cloned().unwrap_or_default();
+    let discussion = view.discussion.to_vec();
+    let viewed = view
+        .files
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            app.tree_row(*index).is_some_and(|row| row.is_viewed)
+        })
+        .map(|(_, file)| file.path.clone())
+        .collect();
+
+    app.set_meta(prtui_core::Meta {
+        pr,
+        threads,
+        discussion,
+        pending_review: None,
+        viewed,
+    });
+}
+
+fn set_threads_for_path(
+    app: &mut App,
+    path: &str,
+    threads: Vec<prtui_core::ReviewThread>,
+) {
+    let mut all: Vec<_> = app
+        .view()
+        .threads_by_path
+        .values()
+        .flatten()
+        .filter(|thread| &*thread.path != path)
+        .cloned()
+        .collect();
+    all.extend(threads);
+    replace_threads(app, all);
+}
+
+fn replace_prompt(app: &mut App, text: &str) {
+    let current = {
+        let view = app.view();
+        view.composer
+            .map(|composer| composer.editor.text())
+            .or_else(|| {
+                view.submission.map(|submission| submission.editor.text())
+            })
+            .expect("an editor is open")
+    };
+
+    for _ in current.chars() {
+        let layout = layout_of(app);
+        assert!(app.type_key(
+            KeyEvent::new(KeyCode::Backspace, Modifiers::NONE),
+            &layout,
+        ));
+    }
+
+    let layout = layout_of(app);
+    assert!(app.type_text(text, &layout));
+}
+
 fn found(app: &App) -> Vec<prtui_tui::app::search::Match> {
     app.search_matches(&layout_of(app))
 }
@@ -104,26 +213,29 @@ fn load() -> App {
     let mut app = App::new();
     app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
     app.set_meta(parse_meta(include_bytes!("fixtures/meta.json")).unwrap());
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
 
     // The first fixture file is only 8 rows; motions need room to breathe.
-    app.selected_file = app
+    let selected = app
+        .view()
         .files
         .iter()
         .enumerate()
         .max_by_key(|(_, f)| f.lines.len())
         .map(|(i, _)| i)
         .unwrap();
+    select_file(&mut app, selected);
     app
 }
 
 /// Row 0 of any diff is a hunk header, which is deliberately not commentable.
 fn park_on_code(app: &mut App) {
-    app.cursor = app.files[app.selected_file]
+    let row = app.view().files[app.view().selected_file]
         .lines
         .iter()
         .position(|l| l.kind != prtui_core::LineKind::Hunk)
         .unwrap();
+    move_to(app, row);
 }
 
 fn park_on_unresolved_thread(app: &mut App) -> prtui_core::ReviewThread {
@@ -131,24 +243,27 @@ fn park_on_unresolved_thread(app: &mut App) -> prtui_core::ReviewThread {
         .into_iter()
         .find(|thread| !thread.is_resolved)
         .unwrap();
-    app.selected_file = app
+    let selected = app
+        .view()
         .files
         .iter()
         .position(|file| file.path == thread.path)
         .unwrap();
-    app.cursor = app.files[app.selected_file]
+    select_file(app, selected);
+    let row = app.view().files[app.view().selected_file]
         .lines
         .iter()
         .position(|line| thread.anchors_to(line))
         .unwrap();
+    move_to(app, row);
     thread
 }
 
 /// Swaps a synthetic patch in for the open file, for diff shapes the captured
 /// fixture does not contain.
 fn open_patch(app: &mut App, patch: &str) {
-    let mut files = app.files.clone();
-    files[app.selected_file] = file_from(patch).into();
+    let mut files = app.view().files.to_vec();
+    files[app.view().selected_file] = file_from(patch).into();
     app.set_files(files);
 }
 
@@ -168,11 +283,19 @@ fn file_from(patch: &str) -> prtui_core::ChangedFile {
 
 /// Sets the verdict the open submit form carries. Reaching it by tab is a
 /// separate concern, covered where the overlay's keys are.
-const fn choose(app: &mut App, event: ReviewEvent) {
-    app.submission
-        .as_mut()
-        .expect("the submit form is open")
-        .event = event;
+fn choose(app: &mut App, event: ReviewEvent) {
+    for _ in 0..3 {
+        if app
+            .view()
+            .submission
+            .is_some_and(|submission| submission.event == event)
+        {
+            return;
+        }
+        act(app, &Action::CycleEvent(1));
+    }
+
+    panic!("review event is not reachable");
 }
 
 fn press(app: &mut App, keys: &str) {
@@ -187,23 +310,23 @@ fn count_prefix_multiplies_a_motion() {
     let mut app = load();
 
     press(&mut app, "5j");
-    assert_eq!(app.cursor, 5);
+    assert_eq!(app.view().cursor, 5);
 
     press(&mut app, "12j");
-    assert_eq!(app.cursor, 17);
+    assert_eq!(app.view().cursor, 17);
 
     press(&mut app, "3k");
-    assert_eq!(app.cursor, 14);
+    assert_eq!(app.view().cursor, 14);
 
     // A count never walks off the end of the file.
     press(&mut app, "9999j");
-    assert_eq!(app.cursor, app.diff_len() - 1);
+    assert_eq!(app.view().cursor, app.diff_len() - 1);
 
     // Arbitrarily long terminal input is clamped instead of overflowing.
-    app.cursor = 0;
+    move_to(&mut app, 0);
     let huge_count = format!("{}j", "9".repeat(100));
     press(&mut app, &huge_count);
-    assert_eq!(app.cursor, app.diff_len() - 1);
+    assert_eq!(app.view().cursor, app.diff_len() - 1);
 }
 
 /// Types a `:` line and runs it, the way a reader would.
@@ -227,15 +350,23 @@ fn a_count_repeats_the_command_it_precedes() {
     for (stepwise, counted) in [("]]", "2]"), ("}}", "2}")] {
         let mut one = load();
         let mut many = load();
-        one.selected_file = 0;
-        many.selected_file = 0;
+        one.view().selected_file = 0;
+        many.view().selected_file = 0;
 
         press(&mut one, stepwise);
         press(&mut many, counted);
 
-        assert_eq!(one.selected_file, many.selected_file, "{counted}");
-        assert_eq!(one.cursor, many.cursor, "{counted}");
-        assert_eq!(one.focused_card, many.focused_card, "{counted}");
+        assert_eq!(
+            one.view().selected_file,
+            many.view().selected_file,
+            "{counted}"
+        );
+        assert_eq!(one.view().cursor, many.view().cursor, "{counted}");
+        assert_eq!(
+            one.view().focused_card,
+            many.view().focused_card,
+            "{counted}"
+        );
     }
 }
 
@@ -254,21 +385,21 @@ fn a_line_number_lands_on_the_line_the_gutter_shows() {
         .expect("the fixture has numbered lines");
 
     ex(&mut app, &number.to_string());
-    assert_eq!(app.cursor, row);
+    assert_eq!(app.view().cursor, row);
 
-    app.cursor = 0;
+    move_to(&mut app, 0);
     press(&mut app, &format!("{number}G"));
-    assert_eq!(app.cursor, row);
+    assert_eq!(app.view().cursor, row);
 
-    app.cursor = 0;
+    move_to(&mut app, 0);
     press(&mut app, &format!("{number}gg"));
-    assert_eq!(app.cursor, row);
+    assert_eq!(app.view().cursor, row);
 
     // Without a count both keys still mean the ends of the file.
     press(&mut app, "G");
-    assert_eq!(app.cursor, app.diff_len() - 1);
+    assert_eq!(app.view().cursor, app.diff_len() - 1);
     press(&mut app, "gg");
-    assert_eq!(app.cursor, 0);
+    assert_eq!(app.view().cursor, 0);
 }
 
 /// A line past the end of the patch has to land somewhere sane rather than
@@ -278,7 +409,7 @@ fn a_line_number_past_the_file_lands_on_its_last_row() {
     let mut app = load();
 
     ex(&mut app, "99999");
-    assert_eq!(app.cursor, app.diff_len() - 1);
+    assert_eq!(app.view().cursor, app.diff_len() - 1);
 }
 
 /// The command line and the keys share one vocabulary, so `:` reaches every
@@ -287,22 +418,22 @@ fn a_line_number_past_the_file_lands_on_its_last_row() {
 fn the_command_line_runs_the_commands_the_keys_are_bound_to() {
     let mut app = load();
     ex(&mut app, "submit");
-    assert_eq!(app.mode, Mode::Submit);
+    assert_eq!(app.view().mode, Mode::Submit);
     act(&mut app, &Action::CancelSubmit);
 
     let mut app = load();
     ex(&mut app, "w");
-    assert!(app.submission.is_some());
+    assert!(app.view().submission.is_some());
 
     let mut app = load();
     ex(&mut app, "q");
-    assert!(app.should_quit);
+    assert!(app.should_quit());
 
     let mut app = load();
     ex(&mut app, "nope");
-    assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.status, "not a command: nope");
-    assert!(!app.should_quit);
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert_eq!(app.view().status, "not a command: nope");
+    assert!(!app.should_quit());
 }
 
 #[test]
@@ -311,16 +442,16 @@ fn the_command_line_can_be_left_without_running_anything() {
     let mut input = InputRouter::default();
 
     press(&mut app, ":q");
-    assert_eq!(app.mode, Mode::CommandLine);
+    assert_eq!(app.view().mode, Mode::CommandLine);
 
     send(
         &mut input,
         &mut app,
         KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
     );
-    assert_eq!(app.mode, Mode::Normal);
-    assert!(app.command_line.is_none());
-    assert!(!app.should_quit);
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert!(app.view().command_line.is_none());
+    assert!(!app.should_quit());
 }
 
 /// What was run before is one key away, since a `:` line is usually retyped
@@ -341,13 +472,13 @@ fn the_command_line_remembers_what_was_run() {
     let down = KeyEvent::new(KeyCode::Down, Modifiers::NONE);
 
     send(&mut input, &mut app, up);
-    assert_eq!(app.command_line.as_ref().unwrap().text(), "nope");
+    assert_eq!(app.view().command_line.unwrap().text(), "nope");
     send(&mut input, &mut app, up);
-    assert_eq!(app.command_line.as_ref().unwrap().text(), "12");
+    assert_eq!(app.view().command_line.unwrap().text(), "12");
     send(&mut input, &mut app, down);
-    assert_eq!(app.command_line.as_ref().unwrap().text(), "nope");
+    assert_eq!(app.view().command_line.unwrap().text(), "nope");
     send(&mut input, &mut app, down);
-    assert_eq!(app.command_line.as_ref().unwrap().text(), "");
+    assert_eq!(app.view().command_line.unwrap().text(), "");
 }
 
 /// The reference is a view of the command table, so a command that no key
@@ -397,11 +528,11 @@ fn errand(app: &mut App) -> Errand {
 #[test]
 fn the_overview_reads_the_description_and_the_discussion() {
     let mut app = load();
-    let (cursor, scroll) = (app.cursor, app.diff_scroll);
+    let (cursor, scroll) = (app.view().cursor, app.view().diff_scroll);
 
     press(&mut app, "o");
-    assert_eq!(app.mode, Mode::Overview);
-    assert_eq!(app.overlay_scroll, 0);
+    assert_eq!(app.view().mode, Mode::Overview);
+    assert_eq!(app.view().overlay_scroll, 0);
 
     let layout = layout_of(&app);
     let panel = drawn_lines(&layout);
@@ -413,7 +544,7 @@ fn the_overview_reads_the_description_and_the_discussion() {
     // The fixture's discussion is under the description, so it takes a scroll
     // to reach.
     press(&mut app, "G");
-    assert!(app.overlay_scroll > 0);
+    assert!(app.view().overlay_scroll > 0);
     let panel = drawn_lines(&layout_of(&app));
     assert!(
         panel.iter().any(|line| line.contains("@malept")),
@@ -422,10 +553,13 @@ fn the_overview_reads_the_description_and_the_discussion() {
 
     // Reading it must not move the cursor, the way the reference does not.
     press(&mut app, "o");
-    assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.overlay_scroll, 0);
-    assert_eq!((app.cursor, app.diff_scroll), (cursor, scroll));
-    assert!(!app.should_quit);
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert_eq!(app.view().overlay_scroll, 0);
+    assert_eq!(
+        (app.view().cursor, app.view().diff_scroll),
+        (cursor, scroll)
+    );
+    assert!(!app.should_quit());
 }
 
 /// The panel's lines, as the view would paint them.
@@ -446,22 +580,23 @@ fn yanking_a_line_links_to_the_file_at_head() {
     let mut app = load();
     park_on_code(&mut app);
 
-    let line = app.files[app.selected_file].lines[app.cursor]
+    let line = app.view().files[app.view().selected_file].lines
+        [app.view().cursor]
         .new_line
         .expect("parked on a line that is at head");
-    let path = app.files[app.selected_file].path.clone();
+    let path = app.view().files[app.view().selected_file].path.clone();
 
     press(&mut app, "y");
 
     assert_eq!(
         errand(&mut app),
         Errand::Copy(Link::Blob {
-            commit: app.pr.as_ref().unwrap().head_oid.clone(),
+            commit: app.view().pr.as_ref().unwrap().head_oid.clone(),
             path,
             lines: Some((line, line)),
         })
     );
-    assert_eq!(app.status, "yanked link");
+    assert_eq!(app.view().status, "yanked link");
 }
 
 /// A span links to the whole span, and the selection has done its job once it
@@ -472,7 +607,7 @@ fn yanking_a_visual_span_links_every_line_and_drops_the_selection() {
     park_on_code(&mut app);
 
     press(&mut app, "v2j");
-    assert_eq!(app.mode, Mode::Visual);
+    assert_eq!(app.view().mode, Mode::Visual);
     press(&mut app, "y");
 
     let Errand::Copy(Link::Blob { lines, .. }) = errand(&mut app) else {
@@ -483,8 +618,8 @@ fn yanking_a_visual_span_links_every_line_and_drops_the_selection() {
     };
     assert_ne!(start, end, "a span names both ends");
 
-    assert_eq!(app.mode, Mode::Normal);
-    assert!(app.selection.is_none());
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert!(app.view().selection.is_none());
 }
 
 /// A conversation is addressed on the web by its own comment, not by the line
@@ -499,7 +634,10 @@ fn yanking_a_conversation_links_the_comment() {
         .expect("the fixture's comments carry reply targets");
 
     press(&mut app, "j");
-    assert!(app.focused_card.is_some(), "the card takes the focus");
+    assert!(
+        app.view().focused_card.is_some(),
+        "the card takes the focus"
+    );
 
     press(&mut app, "y");
     assert_eq!(errand(&mut app), Errand::Copy(Link::Comment(reply_target)));
@@ -515,7 +653,7 @@ fn gx_opens_the_pull_request_wherever_the_cursor_is() {
     park_on_code(&mut app);
     press(&mut app, "gx");
     assert_eq!(errand(&mut app), pull);
-    assert_eq!(app.status, "opening the pull request");
+    assert_eq!(app.view().status, "opening the pull request");
 
     park_on_unresolved_thread(&mut app);
     press(&mut app, "j");
@@ -535,12 +673,12 @@ fn the_reference_searches_and_steps_its_hits() {
         &mut app,
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
     );
-    assert_eq!(app.mode, Mode::Search);
+    assert_eq!(app.view().mode, Mode::Search);
     paste(&mut input, &mut app, "comment");
     send(&mut input, &mut app, KeyCode::Enter.into());
 
     // Accepting hands the reader back to the panel, not to the diff.
-    assert_eq!(app.mode, Mode::Help);
+    assert_eq!(app.view().mode, Mode::Help);
 
     let hits = app.overlay_matches(&layout_of(&app));
     assert!(hits.len() > 1, "the reference names comment more than once");
@@ -583,8 +721,8 @@ fn searching_the_overview_scrolls_the_hit_into_the_panel() {
         row >= layout.overlay_viewport(),
         "the hit is past the first screen"
     );
-    assert!(app.overlay_scroll <= row);
-    assert!(row < app.overlay_scroll + layout.overlay_viewport());
+    assert!(app.view().overlay_scroll <= row);
+    assert!(row < app.view().overlay_scroll + layout.overlay_viewport());
     assert_eq!(app.search_summary(&layout), (1, 1));
 }
 
@@ -595,7 +733,7 @@ fn cancelling_a_panel_search_restores_the_scroll() {
     let mut app = load();
     press(&mut app, "o");
     press(&mut app, "5j");
-    let scroll = app.overlay_scroll;
+    let scroll = app.view().overlay_scroll;
 
     let mut input = InputRouter::default();
     send(
@@ -606,9 +744,9 @@ fn cancelling_a_panel_search_restores_the_scroll() {
     paste(&mut input, &mut app, "malept");
     send(&mut input, &mut app, KeyCode::Escape.into());
 
-    assert_eq!(app.mode, Mode::Overview);
-    assert_eq!(app.overlay_scroll, scroll);
-    assert!(app.search.is_none());
+    assert_eq!(app.view().mode, Mode::Overview);
+    assert_eq!(app.view().overlay_scroll, scroll);
+    assert!(app.view().search.is_none());
 }
 
 /// A search inside a panel must not disturb the review underneath it.
@@ -616,7 +754,8 @@ fn cancelling_a_panel_search_restores_the_scroll() {
 fn a_panel_search_leaves_the_diff_alone() {
     let mut app = load();
     press(&mut app, "6j");
-    let (cursor, scroll, pane) = (app.cursor, app.diff_scroll, app.pane);
+    let (cursor, scroll, pane) =
+        (app.view().cursor, app.view().diff_scroll, app.view().pane);
 
     press(&mut app, "?");
     let mut input = InputRouter::default();
@@ -629,9 +768,9 @@ fn a_panel_search_leaves_the_diff_alone() {
     send(&mut input, &mut app, KeyCode::Enter.into());
     press(&mut app, "q");
 
-    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.view().mode, Mode::Normal);
     assert_eq!(
-        (app.cursor, app.diff_scroll, app.pane),
+        (app.view().cursor, app.view().diff_scroll, app.view().pane),
         (cursor, scroll, pane)
     );
 }
@@ -641,24 +780,24 @@ fn the_reference_opens_scrolls_and_closes() {
     let mut app = load();
 
     press(&mut app, "?");
-    assert_eq!(app.mode, Mode::Help);
-    assert_eq!(app.overlay_scroll, 0);
+    assert_eq!(app.view().mode, Mode::Help);
+    assert_eq!(app.view().overlay_scroll, 0);
 
     press(&mut app, "5j");
-    assert_eq!(app.overlay_scroll, 5);
+    assert_eq!(app.view().overlay_scroll, 5);
     press(&mut app, "2k");
-    assert_eq!(app.overlay_scroll, 3);
+    assert_eq!(app.view().overlay_scroll, 3);
     press(&mut app, "gg");
-    assert_eq!(app.overlay_scroll, 0);
+    assert_eq!(app.view().overlay_scroll, 0);
 
     // The reference is longer than the box it is read in.
     press(&mut app, "G");
-    assert!(app.overlay_scroll > 0);
+    assert!(app.view().overlay_scroll > 0);
 
     press(&mut app, "q");
-    assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.overlay_scroll, 0);
-    assert!(!app.should_quit);
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert_eq!(app.view().overlay_scroll, 0);
+    assert!(!app.should_quit());
 }
 
 /// Reading the reference must not move the cursor, or a reader loses their
@@ -667,7 +806,7 @@ fn the_reference_opens_scrolls_and_closes() {
 fn the_reference_leaves_the_diff_where_it_was() {
     let mut app = load();
     press(&mut app, "6j");
-    let (cursor, scroll) = (app.cursor, app.diff_scroll);
+    let (cursor, scroll) = (app.view().cursor, app.view().diff_scroll);
 
     press(&mut app, "?");
     press(&mut app, "9j");
@@ -678,9 +817,9 @@ fn the_reference_leaves_the_diff_where_it_was() {
         KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
     );
 
-    assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.cursor, cursor);
-    assert_eq!(app.diff_scroll, scroll);
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert_eq!(app.view().cursor, cursor);
+    assert_eq!(app.view().diff_scroll, scroll);
 }
 
 #[test]
@@ -688,33 +827,33 @@ fn the_reference_answers_to_the_command_line_too() {
     let mut app = load();
 
     ex(&mut app, "h");
-    assert_eq!(app.mode, Mode::Help);
+    assert_eq!(app.view().mode, Mode::Help);
 
     press(&mut app, "?");
-    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.view().mode, Mode::Normal);
 
     ex(&mut app, "help");
-    assert_eq!(app.mode, Mode::Help);
+    assert_eq!(app.view().mode, Mode::Help);
 }
 
 #[test]
 fn gg_needs_both_keys() {
     let mut app = load();
     press(&mut app, "9j");
-    assert_eq!(app.cursor, 9);
+    assert_eq!(app.view().cursor, 9);
 
     // A lone `g` is incomplete and must not move the cursor.
     let mut input = InputRouter::default();
     let key = KeyEvent::new(KeyCode::Char('g'), Modifiers::NONE);
     assert_eq!(send(&mut input, &mut app, key), DispatchResult::Pending);
-    assert_eq!(app.cursor, 9);
+    assert_eq!(app.view().cursor, 9);
     assert_eq!(app.pending_hint(), "g");
 
     assert_eq!(
         send(&mut input, &mut app, key),
         DispatchResult::Applied(Action::Move(Motion::Top))
     );
-    assert_eq!(app.cursor, 0);
+    assert_eq!(app.view().cursor, 0);
     assert!(app.pending_hint().is_empty());
 }
 
@@ -788,7 +927,7 @@ fn leading_zero_is_unbound_and_does_not_start_a_count() {
     // Leading zero must not start a count that swallows the next motion.
     assert_eq!(keymap.resolve(Mode::Normal, key), Resolution::Unbound);
     press(&mut app, "j");
-    assert_eq!(app.cursor, 1);
+    assert_eq!(app.view().cursor, 1);
 }
 
 #[test]
@@ -797,17 +936,17 @@ fn visual_selection_grows_from_its_anchor() {
 
     press(&mut app, "3j");
     press(&mut app, "V");
-    assert_eq!(app.mode, Mode::Visual);
+    assert_eq!(app.view().mode, Mode::Visual);
 
     press(&mut app, "4j");
-    let selection = app.selection.unwrap();
+    let selection = app.view().selection.unwrap();
     assert_eq!(selection.anchor, 3);
     assert_eq!(selection.head, 7);
     assert_eq!(selection.row_count(), 5);
 
     // Extending upward past the anchor keeps the range inclusive and ordered.
     press(&mut app, "6k");
-    let selection = app.selection.unwrap();
+    let selection = app.view().selection.unwrap();
     assert_eq!(*selection.range().start(), 1);
     assert_eq!(*selection.range().end(), 3);
 }
@@ -818,24 +957,27 @@ fn normal_movement_visits_threads_between_source_lines() {
     let first = park_on_unresolved_thread(&mut app);
     let mut second = first.clone();
     second.id = "second-thread".into();
-    app.threads_by_path
-        .insert(first.path.clone(), vec![first.clone(), second.clone()]);
-    let anchor = app.cursor;
+    set_threads_for_path(
+        &mut app,
+        &first.path,
+        vec![first.clone(), second.clone()],
+    );
+    let anchor = app.view().cursor;
 
     press(&mut app, "j");
-    assert_eq!(app.cursor, anchor);
+    assert_eq!(app.view().cursor, anchor);
     assert_eq!(app.focused_thread(), Some(&*first.id));
 
     press(&mut app, "j");
-    assert_eq!(app.cursor, anchor);
+    assert_eq!(app.view().cursor, anchor);
     assert_eq!(app.focused_thread(), Some(&*second.id));
 
     press(&mut app, "j");
-    assert_eq!(app.cursor, anchor + 1);
-    assert!(app.focused_card.is_none());
+    assert_eq!(app.view().cursor, anchor + 1);
+    assert!(app.view().focused_card.is_none());
 
     press(&mut app, "k");
-    assert_eq!(app.cursor, anchor);
+    assert_eq!(app.view().cursor, anchor);
     assert_eq!(app.focused_thread(), Some(&*second.id));
 }
 
@@ -849,15 +991,15 @@ fn enter_toggles_the_focused_thread() {
     let mut input = InputRouter::default();
     send(&mut input, &mut app, KeyCode::Enter.into());
     assert_eq!(
-        app.expanded_card
-            .as_ref()
+        app.view()
+            .expanded_card
             .and_then(Card::thread)
             .map(|id| &**id),
         Some(&*thread.id)
     );
 
     send(&mut input, &mut app, KeyCode::Enter.into());
-    assert!(app.expanded_card.is_none());
+    assert!(app.view().expanded_card.is_none());
 }
 
 #[test]
@@ -872,28 +1014,27 @@ fn expanded_thread_movement_scrolls_without_losing_focus() {
             let _ = writeln!(body, "line {index}\n");
             body
         });
-    app.threads_by_path
-        .insert(thread.path.clone(), vec![thread.clone()]);
+    set_threads_for_path(&mut app, &thread.path, vec![thread.clone()]);
 
     press(&mut app, "j");
     let mut input = InputRouter::default();
     send(&mut input, &mut app, KeyCode::Enter.into());
-    assert!(app.expanded_card.is_some());
+    assert!(app.view().expanded_card.is_some());
     assert!(layout_of(&app).rows.body_limit() > 4);
 
     press(&mut app, "j");
-    assert_eq!(app.thread_scroll, 1);
+    assert_eq!(app.view().thread_scroll, 1);
     assert_eq!(app.focused_thread(), Some(&*thread.id));
     assert_eq!(
-        app.expanded_card
-            .as_ref()
+        app.view()
+            .expanded_card
             .and_then(Card::thread)
             .map(|id| &**id),
         Some(&*thread.id)
     );
 
     press(&mut app, "k");
-    assert_eq!(app.thread_scroll, 0);
+    assert_eq!(app.view().thread_scroll, 0);
 }
 
 #[test]
@@ -901,39 +1042,39 @@ fn escape_returns_from_a_thread_to_its_source_line() {
     let mut app = load();
     park_on_unresolved_thread(&mut app);
     press(&mut app, "j");
-    let source_row = app.cursor;
+    let source_row = app.view().cursor;
 
     let mut input = InputRouter::default();
     assert_eq!(
         send(&mut input, &mut app, KeyCode::Escape.into()),
         DispatchResult::Applied(Action::Escape)
     );
-    assert_eq!(app.cursor, source_row);
-    assert!(app.focused_card.is_none());
-    assert!(!app.should_quit);
+    assert_eq!(app.view().cursor, source_row);
+    assert!(app.view().focused_card.is_none());
+    assert!(!app.should_quit());
 }
 
 #[test]
 fn visual_movement_remains_source_line_only() {
     let mut app = load();
     park_on_unresolved_thread(&mut app);
-    let anchor = app.cursor;
+    let anchor = app.view().cursor;
 
     press(&mut app, "Vj");
 
-    assert_eq!(app.cursor, anchor + 1);
-    assert!(app.focused_card.is_none());
+    assert_eq!(app.view().cursor, anchor + 1);
+    assert!(app.view().focused_card.is_none());
 }
 
 #[test]
 fn leaving_visual_clears_the_selection() {
     let mut app = load();
     press(&mut app, "V");
-    assert!(app.selection.is_some());
+    assert!(app.view().selection.is_some());
 
     press(&mut app, "V");
-    assert_eq!(app.mode, Mode::Normal);
-    assert!(app.selection.is_none());
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert!(app.view().selection.is_none());
 }
 
 #[test]
@@ -941,29 +1082,28 @@ fn commenting_a_selection_produces_one_multiline_draft() {
     let mut app = load();
 
     // Park on a real added line so the anchor resolves to the new side.
-    let added = app.files[app.selected_file]
+    let added = app.view().files[app.view().selected_file]
         .lines
         .iter()
         .position(|l| l.kind == prtui_core::LineKind::Added)
         .unwrap();
-    app.cursor = added;
+    move_to(&mut app, added);
 
     press(&mut app, "V");
     press(&mut app, "2j");
     press(&mut app, "c");
-    assert_eq!(app.mode, Mode::Insert);
-    assert!(app.composer.is_some());
+    assert_eq!(app.view().mode, Mode::Insert);
+    assert!(app.view().composer.is_some());
 
-    let composer = app.composer.as_mut().unwrap();
-    composer.editor.set_text("this allocates on every call");
+    replace_prompt(&mut app, "this allocates on every call");
 
     act(&mut app, &Action::CommitComment);
 
-    assert_eq!(app.mode, Mode::Normal);
-    assert!(app.selection.is_none());
-    assert_eq!(app.drafts.len(), 1);
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert!(app.view().selection.is_none());
+    assert_eq!(app.view().drafts.len(), 1);
 
-    let draft = &app.drafts[0];
+    let draft = &app.view().drafts[0];
     assert_eq!(draft.anchor().unwrap().side, Side::Right);
     assert_eq!(draft.body, "this allocates on every call");
     assert!(draft.anchor().unwrap().is_multiline());
@@ -987,19 +1127,15 @@ fn a_selection_across_both_sides_keeps_the_whole_block() {
         &mut app,
         "@@ -1,4 +1,4 @@\n context\n-gone one\n-gone two\n+added one\n context after",
     );
-    app.cursor = 1;
+    move_to(&mut app, 1);
 
     // context, -gone one, -gone two, +added one
     press(&mut app, "V3j");
     press(&mut app, "c");
-    app.composer
-        .as_mut()
-        .unwrap()
-        .editor
-        .set_text("rewrite this");
+    replace_prompt(&mut app, "rewrite this");
     act(&mut app, &Action::CommitComment);
 
-    let anchor = *app.drafts[0].anchor().unwrap();
+    let anchor = *app.view().drafts[0].anchor().unwrap();
     assert_eq!(anchor.start_side, Side::Left, "starts on the deletions");
     assert_eq!(anchor.start_line, 2, "the first deleted line");
     assert_eq!(anchor.side, Side::Right, "ends on the addition");
@@ -1017,14 +1153,14 @@ fn a_selection_ending_in_deletions_stays_on_the_old_side() {
         &mut app,
         "@@ -1,3 +1,3 @@\n context\n-gone one\n-gone two\n",
     );
-    app.cursor = 1;
+    move_to(&mut app, 1);
 
     press(&mut app, "V2j");
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("drop these");
+    replace_prompt(&mut app, "drop these");
     act(&mut app, &Action::CommitComment);
 
-    let anchor = *app.drafts[0].anchor().unwrap();
+    let anchor = *app.view().drafts[0].anchor().unwrap();
     assert_eq!(anchor.start_side, Side::Left);
     assert_eq!(anchor.side, Side::Left);
     assert_eq!((anchor.start_line, anchor.end_line), (2, 3));
@@ -1035,11 +1171,11 @@ fn an_empty_comment_is_discarded() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    assert_eq!(app.mode, Mode::Insert);
+    assert_eq!(app.view().mode, Mode::Insert);
 
     act(&mut app, &Action::CommitComment);
-    assert!(app.drafts.is_empty());
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.view().drafts.is_empty());
+    assert_eq!(app.view().mode, Mode::Normal);
 }
 
 /// Work is not thrown away on one key: the first escape arms and says so, and
@@ -1050,8 +1186,7 @@ fn cancelling_keeps_the_buffer_out_of_the_drafts() {
     park_on_code(&mut app);
     press(&mut app, "c");
 
-    let composer = app.composer.as_mut().unwrap();
-    composer.editor.set_text("never mind");
+    replace_prompt(&mut app, "never mind");
 
     let mut input = InputRouter::default();
     let cancel = KeyEvent::new(KeyCode::Escape, Modifiers::NONE);
@@ -1059,14 +1194,14 @@ fn cancelling_keeps_the_buffer_out_of_the_drafts() {
         send(&mut input, &mut app, cancel),
         DispatchResult::Applied(Action::CancelComment)
     );
-    assert!(app.composer.is_some(), "the first escape only warns");
-    assert_eq!(app.status, "esc again to discard");
-    assert_eq!(app.mode, Mode::Insert);
+    assert!(app.view().composer.is_some(), "the first escape only warns");
+    assert_eq!(app.view().status, "esc again to discard");
+    assert_eq!(app.view().mode, Mode::Insert);
 
     send(&mut input, &mut app, cancel);
-    assert!(app.composer.is_none());
-    assert!(app.drafts.is_empty());
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.view().composer.is_none());
+    assert!(app.view().drafts.is_empty());
+    assert_eq!(app.view().mode, Mode::Normal);
 }
 
 /// Anything but a second escape stands the composer back down, so a stray key
@@ -1076,7 +1211,7 @@ fn typing_after_an_escape_disarms_the_discard() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("keep me");
+    replace_prompt(&mut app, "keep me");
 
     let mut input = InputRouter::default();
     let cancel = KeyEvent::new(KeyCode::Escape, Modifiers::NONE);
@@ -1086,10 +1221,10 @@ fn typing_after_an_escape_disarms_the_discard() {
         &mut app,
         KeyEvent::new(KeyCode::Char('x'), Modifiers::NONE),
     );
-    assert!(!app.composer.as_ref().unwrap().is_discard_armed);
+    assert!(!app.view().composer.unwrap().is_discard_armed);
 
     send(&mut input, &mut app, cancel);
-    assert!(app.composer.is_some(), "the count started over");
+    assert!(app.view().composer.is_some(), "the count started over");
 }
 
 /// A reopened draft that was not touched closes on one key: there is nothing to
@@ -1099,7 +1234,7 @@ fn escaping_an_unchanged_composer_closes_it_at_once() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("saved");
+    replace_prompt(&mut app, "saved");
     act(&mut app, &Action::CommitComment);
 
     press(&mut app, "e");
@@ -1110,9 +1245,9 @@ fn escaping_an_unchanged_composer_closes_it_at_once() {
         KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
     );
 
-    assert!(app.composer.is_none());
-    assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.drafts.len(), 1, "the draft is untouched");
+    assert!(app.view().composer.is_none());
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert_eq!(app.view().drafts.len(), 1, "the draft is untouched");
 }
 
 #[test]
@@ -1129,7 +1264,7 @@ fn insert_mode_reserves_app_chords_and_forwards_editor_keys() {
         send(&mut input, &mut app, letter),
         DispatchResult::ForwardedToEditor
     );
-    assert_eq!(app.composer.as_ref().unwrap().editor.text(), "s");
+    assert_eq!(app.view().composer.unwrap().editor.text(), "s");
 
     // Extra modifiers do not accidentally trigger an application chord.
     let modified =
@@ -1138,7 +1273,7 @@ fn insert_mode_reserves_app_chords_and_forwards_editor_keys() {
         send(&mut input, &mut app, modified),
         DispatchResult::ForwardedToEditor
     );
-    assert!(app.composer.is_some());
+    assert!(app.view().composer.is_some());
 
     // Shifted Enter is the newline; the bare one saves.
     let newline = KeyEvent::new(KeyCode::Enter, Modifiers::SHIFT);
@@ -1146,14 +1281,18 @@ fn insert_mode_reserves_app_chords_and_forwards_editor_keys() {
         send(&mut input, &mut app, newline),
         DispatchResult::ForwardedToEditor
     );
-    assert_eq!(app.composer.as_ref().unwrap().editor.text(), "s\n");
+    assert_eq!(app.view().composer.unwrap().editor.text(), "s\n");
 
     assert_eq!(
         send(&mut input, &mut app, KeyEvent::from(KeyCode::Enter)),
         DispatchResult::Applied(Action::CommitComment)
     );
-    assert!(app.composer.is_none());
-    assert_eq!(app.drafts[0].body, "s", "the trailing newline is trimmed");
+    assert!(app.view().composer.is_none());
+    assert_eq!(
+        app.view().drafts[0].body,
+        "s",
+        "the trailing newline is trimmed"
+    );
 }
 
 #[test]
@@ -1169,12 +1308,12 @@ fn ctrl_s_no_longer_commits_anything() {
             }
             _ => press(&mut app, "s"),
         }
-        assert_eq!(app.mode, mode);
+        assert_eq!(app.view().mode, mode);
 
         let mut input = InputRouter::default();
         send(&mut input, &mut app, chord);
-        assert_eq!(app.mode, mode, "ctrl-s is inert in {mode:?}");
-        assert!(app.drafts.is_empty());
+        assert_eq!(app.view().mode, mode, "ctrl-s is inert in {mode:?}");
+        assert!(app.view().drafts.is_empty());
         assert!(app.take_requests().is_empty());
     }
 }
@@ -1209,26 +1348,26 @@ fn a_prompt_answers_to_the_readline_chords() {
 
     // Ctrl+W takes the whole path, the way the shell it came from does.
     send(&mut input, &mut app, ctrl('w'));
-    assert_eq!(app.command_line.as_ref().unwrap().text(), "open ");
+    assert_eq!(app.view().command_line.unwrap().text(), "open ");
 
     type_line(&mut input, &mut app, "src/app/main.rs");
     send(&mut input, &mut app, alt('b'));
     send(&mut input, &mut app, ctrl('k'));
     assert_eq!(
-        app.command_line.as_ref().unwrap().text(),
+        app.view().command_line.unwrap().text(),
         "open src/app/main."
     );
 
     send(&mut input, &mut app, ctrl('a'));
     type_line(&mut input, &mut app, "x");
     assert_eq!(
-        app.command_line.as_ref().unwrap().text(),
+        app.view().command_line.unwrap().text(),
         "xopen src/app/main."
     );
 
     send(&mut input, &mut app, ctrl('e'));
     send(&mut input, &mut app, ctrl('u'));
-    assert_eq!(app.command_line.as_ref().unwrap().text(), "");
+    assert_eq!(app.view().command_line.unwrap().text(), "");
 }
 
 /// The composer is the one prompt whose keys otherwise belong to the editor
@@ -1244,7 +1383,7 @@ fn the_composer_answers_to_them_too() {
     send(&mut input, &mut app, ctrl('a'));
     type_line(&mut input, &mut app, "> ");
 
-    assert_eq!(app.composer.as_ref().unwrap().editor.text(), "> one two");
+    assert_eq!(app.view().composer.unwrap().editor.text(), "> one two");
 }
 
 /// Moving around inside a recalled line is not typing over it, so the next
@@ -1259,11 +1398,11 @@ fn a_motion_keeps_the_place_in_the_history() {
     send(&mut input, &mut app, KeyEvent::from(KeyCode::Char(':')));
 
     send(&mut input, &mut app, ctrl('p'));
-    assert_eq!(app.command_line.as_ref().unwrap().text(), "nope");
+    assert_eq!(app.view().command_line.unwrap().text(), "nope");
 
     send(&mut input, &mut app, ctrl('a'));
     send(&mut input, &mut app, ctrl('p'));
-    assert_eq!(app.command_line.as_ref().unwrap().text(), "12");
+    assert_eq!(app.view().command_line.unwrap().text(), "12");
 }
 
 #[test]
@@ -1282,7 +1421,7 @@ fn paste_is_routed_only_to_an_open_composer() {
         paste(&mut input, &mut app, "pasted text"),
         DispatchResult::ForwardedToEditor
     );
-    assert_eq!(app.composer.as_ref().unwrap().editor.text(), "pasted text");
+    assert_eq!(app.view().composer.unwrap().editor.text(), "pasted text");
 }
 
 #[test]
@@ -1292,19 +1431,19 @@ fn alt_modified_normal_bindings_are_ignored() {
     let alt_j = KeyEvent::new(KeyCode::Char('j'), Modifiers::ALT);
 
     assert_eq!(send(&mut input, &mut app, alt_j), DispatchResult::Ignored);
-    assert_eq!(app.cursor, 0);
+    assert_eq!(app.view().cursor, 0);
 }
 
 #[test]
 fn a_hunk_header_is_not_commentable() {
     let mut app = load();
-    app.cursor = 0;
+    move_to(&mut app, 0);
 
     press(&mut app, "c");
 
-    assert_eq!(app.mode, Mode::Normal);
-    assert!(app.composer.is_none());
-    assert!(app.status.contains("cannot comment"));
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert!(app.view().composer.is_none());
+    assert!(app.view().status.contains("cannot comment"));
 }
 
 /// GitHub anchors a span inside one hunk and rejects the whole review over one
@@ -1316,16 +1455,20 @@ fn a_selection_across_a_hunk_header_is_not_commentable() {
         &mut app,
         "@@ -1,2 +1,2 @@\n context\n+first hunk\n@@ -20,2 +20,2 @@\n more context\n+second hunk",
     );
-    app.cursor = 1;
+    move_to(&mut app, 1);
 
     // context, +first hunk, @@ header, more context
     press(&mut app, "V3j");
     press(&mut app, "c");
 
-    assert!(app.composer.is_none());
-    assert!(app.status.contains("cannot comment"), "{}", app.status);
+    assert!(app.view().composer.is_none());
+    assert!(
+        app.view().status.contains("cannot comment"),
+        "{}",
+        app.view().status
+    );
     // The selection survives the refusal, so it can be shrunk and retried.
-    assert_eq!(app.mode, Mode::Visual);
+    assert_eq!(app.view().mode, Mode::Visual);
 
     let mut input = InputRouter::default();
     send(
@@ -1333,11 +1476,15 @@ fn a_selection_across_a_hunk_header_is_not_commentable() {
         &mut app,
         KeyEvent::new(KeyCode::Escape, Modifiers::NONE),
     );
-    app.cursor = 1;
+    move_to(&mut app, 1);
     press(&mut app, "V1j");
     press(&mut app, "c");
 
-    assert_eq!(app.mode, Mode::Insert, "one hunk still takes a comment");
+    assert_eq!(
+        app.view().mode,
+        Mode::Insert,
+        "one hunk still takes a comment"
+    );
 }
 
 #[test]
@@ -1352,20 +1499,26 @@ fn escape_and_ctrl_bracket_both_cancel_the_composer() {
         park_on_code(&mut app);
         press(&mut app, "c");
 
-        app.composer
-            .as_mut()
-            .unwrap()
-            .editor
-            .set_text("half-written");
-        assert_eq!(app.mode, Mode::Insert);
+        replace_prompt(&mut app, "half-written");
+        assert_eq!(app.view().mode, Mode::Insert);
 
         let mut input = InputRouter::default();
         send(&mut input, &mut app, key);
         send(&mut input, &mut app, key);
 
-        assert_eq!(app.mode, Mode::Normal, "{key:?} should leave insert mode");
-        assert!(app.composer.is_none(), "{key:?} should close the composer");
-        assert!(app.drafts.is_empty(), "{key:?} must not save the draft");
+        assert_eq!(
+            app.view().mode,
+            Mode::Normal,
+            "{key:?} should leave insert mode"
+        );
+        assert!(
+            app.view().composer.is_none(),
+            "{key:?} should close the composer"
+        );
+        assert!(
+            app.view().drafts.is_empty(),
+            "{key:?} must not save the draft"
+        );
     }
 }
 
@@ -1393,7 +1546,7 @@ fn ctrl_c_quits_from_every_mode() {
                 press(&mut app, "c");
             }
             Mode::Filter => {
-                app.pane = Pane::Files;
+                focus_pane(&mut app, Pane::Files);
                 press(&mut app, "/");
             }
             Mode::Search => press(&mut app, "/"),
@@ -1402,14 +1555,14 @@ fn ctrl_c_quits_from_every_mode() {
             Mode::Overview => press(&mut app, "o"),
             Mode::Submit => press(&mut app, "s"),
         }
-        assert_eq!(app.mode, mode);
+        assert_eq!(app.view().mode, mode);
 
         let mut input = InputRouter::default();
         assert_eq!(
             send(&mut input, &mut app, ctrl_c),
             DispatchResult::Applied(Action::Quit)
         );
-        assert!(app.should_quit, "Ctrl+C should quit from {mode:?}");
+        assert!(app.should_quit(), "Ctrl+C should quit from {mode:?}");
     }
 }
 
@@ -1427,20 +1580,20 @@ fn escape_says_how_to_quit_rather_than_quitting() {
             send(&mut input, &mut app, key),
             DispatchResult::Applied(Action::Escape)
         );
-        assert!(!app.should_quit);
-        assert_eq!(app.status, "press q to quit");
+        assert!(!app.should_quit());
+        assert_eq!(app.view().status, "press q to quit");
     }
 
     let mut app = load();
     press(&mut app, "q");
-    assert!(app.should_quit);
+    assert!(app.should_quit());
 }
 
 #[test]
 fn ctrl_bracket_leaves_visual_mode() {
     let mut app = load();
     press(&mut app, "V");
-    assert_eq!(app.mode, Mode::Visual);
+    assert_eq!(app.view().mode, Mode::Visual);
 
     let mut input = InputRouter::default();
     send(
@@ -1449,66 +1602,75 @@ fn ctrl_bracket_leaves_visual_mode() {
         KeyEvent::new(KeyCode::Char('['), Modifiers::CONTROL),
     );
 
-    assert_eq!(app.mode, Mode::Normal);
-    assert!(app.selection.is_none());
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert!(app.view().selection.is_none());
 }
 
 #[test]
 fn a_bare_bracket_still_navigates_files() {
     let mut app = load();
-    app.selected_file = 2;
+    select_file(&mut app, 2);
 
     press(&mut app, "q");
-    assert!(app.should_quit, "q quits from normal mode");
-    app.should_quit = false;
+    assert!(app.should_quit(), "q quits from normal mode");
+    let mut app = load();
+    select_file(&mut app, 2);
 
     press(&mut app, "[");
-    assert_eq!(app.selected_file, 1, "unmodified [ is still prev-file");
+    assert_eq!(
+        app.view().selected_file,
+        1,
+        "unmodified [ is still prev-file"
+    );
 
     press(&mut app, "]");
-    assert_eq!(app.selected_file, 2, "unmodified ] is still next-file");
+    assert_eq!(
+        app.view().selected_file,
+        2,
+        "unmodified ] is still next-file"
+    );
 }
 
 #[test]
 fn pane_focus_has_tab_directional_and_enter_routes() {
     let mut app = load();
-    assert_eq!(app.pane, Pane::Diff);
+    assert_eq!(app.view().pane, Pane::Diff);
 
     press(&mut app, "h");
-    assert_eq!(app.pane, Pane::Files);
+    assert_eq!(app.view().pane, Pane::Files);
     press(&mut app, "l");
-    assert_eq!(app.pane, Pane::Diff);
+    assert_eq!(app.view().pane, Pane::Diff);
 
-    app.is_files_visible = false;
+    set_tree_visible(&mut app, false);
     let mut input = InputRouter::default();
     send(&mut input, &mut app, KeyCode::Tab.into());
-    assert!(app.is_files_visible);
-    assert_eq!(app.pane, Pane::Files);
+    assert!(app.view().is_files_visible);
+    assert_eq!(app.view().pane, Pane::Files);
 
     send(&mut input, &mut app, KeyCode::Enter.into());
-    assert_eq!(app.pane, Pane::Diff);
+    assert_eq!(app.view().pane, Pane::Diff);
 
     send(&mut input, &mut app, KeyCode::Left.into());
-    assert_eq!(app.pane, Pane::Files);
+    assert_eq!(app.view().pane, Pane::Files);
     send(&mut input, &mut app, KeyCode::Right.into());
-    assert_eq!(app.pane, Pane::Diff);
+    assert_eq!(app.view().pane, Pane::Diff);
 }
 
 #[test]
 fn filtering_narrows_the_tree_and_survives_commit() {
     let mut app = load();
-    app.pane = Pane::Files;
+    focus_pane(&mut app, Pane::Files);
     let mut input = InputRouter::default();
 
     press(&mut app, "/auth_check");
-    assert_eq!(app.mode, Mode::Filter);
+    assert_eq!(app.view().mode, Mode::Filter);
     assert_eq!(app.filtered_file_indices(), vec![2, 3]);
 
     send(&mut input, &mut app, KeyEvent::from(KeyCode::Up));
-    assert_eq!(app.selected_file, 2, "up steps back through matches");
+    assert_eq!(app.view().selected_file, 2, "up steps back through matches");
 
     send(&mut input, &mut app, KeyCode::Enter.into());
-    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.view().mode, Mode::Normal);
     assert_eq!(app.filter_query().as_deref(), Some("auth_check"));
 
     // Both matches share one directory, which names the pane rather than taking
@@ -1516,21 +1678,26 @@ fn filtering_narrows_the_tree_and_survives_commit() {
     for (keys, selected) in [("j", 3), ("gg", 2), ("G", 3)] {
         press(&mut app, keys);
         assert_eq!(
-            app.selected_file, selected,
+            app.view().selected_file,
+            selected,
             "{keys} stays within the matches"
         );
         assert_eq!(app.tree_directory(), None, "{keys} lands on a file");
     }
 
     send(&mut input, &mut app, KeyCode::Enter.into());
-    assert_eq!(app.pane, Pane::Diff, "enter opens the selected match");
+    assert_eq!(
+        app.view().pane,
+        Pane::Diff,
+        "enter opens the selected match"
+    );
 }
 
 #[test]
 fn escape_puts_the_cursor_back_where_the_filter_found_it() {
     let mut app = load();
-    app.pane = Pane::Files;
-    let original_file = app.selected_file;
+    focus_pane(&mut app, Pane::Files);
+    let original_file = app.view().selected_file;
     let mut input = InputRouter::default();
 
     press(&mut app, "/");
@@ -1539,26 +1706,26 @@ fn escape_puts_the_cursor_back_where_the_filter_found_it() {
 
     send(&mut input, &mut app, KeyCode::Enter.into());
     assert_eq!(
-        app.mode,
+        app.view().mode,
         Mode::Filter,
         "enter will not commit an empty result"
     );
 
     send(&mut input, &mut app, KeyCode::Escape.into());
-    assert!(app.file_filter.is_none());
-    assert_eq!(app.selected_file, original_file);
+    assert!(app.view().file_filter.is_none());
+    assert_eq!(app.view().selected_file, original_file);
 
     // `/` opens on the whole tree rather than onto the committed query, so a
     // second one types a new filter instead of extending the old one.
     press(&mut app, "/auth_check");
     send(&mut input, &mut app, KeyCode::Enter.into());
-    app.selected_file = 2;
+    select_file(&mut app, 2);
 
     press(&mut app, "/");
     assert_eq!(app.filter_query().as_deref(), Some(""), "`/` opens clean");
     assert_eq!(
         app.filtered_file_indices().len(),
-        app.files.len(),
+        app.view().files.len(),
         "and on every file"
     );
 
@@ -1566,8 +1733,8 @@ fn escape_puts_the_cursor_back_where_the_filter_found_it() {
     assert_eq!(app.filter_query().as_deref(), Some("_test"));
 
     send(&mut input, &mut app, KeyCode::Escape.into());
-    assert!(app.file_filter.is_none(), "and leaves none behind");
-    assert_eq!(app.selected_file, 2, "but the cursor goes back");
+    assert!(app.view().file_filter.is_none(), "and leaves none behind");
+    assert_eq!(app.view().selected_file, 2, "but the cursor goes back");
 }
 
 #[test]
@@ -1577,7 +1744,7 @@ fn escape_clears_a_committed_filter_first() {
         KeyEvent::new(KeyCode::Char('['), Modifiers::CONTROL),
     ] {
         let mut app = load();
-        app.pane = Pane::Files;
+        focus_pane(&mut app, Pane::Files);
         let mut input = InputRouter::default();
         send(
             &mut input,
@@ -1593,21 +1760,21 @@ fn escape_clears_a_committed_filter_first() {
             send(&mut input, &mut app, clear),
             DispatchResult::Applied(Action::Escape)
         );
-        assert!(app.file_filter.is_none());
-        assert!(!app.should_quit);
+        assert!(app.view().file_filter.is_none());
+        assert!(!app.should_quit());
 
         send(&mut input, &mut app, clear);
-        assert!(!app.should_quit);
-        assert_eq!(app.status, "press q to quit");
+        assert!(!app.should_quit());
+        assert_eq!(app.view().status, "press q to quit");
     }
 }
 
 #[test]
 fn comment_jump_crosses_files_and_skips_resolved_threads() {
     let mut app = load();
-    app.selected_file = 0;
-    app.cursor = 0;
-    app.pane = Pane::Files;
+    select_file(&mut app, 0);
+    move_to(&mut app, 0);
+    focus_pane(&mut app, Pane::Files);
 
     let unresolved = fixture_threads()
         .into_iter()
@@ -1616,12 +1783,15 @@ fn comment_jump_crosses_files_and_skips_resolved_threads() {
 
     press(&mut app, "}");
 
-    assert_eq!(app.pane, Pane::Diff);
-    assert_eq!(app.files[app.selected_file].path, unresolved.path);
-    assert_eq!(app.focused_thread(), Some(&*unresolved.id));
-    assert!(
-        unresolved.anchors_to(&app.files[app.selected_file].lines[app.cursor])
+    assert_eq!(app.view().pane, Pane::Diff);
+    assert_eq!(
+        app.view().files[app.view().selected_file].path,
+        unresolved.path
     );
+    assert_eq!(app.focused_thread(), Some(&*unresolved.id));
+    assert!(unresolved.anchors_to(
+        &app.view().files[app.view().selected_file].lines[app.view().cursor]
+    ));
 }
 
 /// The conversations are a ring. Walking off the last one comes back to the
@@ -1629,19 +1799,19 @@ fn comment_jump_crosses_files_and_skips_resolved_threads() {
 #[test]
 fn comment_jump_wraps_round_to_the_first() {
     let mut app = load();
-    app.selected_file = 0;
-    app.cursor = 0;
+    select_file(&mut app, 0);
+    move_to(&mut app, 0);
 
     press(&mut app, "}");
-    let first = (app.selected_file, app.focused_card.clone());
+    let first = (app.view().selected_file, app.view().focused_card.cloned());
 
     let wrapped = (0..20).any(|_| {
         press(&mut app, "}");
-        (app.selected_file, app.focused_card.clone()) == first
+        (app.view().selected_file, app.view().focused_card.cloned()) == first
     });
 
     assert!(wrapped, "walking on comes back to the first conversation");
-    assert_eq!(app.status, "wrapped to the top");
+    assert_eq!(app.view().status, "wrapped to the top");
 }
 
 /// With nothing anywhere to jump to, the key still has to say why the reader
@@ -1650,11 +1820,11 @@ fn comment_jump_wraps_round_to_the_first() {
 fn comment_jump_reports_when_there_are_none() {
     let mut app = App::new();
     app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
 
     press(&mut app, "}");
 
-    assert_eq!(app.status, "no more comments");
+    assert_eq!(app.view().status, "no more comments");
 }
 
 /// `]` and `[` treat the tree as a ring for the same reason `}` does.
@@ -1664,25 +1834,25 @@ fn stepping_past_either_end_of_the_tree_comes_round() {
     let last = layout_of(&app).files.files().count() - 1;
     let order: Vec<usize> = layout_of(&app).files.files().collect();
 
-    app.selected_file = order[last];
+    select_file(&mut app, order[last]);
     press(&mut app, "]");
-    assert_eq!(app.selected_file, order[0]);
-    assert_eq!(app.status, "wrapped to the top");
+    assert_eq!(app.view().selected_file, order[0]);
+    assert_eq!(app.view().status, "wrapped to the top");
 
     press(&mut app, "[");
-    assert_eq!(app.selected_file, order[last]);
-    assert_eq!(app.status, "wrapped to the bottom");
+    assert_eq!(app.view().selected_file, order[last]);
+    assert_eq!(app.view().status, "wrapped to the bottom");
 
     // A count that laps the tree lands where a bare step would.
-    app.selected_file = order[0];
+    select_file(&mut app, order[0]);
     press(&mut app, &format!("{}]", order.len() + 1));
-    assert_eq!(app.selected_file, order[1]);
+    assert_eq!(app.view().selected_file, order[1]);
 }
 
 #[test]
 fn comment_jump_steps_through_every_thread_in_a_file() {
     let mut app = load();
-    let file = app.files[app.selected_file].clone();
+    let file = app.view().files[app.view().selected_file].clone();
 
     let rows: Vec<usize> = file
         .lines
@@ -1707,20 +1877,19 @@ fn comment_jump_steps_through_every_thread_in_a_file() {
             ..template.clone()
         })
         .collect();
-    app.threads_by_path.insert(file.path.clone(), threads);
+    set_threads_for_path(&mut app, &file.path, threads);
 
-    app.cursor = 0;
-    app.focused_card = None;
+    move_to(&mut app, 0);
 
     for &row in &rows {
         press(&mut app, "}");
-        assert_eq!(app.cursor, row);
+        assert_eq!(app.view().cursor, row);
     }
     assert_eq!(app.focused_thread(), Some("thread-2"));
 
     for &row in rows.iter().rev().skip(1) {
         press(&mut app, "{");
-        assert_eq!(app.cursor, row);
+        assert_eq!(app.view().cursor, row);
     }
     assert_eq!(app.focused_thread(), Some("thread-0"));
 }
@@ -1728,7 +1897,7 @@ fn comment_jump_steps_through_every_thread_in_a_file() {
 fn search_for(app: &mut App, query: &str) -> InputRouter {
     let mut input = InputRouter::default();
 
-    app.pane = Pane::Diff;
+    focus_pane(app, Pane::Diff);
     send(
         &mut input,
         app,
@@ -1744,23 +1913,23 @@ fn slash_filters_the_tree_from_the_files_pane_and_searches_from_the_diff() {
     let mut app = load();
     let mut input = InputRouter::default();
 
-    app.pane = Pane::Files;
+    focus_pane(&mut app, Pane::Files);
     send(
         &mut input,
         &mut app,
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
     );
-    assert_eq!(app.mode, Mode::Filter);
+    assert_eq!(app.view().mode, Mode::Filter);
     send(&mut input, &mut app, KeyCode::Escape.into());
 
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
     send(
         &mut input,
         &mut app,
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
     );
-    assert_eq!(app.mode, Mode::Search);
-    assert!(app.file_filter.is_none());
+    assert_eq!(app.view().mode, Mode::Search);
+    assert!(app.view().file_filter.is_none());
 }
 
 #[test]
@@ -1769,16 +1938,16 @@ fn n_cycles_every_match_and_wraps_at_the_end() {
     let mut input = search_for(&mut app, "cobra");
     send(&mut input, &mut app, KeyCode::Enter.into());
 
-    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.view().mode, Mode::Normal);
     assert_eq!(summary(&app).0, 1, "accepting lands on the first match");
 
     let total = found(&app).len();
     assert!(total > 1, "a one-match needle cannot exercise wrapping");
 
-    let mut visited = vec![app.cursor];
+    let mut visited = vec![app.view().cursor];
     for _ in 1..total {
         press(&mut app, "n");
-        visited.push(app.cursor);
+        visited.push(app.view().cursor);
     }
     assert_eq!(summary(&app).0, total, "n reaches the last match");
 
@@ -1787,19 +1956,27 @@ fn n_cycles_every_match_and_wraps_at_the_end() {
     assert_eq!(distinct, visited, "each press advances to a new row");
 
     press(&mut app, "n");
-    assert_eq!(app.cursor, visited[0], "the last match wraps to the first");
+    assert_eq!(
+        app.view().cursor,
+        visited[0],
+        "the last match wraps to the first"
+    );
     assert_eq!(summary(&app).0, 1);
 
     press(&mut app, "N");
     assert_eq!(
-        app.cursor,
+        app.view().cursor,
         *visited.last().unwrap(),
         "N off the front wraps to the last match"
     );
 
     for expected in visited.iter().rev().skip(1) {
         press(&mut app, "N");
-        assert_eq!(app.cursor, *expected, "N retraces the list in reverse");
+        assert_eq!(
+            app.view().cursor,
+            *expected,
+            "N retraces the list in reverse"
+        );
     }
     assert_eq!(summary(&app).0, 1);
 }
@@ -1808,8 +1985,7 @@ fn n_cycles_every_match_and_wraps_at_the_end() {
 fn search_matches_comment_bodies_and_focuses_the_thread() {
     let mut app = load();
     let thread = park_on_unresolved_thread(&mut app);
-    app.cursor = 0;
-    app.focused_card = None;
+    move_to(&mut app, 0);
 
     let word = thread.comments[0]
         .body
@@ -1837,28 +2013,29 @@ fn search_matches_comment_bodies_and_focuses_the_thread() {
     }
 
     assert_eq!(app.focused_thread(), Some(&*thread.id));
-    assert!(thread.anchors_to(&app.files[app.selected_file].lines[app.cursor]));
+    assert!(thread.anchors_to(
+        &app.view().files[app.view().selected_file].lines[app.view().cursor]
+    ));
 }
 
 #[test]
 fn escape_restores_the_diff_position_the_search_previewed_away_from() {
     let mut app = load();
-    app.cursor = 3;
-    app.diff_scroll = 1;
-    let needle = app.files[app.selected_file].lines[9]
+    move_to(&mut app, 30);
+    let origin = (app.view().cursor, app.view().diff_scroll);
+    let needle = app.view().files[app.view().selected_file].lines[9]
         .text
         .trim()
         .to_string();
 
     let mut input = search_for(&mut app, &needle);
-    assert_eq!(app.cursor, 9, "typing previews the first match");
+    assert_ne!(app.view().cursor, origin.0, "typing previews a match");
 
     send(&mut input, &mut app, KeyCode::Escape.into());
 
-    assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.cursor, 3);
-    assert_eq!(app.diff_scroll, 1);
-    assert!(app.search.is_none());
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert_eq!((app.view().cursor, app.view().diff_scroll), origin);
+    assert!(app.view().search.is_none());
 }
 
 /// The two boxes used to disagree: the diff was smartcase and the tree was
@@ -1867,8 +2044,8 @@ fn escape_restores_the_diff_position_the_search_previewed_away_from() {
 fn the_tree_filter_reads_case_the_way_the_diff_search_does() {
     let mut app = load();
 
-    app.is_files_visible = true;
-    app.pane = Pane::Files;
+    set_tree_visible(&mut app, true);
+    focus_pane(&mut app, Pane::Files);
 
     press(&mut app, "/verify");
     assert_eq!(
@@ -1890,15 +2067,18 @@ fn escape_clears_a_committed_search_before_anything_else() {
     let mut app = load();
     let mut input = search_for(&mut app, "cobra");
     send(&mut input, &mut app, KeyCode::Enter.into());
-    assert!(app.search.is_some());
+    assert!(app.view().search.is_some());
 
     send(&mut input, &mut app, KeyCode::Escape.into());
-    assert!(app.search.is_none());
-    assert!(!app.should_quit, "the first escape only clears the pattern");
+    assert!(app.view().search.is_none());
+    assert!(
+        !app.should_quit(),
+        "the first escape only clears the pattern"
+    );
 
     send(&mut input, &mut app, KeyCode::Escape.into());
-    assert!(!app.should_quit);
-    assert_eq!(app.status, "press q to quit");
+    assert!(!app.should_quit());
+    assert_eq!(app.view().status, "press q to quit");
 }
 
 #[test]
@@ -1908,22 +2088,27 @@ fn match_and_comment_motions_are_normal_mode_only() {
     send(&mut input, &mut app, KeyCode::Enter.into());
 
     press(&mut app, "V");
-    let anchored = app.cursor;
+    let anchored = app.view().cursor;
 
     for key in ["n", "N", "}", "{"] {
         press(&mut app, key);
         assert_eq!(
-            app.cursor, anchored,
+            app.view().cursor,
+            anchored,
             "{key} must not move the cursor in visual"
         );
-        assert_eq!(app.mode, Mode::Visual, "{key} must not leave visual");
+        assert_eq!(
+            app.view().mode,
+            Mode::Visual,
+            "{key} must not leave visual"
+        );
     }
 }
 
 #[test]
 fn ctrl_d_and_ctrl_u_step_by_half_a_viewport() {
     let mut app = load();
-    app.pane = Pane::Diff;
+    focus_pane(&mut app, Pane::Diff);
     let mut input = InputRouter::default();
     let half = layout_of(&app).diff_viewport() / 2;
 
@@ -1933,9 +2118,9 @@ fn ctrl_d_and_ctrl_u_step_by_half_a_viewport() {
         KeyEvent::new(KeyCode::Char('d'), Modifiers::CONTROL),
     );
     assert!(
-        (1..=half).contains(&app.cursor),
+        (1..=half).contains(&app.view().cursor),
         "ctrl-d advances at most half a viewport, landed on {}",
-        app.cursor
+        app.view().cursor
     );
 
     send(
@@ -1943,7 +2128,7 @@ fn ctrl_d_and_ctrl_u_step_by_half_a_viewport() {
         &mut app,
         KeyEvent::new(KeyCode::Char('u'), Modifiers::CONTROL),
     );
-    assert_eq!(app.cursor, 0, "ctrl-u walks the same distance back");
+    assert_eq!(app.view().cursor, 0, "ctrl-u walks the same distance back");
 }
 
 #[test]
@@ -1957,31 +2142,34 @@ fn match_motions_find_the_nearest_hit_from_an_unmatched_row() {
         .next()
         .expect("fixture needs a gap between the first two hits");
 
-    app.cursor = gap;
+    move_to(&mut app, gap);
     press(&mut app, "n");
     assert_eq!(
-        app.cursor, rows[1],
+        app.view().cursor,
+        rows[1],
         "n takes the first hit at or after the cursor"
     );
 
-    app.cursor = gap;
+    move_to(&mut app, gap);
     press(&mut app, "N");
     assert_eq!(
-        app.cursor, rows[0],
+        app.view().cursor,
+        rows[0],
         "N takes the last hit at or before the cursor"
     );
 
-    app.cursor = rows[rows.len() - 1] + 1;
+    move_to(&mut app, rows[rows.len() - 1] + 1);
     press(&mut app, "n");
     assert_eq!(
-        app.cursor, rows[0],
+        app.view().cursor,
+        rows[0],
         "n past the final hit wraps to the first"
     );
 
-    app.cursor = rows[0].saturating_sub(1);
+    move_to(&mut app, rows[0].saturating_sub(1));
     press(&mut app, "N");
     assert_eq!(
-        app.cursor,
+        app.view().cursor,
         rows[rows.len() - 1],
         "N before the first hit wraps to the last"
     );
@@ -1991,19 +2179,25 @@ fn match_motions_find_the_nearest_hit_from_an_unmatched_row() {
 fn brace_motions_find_the_nearest_comment_from_an_unanchored_row() {
     let mut app = load();
     let thread = park_on_unresolved_thread(&mut app);
-    let row = app.cursor;
+    let row = app.view().cursor;
     assert!(row > 0, "the fixture thread needs a line above it");
 
-    app.cursor = row + 1;
-    app.focused_card = None;
+    move_to(&mut app, row + 1);
     press(&mut app, "{");
-    assert_eq!(app.cursor, row, "{{ reaches back to the comment above");
+    assert_eq!(
+        app.view().cursor,
+        row,
+        "{{ reaches back to the comment above"
+    );
     assert_eq!(app.focused_thread(), Some(&*thread.id));
 
-    app.cursor = row - 1;
-    app.focused_card = None;
+    move_to(&mut app, row - 1);
     press(&mut app, "}");
-    assert_eq!(app.cursor, row, "}} reaches forward to the comment below");
+    assert_eq!(
+        app.view().cursor,
+        row,
+        "}} reaches forward to the comment below"
+    );
     assert_eq!(app.focused_thread(), Some(&*thread.id));
 }
 
@@ -2012,7 +2206,7 @@ fn both_prompts_step_with_arrows_and_control_keys() {
     let ctrl = |c| KeyEvent::new(KeyCode::Char(c), Modifiers::CONTROL);
 
     let mut app = load();
-    app.pane = Pane::Files;
+    focus_pane(&mut app, Pane::Files);
     let mut input = InputRouter::default();
 
     press(&mut app, "/auth_check");
@@ -2024,12 +2218,20 @@ fn both_prompts_step_with_arrows_and_control_keys() {
         (KeyEvent::from(KeyCode::Down), 3),
     ] {
         send(&mut input, &mut app, key);
-        assert_eq!(app.selected_file, expected, "{key:?} steps the filter");
+        assert_eq!(
+            app.view().selected_file,
+            expected,
+            "{key:?} steps the filter"
+        );
     }
 
     send(&mut input, &mut app, ctrl('['));
-    assert_eq!(app.mode, Mode::Normal, "ctrl-[ cancels the filter prompt");
-    assert!(app.file_filter.is_none());
+    assert_eq!(
+        app.view().mode,
+        Mode::Normal,
+        "ctrl-[ cancels the filter prompt"
+    );
+    assert!(app.view().file_filter.is_none());
 
     let mut app = load();
     let mut input = search_for(&mut app, "cobra");
@@ -2041,12 +2243,20 @@ fn both_prompts_step_with_arrows_and_control_keys() {
         (KeyEvent::from(KeyCode::Up), rows[0]),
     ] {
         send(&mut input, &mut app, key);
-        assert_eq!(app.cursor, expected, "{key:?} steps the search prompt");
+        assert_eq!(
+            app.view().cursor,
+            expected,
+            "{key:?} steps the search prompt"
+        );
     }
 
     send(&mut input, &mut app, ctrl('['));
-    assert_eq!(app.mode, Mode::Normal, "ctrl-[ cancels the search prompt");
-    assert!(app.search.is_none());
+    assert_eq!(
+        app.view().mode,
+        Mode::Normal,
+        "ctrl-[ cancels the search prompt"
+    );
+    assert!(app.view().search.is_none());
 }
 
 /// Every prompt opens clean, so recall is the only way back to an earlier one.
@@ -2064,7 +2274,7 @@ fn every_prompt_recalls_what_was_typed_into_it() {
 
     for (open, entries, pane) in prompts {
         let mut app = load();
-        app.pane = pane;
+        focus_pane(&mut app, pane);
         let mut input = InputRouter::default();
 
         for entry in entries {
@@ -2104,10 +2314,10 @@ fn every_prompt_recalls_what_was_typed_into_it() {
 
 /// Whichever line is open, read as text.
 fn prompt_text(app: &App) -> Option<String> {
-    match app.mode {
+    match app.view().mode {
         Mode::Filter => app.filter_query(),
         Mode::Search => app.search_query().map(str::to_owned),
-        Mode::CommandLine => app.command_line.as_ref().map(CommentEditor::text),
+        Mode::CommandLine => app.view().command_line.map(CommentEditor::text),
         _ => None,
     }
 }
@@ -2119,7 +2329,7 @@ fn cancelling_a_search_leaves_no_pattern_behind() {
     let mut app = load();
     let mut input = search_for(&mut app, "cobra");
     send(&mut input, &mut app, KeyCode::Enter.into());
-    assert!(app.search.is_some());
+    assert!(app.view().search.is_some());
 
     send(
         &mut input,
@@ -2128,8 +2338,11 @@ fn cancelling_a_search_leaves_no_pattern_behind() {
     );
     send(&mut input, &mut app, KeyCode::Escape.into());
 
-    assert!(app.search.is_none(), "the old pattern does not come back");
-    assert_eq!(app.mode, Mode::Normal);
+    assert!(
+        app.view().search.is_none(),
+        "the old pattern does not come back"
+    );
+    assert_eq!(app.view().mode, Mode::Normal);
 }
 
 /// Each draft is filed against the pending review as it is written, so the
@@ -2137,7 +2350,7 @@ fn cancelling_a_search_leaves_no_pattern_behind() {
 #[test]
 fn every_draft_is_filed_against_one_pending_review() {
     let mut app = load();
-    let added: Vec<usize> = app.files[app.selected_file]
+    let added: Vec<usize> = app.view().files[app.view().selected_file]
         .lines
         .iter()
         .enumerate()
@@ -2145,9 +2358,9 @@ fn every_draft_is_filed_against_one_pending_review() {
         .map(|(row, _)| row)
         .collect();
 
-    app.cursor = added[0];
+    move_to(&mut app, added[0]);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("first");
+    replace_prompt(&mut app, "first");
     act(&mut app, &Action::CommitComment);
 
     let opening = app.take_requests();
@@ -2169,12 +2382,15 @@ fn every_draft_is_filed_against_one_pending_review() {
         review: "PRR_1".into(),
         comment: "PRRC_1".into(),
     }));
-    assert_eq!(app.drafts[0].sync, Sync::Synced);
+    assert_eq!(app.view().drafts[0].sync, Sync::Synced);
 
     // Well clear of the first draft, so this is a second one and not a revision.
-    app.cursor = *added.iter().find(|row| **row > added[0] + 4).unwrap();
+    move_to(
+        &mut app,
+        *added.iter().find(|row| **row > added[0] + 4).unwrap(),
+    );
     press(&mut app, "V2jc");
-    app.composer.as_mut().unwrap().editor.set_text("spanning");
+    replace_prompt(&mut app, "spanning");
     act(&mut app, &Action::CommitComment);
 
     let joining = app.take_requests();
@@ -2199,22 +2415,18 @@ fn submitting_publishes_the_pending_review() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("first");
+    replace_prompt(&mut app, "first");
     act(&mut app, &Action::CommitComment);
     settle(&mut app);
 
     press(&mut app, "s");
-    assert_eq!(app.mode, Mode::Submit);
-    app.submission
-        .as_mut()
-        .unwrap()
-        .editor
-        .set_text("looks good");
+    assert_eq!(app.view().mode, Mode::Submit);
+    replace_prompt(&mut app, "looks good");
     act(&mut app, &Action::CycleEvent(1));
     act(&mut app, &Action::CommitSubmit);
 
-    assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.in_flight, 1);
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert_eq!(app.view().in_flight, 1);
     assert_eq!(
         app.take_requests(),
         vec![Request::Review {
@@ -2225,10 +2437,10 @@ fn submitting_publishes_the_pending_review() {
     );
 
     // The drafts only retire once GitHub has actually taken them.
-    assert_eq!(app.drafts.len(), 1);
+    assert_eq!(app.view().drafts.len(), 1);
     app.finish(Ok(Sent::Review));
-    assert!(app.drafts.is_empty());
-    assert_eq!(app.in_flight, 0);
+    assert!(app.view().drafts.is_empty());
+    assert_eq!(app.view().in_flight, 0);
 }
 
 /// A draft still in flight would not be part of the review it is meant for, so
@@ -2238,17 +2450,17 @@ fn submitting_waits_for_a_draft_still_saving() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("hold on");
+    replace_prompt(&mut app, "hold on");
     act(&mut app, &Action::CommitComment);
     app.take_requests();
 
     press(&mut app, "s");
-    app.submission.as_mut().unwrap().editor.set_text("summary");
+    replace_prompt(&mut app, "summary");
     act(&mut app, &Action::CommitSubmit);
 
-    assert_eq!(app.status, "a draft is still saving");
+    assert_eq!(app.view().status, "a draft is still saving");
     assert!(app.take_requests().is_empty());
-    assert_eq!(app.mode, Mode::Submit);
+    assert_eq!(app.view().mode, Mode::Submit);
 }
 
 #[test]
@@ -2256,29 +2468,29 @@ fn a_failed_submission_keeps_the_drafts() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("keep me");
+    replace_prompt(&mut app, "keep me");
     act(&mut app, &Action::CommitComment);
     settle(&mut app);
 
     press(&mut app, "s");
-    app.submission
-        .as_mut()
-        .unwrap()
-        .editor
-        .set_text("a summary");
+    replace_prompt(&mut app, "a summary");
     act(&mut app, &Action::CommitSubmit);
     assert_eq!(app.take_requests().len(), 1);
 
     app.finish(Err(Failure::Review(
         "HTTP 422: line must be part of the diff".into(),
     )));
-    assert_eq!(app.drafts.len(), 1);
-    assert!(app.status.starts_with("error:"), "{}", app.status);
+    assert_eq!(app.view().drafts.len(), 1);
+    assert!(
+        app.view().status.starts_with("error:"),
+        "{}",
+        app.view().status
+    );
 
     // The summary comes back with GitHub's reason attached, since the status
     // bar shows one line of it and the reason is what has to be acted on.
-    let submission = app.submission.as_ref().expect("the overlay is back");
-    assert_eq!(app.mode, Mode::Submit);
+    let submission = app.view().submission.expect("the overlay is back");
+    assert_eq!(app.view().mode, Mode::Submit);
     assert_eq!(submission.editor.text(), "a summary");
     assert_eq!(
         submission.error.as_deref(),
@@ -2295,18 +2507,21 @@ fn a_rejection_mid_edit_holds_the_summary_until_asked_for() {
 
     press(&mut app, "s");
     choose(&mut app, ReviewEvent::RequestChanges);
-    app.submission.as_mut().unwrap().editor.set_text("fix this");
+    replace_prompt(&mut app, "fix this");
     act(&mut app, &Action::CommitSubmit);
     app.take_requests();
 
     press(&mut app, "c");
     app.finish(Err(Failure::Review("HTTP 422: nope".into())));
-    assert!(app.submission.is_none(), "the composer keeps the keyboard");
-    assert_eq!(app.mode, Mode::Insert);
+    assert!(
+        app.view().submission.is_none(),
+        "the composer keeps the keyboard"
+    );
+    assert_eq!(app.view().mode, Mode::Insert);
 
     act(&mut app, &Action::CancelComment);
     press(&mut app, "s");
-    let submission = app.submission.as_ref().expect("the overlay is back");
+    let submission = app.view().submission.expect("the overlay is back");
     assert_eq!(submission.editor.text(), "fix this");
     assert_eq!(submission.event, ReviewEvent::RequestChanges);
     assert_eq!(submission.error.as_deref(), Some("HTTP 422: nope"));
@@ -2319,23 +2534,27 @@ fn a_second_review_waits_for_the_one_in_flight() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("once");
+    replace_prompt(&mut app, "once");
     act(&mut app, &Action::CommitComment);
     settle(&mut app);
 
     press(&mut app, "s");
-    app.submission.as_mut().unwrap().editor.set_text("summary");
+    replace_prompt(&mut app, "summary");
     act(&mut app, &Action::CommitSubmit);
     assert_eq!(app.take_requests().len(), 1);
 
     press(&mut app, "s");
-    app.submission.as_mut().unwrap().editor.set_text("again");
+    replace_prompt(&mut app, "again");
     act(&mut app, &Action::CommitSubmit);
 
-    assert_eq!(app.status, "a review is already going out");
+    assert_eq!(app.view().status, "a review is already going out");
     assert!(app.take_requests().is_empty());
-    assert_eq!(app.mode, Mode::Submit, "the overlay keeps what was typed");
-    assert_eq!(app.in_flight, 1);
+    assert_eq!(
+        app.view().mode,
+        Mode::Submit,
+        "the overlay keeps what was typed"
+    );
+    assert_eq!(app.view().in_flight, 1);
 }
 
 /// A verdict with nothing under it has no pending review to publish, so it
@@ -2350,8 +2569,8 @@ fn a_bare_approval_needs_neither_summary_nor_comments() {
     choose(&mut app, ReviewEvent::Approve);
     act(&mut app, &Action::CommitSubmit);
 
-    assert!(app.drafts.is_empty());
-    assert_eq!(app.in_flight, 1);
+    assert!(app.view().drafts.is_empty());
+    assert_eq!(app.view().in_flight, 1);
     assert_eq!(
         app.take_requests(),
         vec![Request::Review {
@@ -2371,11 +2590,11 @@ fn a_verdict_that_carries_prose_is_refused_without_it() {
         choose(&mut app, event);
         act(&mut app, &Action::CommitSubmit);
 
-        assert_eq!(app.status, format!("{label} needs a summary"));
-        assert_eq!(app.in_flight, 0);
+        assert_eq!(app.view().status, format!("{label} needs a summary"));
+        assert_eq!(app.view().in_flight, 0);
         assert!(app.take_requests().is_empty());
         // The overlay stays open so the summary is typed, not retyped.
-        assert!(app.submission.is_some());
+        assert!(app.view().submission.is_some());
     }
 }
 
@@ -2386,11 +2605,7 @@ fn a_verdict_that_needs_a_summary_says_so_before_sending() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer
-        .as_mut()
-        .unwrap()
-        .editor
-        .set_text("inline only");
+    replace_prompt(&mut app, "inline only");
     act(&mut app, &Action::CommitComment);
     settle(&mut app);
 
@@ -2402,15 +2617,19 @@ fn a_verdict_that_needs_a_summary_says_so_before_sending() {
         ),
     ] {
         press(&mut app, "s");
-        while app.submission.as_ref().unwrap().event != event {
+        while app.view().submission.unwrap().event != event {
             act(&mut app, &Action::CycleEvent(1));
         }
 
         act(&mut app, &Action::CommitSubmit);
-        assert_eq!(app.status, label);
-        assert_eq!(app.mode, Mode::Submit, "the overlay stays open to type in");
+        assert_eq!(app.view().status, label);
+        assert_eq!(
+            app.view().mode,
+            Mode::Submit,
+            "the overlay stays open to type in"
+        );
         assert!(app.take_requests().is_empty());
-        assert_eq!(app.drafts.len(), 1, "the draft is untouched");
+        assert_eq!(app.view().drafts.len(), 1, "the draft is untouched");
 
         act(&mut app, &Action::CancelSubmit);
     }
@@ -2419,8 +2638,8 @@ fn a_verdict_that_needs_a_summary_says_so_before_sending() {
     press(&mut app, "s");
     act(&mut app, &Action::CycleEvent(1));
     act(&mut app, &Action::CommitSubmit);
-    assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.in_flight, 1);
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert_eq!(app.view().in_flight, 1);
     assert!(matches!(
         app.take_requests().as_slice(),
         [Request::Review {
@@ -2438,11 +2657,14 @@ fn commenting_on_a_focused_thread_replies_to_it() {
     assert_eq!(app.focused_thread(), Some(&*thread.id));
 
     press(&mut app, "c");
-    assert_eq!(app.mode, Mode::Insert);
-    app.composer.as_mut().unwrap().editor.set_text("good catch");
+    assert_eq!(app.view().mode, Mode::Insert);
+    replace_prompt(&mut app, "good catch");
     act(&mut app, &Action::CommitComment);
 
-    assert!(app.drafts.is_empty(), "a reply is not a review draft");
+    assert!(
+        app.view().drafts.is_empty(),
+        "a reply is not a review draft"
+    );
     assert_eq!(
         app.take_requests(),
         vec![Request::Reply {
@@ -2450,10 +2672,10 @@ fn commenting_on_a_focused_thread_replies_to_it() {
             body: "good catch".into(),
         }]
     );
-    assert_eq!(app.in_flight, 1);
+    assert_eq!(app.view().in_flight, 1);
 
     app.finish(Ok(Sent::Reply));
-    assert_eq!(app.status, "reply posted");
+    assert_eq!(app.view().status, "reply posted");
 }
 
 #[test]
@@ -2473,7 +2695,7 @@ fn resolving_toggles_the_focused_thread() {
 
     act(&mut app, &Action::LeaveThread);
     press(&mut app, "R");
-    assert_eq!(app.status, "no thread selected");
+    assert_eq!(app.view().status, "no thread selected");
     assert!(app.take_requests().is_empty());
 }
 
@@ -2485,8 +2707,8 @@ fn resolving_toggles_the_focused_thread() {
 #[test]
 fn marking_a_file_viewed_toggles_it_and_steps_on() {
     let mut app = load();
-    app.selected_file = 0;
-    let path = app.files[0].path.clone();
+    select_file(&mut app, 0);
+    let path = app.view().files[0].path.clone();
 
     press(&mut app, "x");
     assert_eq!(
@@ -2497,7 +2719,7 @@ fn marking_a_file_viewed_toggles_it_and_steps_on() {
             is_viewed: true,
         }]
     );
-    assert_eq!(app.selected_file, 1);
+    assert_eq!(app.view().selected_file, 1);
 
     // The mark is the app's once GitHub confirms it: no metadata fetch has to
     // land for the tick to show.
@@ -2505,10 +2727,10 @@ fn marking_a_file_viewed_toggles_it_and_steps_on() {
         path: path.clone(),
         is_viewed: true,
     }));
-    assert_eq!(app.status, "file marked viewed");
+    assert_eq!(app.view().status, "file marked viewed");
     assert!(app.tree_row(0).unwrap().is_viewed);
 
-    app.selected_file = 0;
+    select_file(&mut app, 0);
 
     press(&mut app, "x");
     assert_eq!(
@@ -2519,7 +2741,7 @@ fn marking_a_file_viewed_toggles_it_and_steps_on() {
             is_viewed: false,
         }]
     );
-    assert_eq!(app.selected_file, 0);
+    assert_eq!(app.view().selected_file, 0);
 }
 
 /// A file already marked is stepped over, not landed on: `x` there would clear
@@ -2527,12 +2749,12 @@ fn marking_a_file_viewed_toggles_it_and_steps_on() {
 #[test]
 fn marking_a_file_viewed_steps_over_the_ones_already_read() {
     let mut app = load();
-    app.set_meta(meta_marking_viewed(&app.files[1].path.clone()));
-    app.selected_file = 0;
+    app.set_meta(meta_marking_viewed(&app.view().files[1].path.clone()));
+    select_file(&mut app, 0);
 
     press(&mut app, "x");
 
-    assert_eq!(app.selected_file, 2);
+    assert_eq!(app.view().selected_file, 2);
 }
 
 /// The walk down the review is a lap: the file after the last one is the
@@ -2540,13 +2762,13 @@ fn marking_a_file_viewed_steps_over_the_ones_already_read() {
 #[test]
 fn marking_the_last_file_comes_round_to_the_first_unread() {
     let mut app = load();
-    let last = app.files.len() - 1;
-    app.selected_file = last;
+    let last = app.view().files.len() - 1;
+    select_file(&mut app, last);
 
     press(&mut app, "x");
 
     assert_eq!(app.take_requests().len(), 1);
-    assert_eq!(app.selected_file, 0);
+    assert_eq!(app.view().selected_file, 0);
 }
 
 /// Nothing left unread is not a failure, but the reader pressed a key and did
@@ -2554,29 +2776,28 @@ fn marking_the_last_file_comes_round_to_the_first_unread() {
 #[test]
 fn marking_the_only_unread_file_stays_on_it_and_says_so() {
     let mut app = load();
-    let last = app.files.len() - 1;
+    let last = app.view().files.len() - 1;
     mark_viewed(&mut app, &(0..last).collect::<Vec<_>>());
-    app.selected_file = last;
+    select_file(&mut app, last);
 
     press(&mut app, "x");
 
     assert_eq!(app.take_requests().len(), 1);
-    assert_eq!(app.selected_file, last);
-    assert_eq!(app.status, "marking viewed… nothing left unread");
+    assert_eq!(app.view().selected_file, last);
+    assert_eq!(app.view().status, "marking viewed… nothing left unread");
 }
 
 /// Takes the review's own marks over, the way a confirmation from GitHub
 /// would, so a test can say which files have been read through.
 fn mark_viewed(app: &mut App, files: &[usize]) {
     for &index in files {
-        let path = app.files[index].path.clone();
+        let path = app.view().files[index].path.clone();
         app.finish(Ok(Sent::Viewed {
             path,
             is_viewed: true,
         }));
     }
     app.take_requests();
-    app.status.clear();
 }
 
 /// The fixture as GitHub would send it back once `path` has been read through.
@@ -2599,43 +2820,39 @@ fn e_reopens_the_draft_instead_of_stacking_another() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("first pass");
+    replace_prompt(&mut app, "first pass");
     act(&mut app, &Action::CommitComment);
     settle(&mut app);
-    let rows = app.drafts[0].rows().unwrap().clone();
+    let rows = app.view().drafts[0].rows().unwrap().clone();
 
     press(&mut app, "e");
     assert_eq!(
-        app.composer.as_ref().unwrap().editor.text(),
+        app.view().composer.unwrap().editor.text(),
         "first pass",
         "the composer reopens the draft it will replace"
     );
-    app.composer
-        .as_mut()
-        .unwrap()
-        .editor
-        .set_text("second pass");
+    replace_prompt(&mut app, "second pass");
     act(&mut app, &Action::CommitComment);
     settle(&mut app);
 
-    assert_eq!(app.drafts.len(), 1);
-    assert_eq!(app.drafts[0].body, "second pass");
+    assert_eq!(app.view().drafts.len(), 1);
+    assert_eq!(app.view().drafts[0].body, "second pass");
     assert_eq!(
-        *app.drafts[0].rows().unwrap(),
+        *app.view().drafts[0].rows().unwrap(),
         rows,
         "editing keeps the original span"
     );
 
     // Emptying a reopened draft is how it gets thrown away.
     press(&mut app, "e");
-    app.composer.as_mut().unwrap().editor.set_text("");
+    replace_prompt(&mut app, "");
     act(&mut app, &Action::CommitComment);
     settle(&mut app);
-    assert!(app.drafts.is_empty());
+    assert!(app.view().drafts.is_empty());
 
     press(&mut app, "e");
-    assert_eq!(app.status, "no draft here");
-    assert!(app.composer.is_none());
+    assert_eq!(app.view().status, "no draft here");
+    assert!(app.view().composer.is_none());
 }
 
 /// `c` composes, `e` revises. Commenting a drafted line again is a second
@@ -2647,39 +2864,39 @@ fn c_always_starts_a_new_comment() {
 
     for body in ["one", "two"] {
         press(&mut app, "c");
-        app.composer.as_mut().unwrap().editor.set_text(body);
+        replace_prompt(&mut app, body);
         act(&mut app, &Action::CommitComment);
     }
 
-    assert_eq!(app.drafts.len(), 2);
-    assert_eq!(app.drafts[1].body, "two");
+    assert_eq!(app.view().drafts.len(), 2);
+    assert_eq!(app.view().drafts[1].body, "two");
 }
 
 #[test]
 fn d_discards_only_the_draft_under_the_cursor() {
     let mut app = load();
     park_on_code(&mut app);
-    let first = app.cursor;
+    let first = app.view().cursor;
 
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("one");
+    replace_prompt(&mut app, "one");
     act(&mut app, &Action::CommitComment);
 
-    app.cursor = first + 1;
+    move_to(&mut app, first + 1);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("two");
+    replace_prompt(&mut app, "two");
     act(&mut app, &Action::CommitComment);
-    assert_eq!(app.drafts.len(), 2);
+    assert_eq!(app.view().drafts.len(), 2);
 
     press(&mut app, "d");
-    assert_eq!(app.status, "draft discarded");
-    assert_eq!(app.drafts.len(), 1);
-    assert_eq!(app.drafts[0].body, "one");
+    assert_eq!(app.view().status, "draft discarded");
+    assert_eq!(app.view().drafts.len(), 1);
+    assert_eq!(app.view().drafts[0].body, "one");
 
-    app.cursor = first + 1;
+    move_to(&mut app, first + 1);
     press(&mut app, "d");
-    assert_eq!(app.status, "no draft here");
-    assert_eq!(app.drafts.len(), 1);
+    assert_eq!(app.view().status, "no draft here");
+    assert_eq!(app.view().drafts.len(), 1);
 }
 
 #[test]
@@ -2689,14 +2906,14 @@ fn the_submit_overlay_types_its_summary_and_tabs_the_verdict() {
 
     let mut input = InputRouter::default();
     send(&mut input, &mut app, KeyCode::Tab.into());
-    assert_eq!(app.submission.as_ref().unwrap().event, ReviewEvent::Approve);
+    assert_eq!(app.view().submission.unwrap().event, ReviewEvent::Approve);
     send(&mut input, &mut app, KeyCode::BackTab.into());
-    assert_eq!(app.submission.as_ref().unwrap().event, ReviewEvent::Comment);
+    assert_eq!(app.view().submission.unwrap().event, ReviewEvent::Comment);
 
     // Plain keys belong to the summary, including ones bound in normal mode.
     press(&mut app, "ship it");
-    assert_eq!(app.submission.as_ref().unwrap().editor.text(), "ship it");
-    assert_eq!(app.mode, Mode::Submit);
+    assert_eq!(app.view().submission.unwrap().editor.text(), "ship it");
+    assert_eq!(app.view().mode, Mode::Submit);
 
     // Shifted Enter breaks the line; the bare one sends.
     send(
@@ -2704,23 +2921,23 @@ fn the_submit_overlay_types_its_summary_and_tabs_the_verdict() {
         &mut app,
         KeyEvent::new(KeyCode::Enter, Modifiers::SHIFT),
     );
-    assert_eq!(app.submission.as_ref().unwrap().editor.text(), "ship it\n");
+    assert_eq!(app.view().submission.unwrap().editor.text(), "ship it\n");
 
     // A typed summary is no cheaper to retype than a comment, so the first
     // escape only warns.
     send(&mut input, &mut app, KeyEvent::from(KeyCode::Escape));
-    assert_eq!(app.mode, Mode::Submit);
-    assert_eq!(app.status, "esc again to discard");
+    assert_eq!(app.view().mode, Mode::Submit);
+    assert_eq!(app.view().status, "esc again to discard");
 
     send(&mut input, &mut app, KeyEvent::from(KeyCode::Escape));
-    assert_eq!(app.mode, Mode::Normal);
-    assert!(app.submission.is_none());
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert!(app.view().submission.is_none());
 
     press(&mut app, "s");
-    app.submission.as_mut().unwrap().editor.set_text("ship it");
+    replace_prompt(&mut app, "ship it");
     send(&mut input, &mut app, KeyEvent::from(KeyCode::Enter));
-    assert_eq!(app.mode, Mode::Normal, "enter sends the review");
-    assert_eq!(app.in_flight, 1);
+    assert_eq!(app.view().mode, Mode::Normal, "enter sends the review");
+    assert_eq!(app.view().in_flight, 1);
 }
 
 /// A draft is on screen before GitHub has taken it, so the gutter has to say
@@ -2730,11 +2947,14 @@ fn a_draft_reports_how_far_it_has_got() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("wip");
+    replace_prompt(&mut app, "wip");
     act(&mut app, &Action::CommitComment);
 
-    assert_eq!(app.drafts[0].sync, Sync::Creating { is_dirty: false });
-    assert_eq!(app.status, "saving draft…");
+    assert_eq!(
+        app.view().drafts[0].sync,
+        Sync::Creating { is_dirty: false }
+    );
+    assert_eq!(app.view().status, "saving draft…");
 
     let requests = app.take_requests();
     let Request::AddThread { draft, .. } = requests[0] else {
@@ -2742,8 +2962,15 @@ fn a_draft_reports_how_far_it_has_got() {
     };
 
     app.finish(Err(Failure::Draft(draft, "HTTP 422: nope".into())));
-    assert_eq!(app.drafts[0].sync, Sync::Failed("HTTP 422: nope".into()));
-    assert_eq!(app.drafts[0].body, "wip", "the writing is not thrown away");
+    assert_eq!(
+        app.view().drafts[0].sync,
+        Sync::Failed("HTTP 422: nope".into())
+    );
+    assert_eq!(
+        app.view().drafts[0].body,
+        "wip",
+        "the writing is not thrown away"
+    );
 }
 
 /// The first draft opens the pending review. A second sent beside it would open
@@ -2753,22 +2980,24 @@ fn drafts_written_together_share_one_review() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("one");
+    replace_prompt(&mut app, "one");
     act(&mut app, &Action::CommitComment);
 
     let opening = app.take_requests();
     assert_eq!(opening.len(), 1);
 
-    app.cursor += 1;
+    let next = app.view().cursor + 1;
+    move_to(&mut app, next);
+
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("two");
+    replace_prompt(&mut app, "two");
     act(&mut app, &Action::CommitComment);
 
     assert!(
         app.take_requests().is_empty(),
         "the second waits for the review the first opens"
     );
-    assert_eq!(app.drafts[1].sync, Sync::Queued);
+    assert_eq!(app.view().drafts[1].sync, Sync::Queued);
 
     let Request::AddThread { draft, .. } = opening[0] else {
         panic!("expected a draft request");
@@ -2794,7 +3023,7 @@ fn an_edit_before_the_creation_lands_follows_it() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("first");
+    replace_prompt(&mut app, "first");
     act(&mut app, &Action::CommitComment);
 
     let requests = app.take_requests();
@@ -2803,10 +3032,10 @@ fn an_edit_before_the_creation_lands_follows_it() {
     };
 
     press(&mut app, "e");
-    app.composer.as_mut().unwrap().editor.set_text("revised");
+    replace_prompt(&mut app, "revised");
     act(&mut app, &Action::CommitComment);
 
-    assert_eq!(app.drafts[0].sync, Sync::Creating { is_dirty: true });
+    assert_eq!(app.view().drafts[0].sync, Sync::Creating { is_dirty: true });
     assert!(app.take_requests().is_empty(), "nothing to address it to");
 
     app.finish(Ok(Sent::ThreadAdded {
@@ -2831,7 +3060,7 @@ fn a_discard_before_the_creation_lands_follows_it() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("nevermind");
+    replace_prompt(&mut app, "nevermind");
     act(&mut app, &Action::CommitComment);
 
     let requests = app.take_requests();
@@ -2840,7 +3069,7 @@ fn a_discard_before_the_creation_lands_follows_it() {
     };
 
     act(&mut app, &Action::DeleteDraft);
-    assert_eq!(app.drafts[0].sync, Sync::Deleting);
+    assert_eq!(app.view().drafts[0].sync, Sync::Deleting);
     assert!(app.take_requests().is_empty());
 
     app.finish(Ok(Sent::ThreadAdded {
@@ -2858,7 +3087,7 @@ fn a_discard_before_the_creation_lands_follows_it() {
     );
 
     app.finish(Ok(Sent::CommentDeleted(draft)));
-    assert!(app.drafts.is_empty());
+    assert!(app.view().drafts.is_empty());
 }
 
 /// A metadata fetch that left before a discard landed still carries the comment
@@ -2868,18 +3097,18 @@ fn a_discarded_draft_does_not_come_back_from_a_stale_fetch() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("gone");
+    replace_prompt(&mut app, "gone");
     act(&mut app, &Action::CommitComment);
     settle(&mut app);
 
-    let comment = app.drafts[0].remote.clone().unwrap();
+    let comment = app.view().drafts[0].remote.clone().unwrap();
     act(&mut app, &Action::DeleteDraft);
     settle(&mut app);
-    assert!(app.drafts.is_empty());
+    assert!(app.view().drafts.is_empty());
 
     app.set_meta(meta_with_pending(&comment, "gone"));
     assert!(
-        app.drafts.is_empty(),
+        app.view().drafts.is_empty(),
         "the discard outranks the stale fetch"
     );
 }
@@ -2891,21 +3120,21 @@ fn a_fetch_does_not_overwrite_a_draft_still_saving() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("first");
+    replace_prompt(&mut app, "first");
     act(&mut app, &Action::CommitComment);
     settle(&mut app);
 
-    let comment = app.drafts[0].remote.clone().unwrap();
+    let comment = app.view().drafts[0].remote.clone().unwrap();
     press(&mut app, "e");
-    app.composer.as_mut().unwrap().editor.set_text("revised");
+    replace_prompt(&mut app, "revised");
     act(&mut app, &Action::CommitComment);
-    assert_eq!(app.drafts[0].sync, Sync::Updating);
+    assert_eq!(app.view().drafts[0].sync, Sync::Updating);
 
     app.set_meta(meta_with_pending(&comment, "first"));
 
-    assert_eq!(app.drafts.len(), 1);
-    assert_eq!(app.drafts[0].body, "revised");
-    assert_eq!(app.drafts[0].sync, Sync::Updating);
+    assert_eq!(app.view().drafts.len(), 1);
+    assert_eq!(app.view().drafts[0].body, "revised");
+    assert_eq!(app.view().drafts[0].sync, Sync::Updating);
 }
 
 /// A refetch lands after every write. It rebuilds the drafts from what GitHub
@@ -2916,19 +3145,26 @@ fn a_refetch_keeps_the_focus_on_the_same_draft() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("first");
+    replace_prompt(&mut app, "first");
     act(&mut app, &Action::CommitComment);
     settle(&mut app);
 
-    let comment = app.drafts[0].remote.clone().unwrap();
-    let focused = app.focused_card.clone();
-    assert_eq!(focused, Some(Card::Draft(app.drafts[0].id)));
+    let comment = app.view().drafts[0].remote.clone().unwrap();
+    let focused = app.view().focused_card.cloned();
+    assert_eq!(focused, Some(Card::Draft(app.view().drafts[0].id)));
 
     app.set_meta(meta_with_pending(&comment, "first"));
 
-    assert_eq!(app.drafts.len(), 1);
-    assert_eq!(app.focused_card, focused, "the cursor stays on the card");
-    assert_eq!(app.focused_card, Some(Card::Draft(app.drafts[0].id)));
+    assert_eq!(app.view().drafts.len(), 1);
+    assert_eq!(
+        app.view().focused_card,
+        focused.as_ref(),
+        "the cursor stays on the card"
+    );
+    assert_eq!(
+        app.view().focused_card.cloned(),
+        Some(Card::Draft(app.view().drafts[0].id))
+    );
 }
 
 /// A draft is a card the cursor walks the same way it walks a conversation:
@@ -2937,23 +3173,27 @@ fn a_refetch_keeps_the_focus_on_the_same_draft() {
 fn the_cursor_walks_drafts_like_any_other_card() {
     let mut app = load();
     park_on_code(&mut app);
-    let row = app.cursor;
+    let row = app.view().cursor;
 
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("a note");
+    replace_prompt(&mut app, "a note");
     act(&mut app, &Action::CommitComment);
     settle(&mut app);
 
-    let card = app.focused_card.clone().unwrap();
+    let card = app.view().focused_card.cloned().unwrap();
     press(&mut app, "k");
-    assert!(app.focused_card.is_none(), "k steps off the card");
-    assert_eq!(app.cursor, row);
+    assert!(app.view().focused_card.is_none(), "k steps off the card");
+    assert_eq!(app.view().cursor, row);
 
     press(&mut app, "j");
-    assert_eq!(app.focused_card, Some(card), "j steps back onto it");
+    assert_eq!(
+        app.view().focused_card.cloned(),
+        Some(card),
+        "j steps back onto it"
+    );
 
     act(&mut app, &Action::Activate);
-    assert_eq!(app.expanded_card, app.focused_card);
+    assert_eq!(app.view().expanded_card, app.view().focused_card);
 }
 
 /// `}` walks what a review still owes an answer to, and an unsent note of the
@@ -2963,16 +3203,16 @@ fn jumping_between_comments_stops_on_drafts() {
     let mut app = load();
     park_on_code(&mut app);
     press(&mut app, "c");
-    app.composer.as_mut().unwrap().editor.set_text("a note");
+    replace_prompt(&mut app, "a note");
     act(&mut app, &Action::CommitComment);
     settle(&mut app);
 
-    let card = app.focused_card.clone().unwrap();
-    app.cursor = 0;
+    let card = app.view().focused_card.cloned().unwrap();
+    move_to(&mut app, 0);
     act(&mut app, &Action::LeaveThread);
 
     act(&mut app, &Action::NextComment(1));
-    assert_eq!(app.focused_card, Some(card));
+    assert_eq!(app.view().focused_card.cloned(), Some(card));
 }
 
 /// The fixture's metadata with one pending thread bolted on, standing in for a
@@ -3031,15 +3271,15 @@ fn escape_clears_the_search_from_either_pane() {
         let mut input = search_for(&mut app, "cobra");
         send(&mut input, &mut app, KeyCode::Enter.into());
         act(&mut app, &Action::LeaveThread);
-        app.pane = pane;
-        assert!(app.search.is_some());
+        focus_pane(&mut app, pane);
+        assert!(app.view().search.is_some());
 
         send(&mut input, &mut app, KeyCode::Escape.into());
         assert!(
-            app.search.is_none(),
+            app.view().search.is_none(),
             "one escape should clear it in {pane:?}"
         );
-        assert!(!app.should_quit);
+        assert!(!app.should_quit());
     }
 }
 
@@ -3049,7 +3289,7 @@ fn escape_clears_the_search_from_either_pane() {
 fn the_focused_pane_picks_which_find_clears_first() {
     // Filter first: the other order clears the search as the filter opens.
     let mut app = load();
-    app.pane = Pane::Files;
+    focus_pane(&mut app, Pane::Files);
     let mut input = InputRouter::default();
     send(
         &mut input,
@@ -3062,18 +3302,18 @@ fn the_focused_pane_picks_which_find_clears_first() {
     let mut input = search_for(&mut app, "cobra");
     send(&mut input, &mut app, KeyCode::Enter.into());
     act(&mut app, &Action::LeaveThread);
-    app.pane = Pane::Files;
-    assert!(app.file_filter.is_some() && app.search.is_some());
+    focus_pane(&mut app, Pane::Files);
+    assert!(app.view().file_filter.is_some() && app.view().search.is_some());
 
     send(&mut input, &mut app, KeyCode::Escape.into());
     assert!(
-        app.file_filter.is_none(),
+        app.view().file_filter.is_none(),
         "the tree's own filter goes first"
     );
-    assert!(app.search.is_some());
+    assert!(app.view().search.is_some());
 
     send(&mut input, &mut app, KeyCode::Escape.into());
-    assert!(app.search.is_none());
+    assert!(app.view().search.is_none());
 }
 
 /// The diff keeps its highlights while the tree has the focus, so a filter
@@ -3086,16 +3326,19 @@ fn filtering_the_tree_drops_a_search_left_in_the_diff() {
     act(&mut app, &Action::LeaveThread);
 
     send(&mut input, &mut app, KeyEvent::from(KeyCode::Tab));
-    assert_eq!(app.pane, Pane::Files);
-    assert!(app.search.is_some(), "tabbing alone leaves it alone");
+    assert_eq!(app.view().pane, Pane::Files);
+    assert!(app.view().search.is_some(), "tabbing alone leaves it alone");
 
     send(
         &mut input,
         &mut app,
         KeyEvent::new(KeyCode::Char('/'), Modifiers::NONE),
     );
-    assert_eq!(app.mode, Mode::Filter);
-    assert!(app.search.is_none(), "`/` in the tree clears the search");
+    assert_eq!(app.view().mode, Mode::Filter);
+    assert!(
+        app.view().search.is_none(),
+        "`/` in the tree clears the search"
+    );
 }
 
 /// The reverse does not hold: a filter is the set of files being reviewed, not
@@ -3103,7 +3346,7 @@ fn filtering_the_tree_drops_a_search_left_in_the_diff() {
 #[test]
 fn searching_a_file_keeps_the_tree_filtered() {
     let mut app = load();
-    app.pane = Pane::Files;
+    focus_pane(&mut app, Pane::Files);
 
     let mut input = InputRouter::default();
     send(
@@ -3113,11 +3356,14 @@ fn searching_a_file_keeps_the_tree_filtered() {
     );
     paste(&mut input, &mut app, "auth_check");
     send(&mut input, &mut app, KeyCode::Enter.into());
-    assert!(app.file_filter.is_some());
+    assert!(app.view().file_filter.is_some());
 
     let mut input = search_for(&mut app, "cobra");
     send(&mut input, &mut app, KeyCode::Enter.into());
 
-    assert!(app.file_filter.is_some(), "the filtered set survives");
-    assert!(app.search.is_some());
+    assert!(
+        app.view().file_filter.is_some(),
+        "the filtered set survives"
+    );
+    assert!(app.view().search.is_some());
 }

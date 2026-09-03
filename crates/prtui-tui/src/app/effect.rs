@@ -29,6 +29,7 @@ pub enum Message {
     },
     Request(Result<Sent, Failure>),
     Outage(String),
+    ExternalFailure(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,14 +264,14 @@ mod tests {
             generation: 1,
             outcome: Ok(Box::new(meta("stale"))),
         }));
-        assert!(app.pr.is_none());
+        assert!(app.view().pr.is_none());
         assert_eq!(app.take_effects(), [Effect::FetchMeta { generation: 2 }]);
 
         assert!(app.receive(Message::Meta {
             generation: 2,
             outcome: Ok(Box::new(meta("fresh"))),
         }));
-        assert_eq!(app.pr.as_ref().map(|pr| pr.title.as_str()), Some("fresh"));
+        assert_eq!(app.view().pr.map(|pr| pr.title.as_str()), Some("fresh"));
     }
 
     #[test]
@@ -314,7 +315,7 @@ mod tests {
         app.take_effects();
 
         app.receive(Message::Files(Err("files failed".into())));
-        assert_eq!(app.status, "error: files failed");
+        assert_eq!(app.view().status, "error: files failed");
         assert_eq!(app.take_effects(), [Effect::ProbeOutage]);
 
         app.receive(Message::Meta {
@@ -324,7 +325,7 @@ mod tests {
         assert!(app.take_effects().is_empty());
 
         app.receive(Message::Outage("provider incident".into()));
-        assert_eq!(app.status, "outage: provider incident");
+        assert_eq!(app.view().status, "outage: provider incident");
         assert_eq!(app.take_failure().as_deref(), Some("metadata failed"));
     }
 }

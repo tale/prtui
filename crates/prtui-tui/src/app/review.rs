@@ -146,19 +146,21 @@ impl App {
     /// own is not one of those: `c` composes and `e` revises, so a drafted line
     /// still takes a second comment.
     pub(super) fn start_comment(&mut self, layout: &Layout) {
-        if self.pane != Pane::Diff {
+        if self.navigation.pane != Pane::Diff {
             return;
         }
 
-        if let Some(id) = self.focused_card.as_ref().and_then(Card::thread) {
+        if let Some(id) =
+            self.navigation.focused_card.as_ref().and_then(Card::thread)
+        {
             let id = id.clone();
             self.start_reply(&id, layout);
             return;
         }
 
-        let rows = match self.selection {
+        let rows = match self.navigation.selection {
             Some(selection) => selection.range(),
-            None => self.cursor..=self.cursor,
+            None => self.navigation.cursor..=self.navigation.cursor,
         };
 
         let Some(file) = self.current_file() else {
@@ -166,17 +168,17 @@ impl App {
         };
         let path = file.path.clone();
         let Some(anchor) = draft::anchor_for(file, rows.clone()) else {
-            self.status = "cannot comment on that line".into();
+            self.runtime.status = "cannot comment on that line".into();
             return;
         };
 
         // The rows the note will cover stay painted while it is written, so the
         // composer never floats free of what it answers to.
-        self.selection = Some(Selection {
+        self.navigation.selection = Some(Selection {
             anchor: *rows.start(),
             head: *rows.end(),
         });
-        self.composer = Some(Composer::new(
+        self.prompts.composer = Some(Composer::new(
             CommentEditor::default(),
             Target::Line {
                 anchor,
@@ -185,7 +187,7 @@ impl App {
             },
             path,
         ));
-        self.mode = Mode::Insert;
+        self.navigation.mode = Mode::Insert;
         self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
@@ -196,11 +198,12 @@ impl App {
     pub(super) fn start_file_comment(&mut self, layout: &Layout) {
         let Some(path) = self.current_file().map(|file| file.path.clone())
         else {
-            self.status = "no file selected".into();
+            self.runtime.status = "no file selected".into();
             return;
         };
 
         let existing = self
+            .review
             .drafts
             .iter()
             .find(|draft| draft.path == path && draft.is_file_level());
@@ -211,14 +214,14 @@ impl App {
             return;
         }
 
-        self.pane = Pane::Diff;
-        self.composer = Some(Composer::new(
+        self.navigation.pane = Pane::Diff;
+        self.prompts.composer = Some(Composer::new(
             CommentEditor::default(),
             Target::File { replacing: None },
             path,
         ));
-        self.mode = Mode::Insert;
-        self.selection = None;
+        self.navigation.mode = Mode::Insert;
+        self.navigation.selection = None;
         self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
@@ -227,11 +230,11 @@ impl App {
     /// second comment.
     pub(super) fn edit_draft(&mut self, layout: &Layout) {
         let Some(index) = self.editable_draft() else {
-            self.status = "no draft here".into();
+            self.runtime.status = "no draft here".into();
             return;
         };
 
-        let id = self.drafts[index].id;
+        let id = self.review.drafts[index].id;
         self.reopen_draft(id, layout);
     }
 
@@ -241,10 +244,10 @@ impl App {
             return;
         };
 
-        let draft = &self.drafts[index];
+        let draft = &self.review.drafts[index];
         let target = match draft.attachment.clone() {
             Attachment::Lines { rows, anchor } => {
-                self.selection = Some(Selection {
+                self.navigation.selection = Some(Selection {
                     anchor: *rows.start(),
                     head: *rows.end(),
                 });
@@ -255,7 +258,7 @@ impl App {
                 }
             }
             Attachment::File => {
-                self.selection = None;
+                self.navigation.selection = None;
                 Target::File {
                     replacing: Some(id),
                 }
@@ -265,9 +268,10 @@ impl App {
         let mut editor = CommentEditor::default();
         editor.set_text(&draft.body);
 
-        self.pane = Pane::Diff;
-        self.composer = Some(Composer::new(editor, target, draft.path.clone()));
-        self.mode = Mode::Insert;
+        self.navigation.pane = Pane::Diff;
+        self.prompts.composer =
+            Some(Composer::new(editor, target, draft.path.clone()));
+        self.navigation.mode = Mode::Insert;
         self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
@@ -276,21 +280,22 @@ impl App {
             return;
         };
         let Some(in_reply_to) = thread.reply_target() else {
-            self.status = "this thread cannot be replied to".into();
+            self.runtime.status = "this thread cannot be replied to".into();
             return;
         };
 
-        self.composer = Some(Composer::new(
+        self.prompts.composer = Some(Composer::new(
             CommentEditor::default(),
             Target::Reply { in_reply_to },
             thread.path.clone(),
         ));
-        self.mode = Mode::Insert;
+        self.navigation.mode = Mode::Insert;
         self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
     pub(super) fn thread(&self, id: &str) -> Option<&ReviewThread> {
-        self.threads_by_path
+        self.review
+            .threads_by_path
             .values()
             .flatten()
             .find(|thread| *thread.id == *id)
@@ -299,26 +304,27 @@ impl App {
     /// The open file's threads, which is what the row list indexes into.
     pub fn file_threads(&self) -> &[ReviewThread] {
         self.current_file()
-            .and_then(|file| self.threads_by_path.get(&file.path))
+            .and_then(|file| self.review.threads_by_path.get(&file.path))
             .map_or(&[], Vec::as_slice)
     }
 
     fn draft_at_cursor(&self) -> Option<usize> {
         let path = &self.current_file()?.path;
 
-        self.drafts
+        self.review
+            .drafts
             .iter()
-            .position(|draft| draft.covers(path, self.cursor))
+            .position(|draft| draft.covers(path, self.navigation.cursor))
     }
 
     /// The draft `e` and `d` act on: the focused one when a card holds the
     /// focus, which is the only way to reach a file note, and otherwise the one
     /// covering the cursor line.
     fn editable_draft(&self) -> Option<usize> {
-        if self.focused_card.is_some() {
+        if self.navigation.focused_card.is_some() {
             return self.focused_draft();
         }
-        if self.pane != Pane::Diff {
+        if self.navigation.pane != Pane::Diff {
             return None;
         }
 
@@ -327,7 +333,7 @@ impl App {
 
     pub(super) fn delete_draft(&mut self) {
         let Some(index) = self.editable_draft() else {
-            self.status = "no draft here".into();
+            self.runtime.status = "no draft here".into();
             return;
         };
 
@@ -339,32 +345,36 @@ impl App {
     /// it. One whose own creation is still out has no comment id to name yet,
     /// so it is marked and the discard rides on that answer.
     fn discard_draft(&mut self, index: usize) {
-        let draft = &mut self.drafts[index];
+        let draft = &mut self.review.drafts[index];
 
         if let Sync::Creating { .. } = draft.sync {
             draft.sync = Sync::Deleting;
-            self.status = "discarding draft…".into();
+            self.runtime.status = "discarding draft…".into();
             return;
         }
 
         let Some(comment) = draft.remote.clone() else {
-            self.drafts.remove(index);
-            self.status = "draft discarded".into();
+            self.review.drafts.remove(index);
+            self.runtime.status = "draft discarded".into();
             return;
         };
 
         let id = draft.id;
         draft.sync = Sync::Deleting;
-        self.retired.insert(comment.clone());
+        self.review.retired.insert(comment.clone());
         self.send(Request::DeleteComment { draft: id, comment });
-        self.status = "discarding draft…".into();
+        self.runtime.status = "discarding draft…".into();
     }
 
     pub(super) fn toggle_resolved(&mut self) {
-        let Some(id) =
-            self.focused_card.as_ref().and_then(Card::thread).cloned()
+        let Some(id) = self
+            .navigation
+            .focused_card
+            .as_ref()
+            .and_then(Card::thread)
+            .cloned()
         else {
-            self.status = "no thread selected".into();
+            self.runtime.status = "no thread selected".into();
             return;
         };
         let Some(thread) = self.thread(&id) else {
@@ -372,7 +382,7 @@ impl App {
         };
 
         if !thread.can_resolve {
-            self.status = "you cannot resolve this thread".into();
+            self.runtime.status = "you cannot resolve this thread".into();
             return;
         }
 
@@ -381,7 +391,7 @@ impl App {
             thread_id: id,
             is_resolved,
         });
-        self.status = if is_resolved {
+        self.runtime.status = if is_resolved {
             "resolving…".into()
         } else {
             "unresolving…".into()
@@ -394,14 +404,14 @@ impl App {
     pub(super) fn toggle_viewed(&mut self, layout: &Layout) {
         let Some(path) = self.current_file().map(|file| file.path.clone())
         else {
-            self.status = "no file open".into();
+            self.runtime.status = "no file open".into();
             return;
         };
-        let Some(pr) = self.pr.as_ref().map(|pr| pr.id.clone()) else {
+        let Some(pr) = self.review.pr.as_ref().map(|pr| pr.id.clone()) else {
             return;
         };
 
-        let is_viewed = !self.viewed.contains(&path);
+        let is_viewed = !self.review.viewed.contains(&path);
         self.send(Request::SetViewed {
             pr,
             path,
@@ -409,11 +419,11 @@ impl App {
         });
 
         if !is_viewed {
-            self.status = "marking unviewed…".into();
+            self.runtime.status = "marking unviewed…".into();
             return;
         }
 
-        self.status = match self.unread_after_current(layout) {
+        self.runtime.status = match self.unread_after_current(layout) {
             Some(index) => {
                 self.select_file(index);
                 "marking viewed…".into()
@@ -429,29 +439,31 @@ impl App {
     /// review to learn one boolean would cost a round trip per file read.
     fn mark_viewed(&mut self, path: Arc<str>, is_viewed: bool) -> String {
         if is_viewed {
-            self.viewed.insert(path);
+            self.review.viewed.insert(path);
             return "file marked viewed".into();
         }
 
-        self.viewed.remove(&path);
+        self.review.viewed.remove(&path);
         "file marked unviewed".into()
     }
 
     pub(super) fn start_submit(&mut self, layout: &Layout) {
-        self.composer = None;
-        self.selection = None;
+        self.prompts.composer = None;
+        self.navigation.selection = None;
         // A review GitHub rejected comes back with the summary that was typed
         // for it, so a second attempt revises rather than retypes.
-        let rejected = self.sending.take_if(|held| held.error.is_some());
-        self.submission = Some(rejected.unwrap_or_default());
-        self.mode = Mode::Submit;
+        let rejected =
+            self.prompts.sending.take_if(|held| held.error.is_some());
+        self.prompts.submission = Some(rejected.unwrap_or_default());
+        self.navigation.mode = Mode::Submit;
         self.scroll_into_view(layout, layout.viewport_once_docked());
     }
 
     /// One review goes out at a time. A second would post twice, since the
     /// drafts only retire once the first is answered.
     fn is_review_sending(&self) -> bool {
-        self.sending
+        self.prompts
+            .sending
             .as_ref()
             .is_some_and(|held| held.error.is_none())
     }
@@ -459,27 +471,27 @@ impl App {
     /// A summary is no cheaper to retype than a comment, so escape warns once
     /// here too rather than throwing it away on the first key.
     pub(super) fn cancel_submit(&mut self) {
-        let Some(submission) = self.submission.as_mut() else {
-            self.mode = Mode::Normal;
+        let Some(submission) = self.prompts.submission.as_mut() else {
+            self.navigation.mode = Mode::Normal;
             return;
         };
 
         let has_summary = !submission.editor.text().trim().is_empty();
         if has_summary && !submission.is_discard_armed {
             submission.is_discard_armed = true;
-            self.status = "esc again to discard".into();
+            self.runtime.status = "esc again to discard".into();
             return;
         }
 
-        self.submission = None;
-        self.mode = Mode::Normal;
-        self.status.clear();
+        self.prompts.submission = None;
+        self.navigation.mode = Mode::Normal;
+        self.runtime.status.clear();
     }
 
     /// A refused submission leaves the overlay open, so a missing summary is
     /// typed rather than retyped.
     pub(super) fn commit_submit(&mut self) {
-        let Some(mut submission) = self.submission.take() else {
+        let Some(mut submission) = self.prompts.submission.take() else {
             return;
         };
 
@@ -489,11 +501,12 @@ impl App {
         // Drafts are already on GitHub, so the review that publishes them is
         // the one the app opened for them. Without any, the verdict rides alone
         // and files a review of its own.
-        let parent = match (&self.pending_review, self.pr.as_ref()) {
-            (Some(review), _) => Some(Parent::Review(review.clone())),
-            (None, Some(pr)) => Some(Parent::PullRequest(pr.id.clone())),
-            (None, None) => None,
-        };
+        let parent =
+            match (&self.review.pending_review, self.review.pr.as_ref()) {
+                (Some(review), _) => Some(Parent::Review(review.clone())),
+                (None, Some(pr)) => Some(Parent::PullRequest(pr.id.clone())),
+                (None, None) => None,
+            };
 
         // An approval is a verdict in itself, so a bare one with no summary and
         // no inline comments is the whole point rather than an empty review.
@@ -510,26 +523,26 @@ impl App {
         };
 
         let (Some(parent), None) = (parent, refusal.as_ref()) else {
-            self.status = refusal.unwrap_or_default();
-            self.submission = Some(submission);
+            self.runtime.status = refusal.unwrap_or_default();
+            self.prompts.submission = Some(submission);
             return;
         };
 
         submission.error = None;
-        self.sending = Some(submission);
-        self.mode = Mode::Normal;
+        self.prompts.sending = Some(submission);
+        self.navigation.mode = Mode::Normal;
 
         self.send(Request::Review {
             parent,
             event,
             body,
         });
-        self.status = format!("submitting {}…", event.label());
+        self.runtime.status = format!("submitting {}…", event.label());
     }
 
     pub(super) fn send(&mut self, request: Request) {
-        self.effects.push(Effect::Request(request));
-        self.in_flight += 1;
+        self.runtime.effects.push(Effect::Request(request));
+        self.runtime.in_flight += 1;
     }
 
     /// Compatibility view for model-level tests that inspect only requests.
@@ -544,9 +557,9 @@ impl App {
     /// Reports one request's outcome. Drafts survive a failed submission so the
     /// review can be sent again rather than retyped.
     pub fn finish(&mut self, outcome: Result<Sent, Failure>) {
-        self.in_flight = self.in_flight.saturating_sub(1);
+        self.runtime.in_flight = self.runtime.in_flight.saturating_sub(1);
 
-        self.status = match outcome {
+        self.runtime.status = match outcome {
             Ok(Sent::ThreadAdded {
                 draft,
                 review,
@@ -555,7 +568,7 @@ impl App {
             Ok(Sent::CommentUpdated(draft)) => self.draft_settled(draft),
             Ok(Sent::CommentDeleted(draft)) => {
                 if let Some(index) = self.draft_by_id(draft) {
-                    self.drafts.remove(index);
+                    self.review.drafts.remove(index);
                 }
 
                 "draft discarded".into()
@@ -563,9 +576,9 @@ impl App {
             Ok(Sent::Review) => {
                 // Everything it carried is GitHub's now, and the refetch that
                 // follows brings the whole review back as submitted threads.
-                self.drafts.clear();
-                self.pending_review = None;
-                self.sending = None;
+                self.review.drafts.clear();
+                self.review.pending_review = None;
+                self.prompts.sending = None;
                 "review submitted".into()
             }
             Ok(Sent::Reply) => "reply posted".into(),
@@ -604,27 +617,27 @@ impl App {
         review: Arc<str>,
         comment: Arc<str>,
     ) -> String {
-        self.pending_review = Some(review);
+        self.review.pending_review = Some(review);
 
         let Some(index) = self.draft_by_id(draft) else {
             return "draft saved".into();
         };
 
-        self.drafts[index].remote = Some(comment);
-        let is_deleting = self.drafts[index].sync == Sync::Deleting;
+        self.review.drafts[index].remote = Some(comment);
+        let is_deleting = self.review.drafts[index].sync == Sync::Deleting;
         let is_dirty = matches!(
-            self.drafts[index].sync,
+            self.review.drafts[index].sync,
             Sync::Creating { is_dirty: true }
         );
         let status = if is_deleting {
-            self.drafts[index].sync = Sync::Synced;
+            self.review.drafts[index].sync = Sync::Synced;
             self.discard_draft(index);
             "discarding draft…".into()
         } else if is_dirty {
             self.update_draft(index);
             "saving draft…".into()
         } else {
-            self.drafts[index].sync = Sync::Synced;
+            self.review.drafts[index].sync = Sync::Synced;
             "draft saved".into()
         };
 
@@ -637,7 +650,7 @@ impl App {
 
     fn draft_settled(&mut self, draft: u64) -> String {
         if let Some(index) = self.draft_by_id(draft) {
-            self.drafts[index].sync = Sync::Synced;
+            self.review.drafts[index].sync = Sync::Synced;
         }
 
         "draft saved".into()
@@ -650,18 +663,18 @@ impl App {
             return;
         };
 
-        if let Some(comment) = &self.drafts[index].remote {
-            self.retired.remove(comment);
+        if let Some(comment) = &self.review.drafts[index].remote {
+            self.review.retired.remove(comment);
         }
 
-        self.drafts[index].sync = Sync::Failed(error);
+        self.review.drafts[index].sync = Sync::Failed(error);
     }
 
     /// A rejected review keeps everything it was made of. The summary goes back
     /// into the overlay with GitHub's reason above it, since the reason names a
     /// field and a rule and the status bar shows one line of it.
     fn reject_review(&mut self, error: String) {
-        let Some(submission) = self.sending.as_mut() else {
+        let Some(submission) = self.prompts.sending.as_mut() else {
             return;
         };
 
@@ -669,51 +682,53 @@ impl App {
 
         // Reopening mid-edit would steal the keyboard from whatever the user
         // moved on to; the overlay waits for the next `s` instead.
-        if self.mode == Mode::Normal && self.composer.is_none() {
-            self.submission = self.sending.take();
-            self.mode = Mode::Submit;
+        if self.navigation.mode == Mode::Normal
+            && self.prompts.composer.is_none()
+        {
+            self.prompts.submission = self.prompts.sending.take();
+            self.navigation.mode = Mode::Submit;
         }
     }
 
     /// Escape leaves the composer, but work is not thrown away on one key: a
     /// changed buffer arms first and says so, and the next escape discards it.
     pub(super) fn cancel_comment(&mut self) {
-        let Some(composer) = self.composer.as_mut() else {
-            self.mode = Mode::Normal;
+        let Some(composer) = self.prompts.composer.as_mut() else {
+            self.navigation.mode = Mode::Normal;
             return;
         };
 
         if composer.is_dirty() && !composer.is_discard_armed {
             composer.is_discard_armed = true;
-            self.status = "esc again to discard".into();
+            self.runtime.status = "esc again to discard".into();
             return;
         }
 
-        self.composer = None;
-        self.mode = Mode::Normal;
-        self.selection = None;
-        self.status.clear();
+        self.prompts.composer = None;
+        self.navigation.mode = Mode::Normal;
+        self.navigation.selection = None;
+        self.runtime.status.clear();
     }
 
     pub(super) fn commit_comment(&mut self) {
-        let Some(composer) = self.composer.take() else {
+        let Some(composer) = self.prompts.composer.take() else {
             return;
         };
 
         let body = composer.editor.trimmed_text();
 
-        self.mode = Mode::Normal;
-        self.selection = None;
+        self.navigation.mode = Mode::Normal;
+        self.navigation.selection = None;
 
         let saved = match composer.target {
             Target::Reply { in_reply_to } => {
                 if body.is_empty() {
-                    self.status = "empty reply discarded".into();
+                    self.runtime.status = "empty reply discarded".into();
                     return;
                 }
 
                 self.send(Request::Reply { in_reply_to, body });
-                self.status = "sending reply…".into();
+                self.runtime.status = "sending reply…".into();
                 None
             }
             Target::Line {
@@ -757,12 +772,12 @@ impl App {
     ) -> Option<u64> {
         let Some(index) = replacing.and_then(|id| self.draft_by_id(id)) else {
             if body.is_empty() {
-                self.status = "empty comment discarded".into();
+                self.runtime.status = "empty comment discarded".into();
                 return None;
             }
 
             let id = self.take_draft_id();
-            self.drafts.push(Draft {
+            self.review.drafts.push(Draft {
                 id,
                 path,
                 attachment,
@@ -770,7 +785,7 @@ impl App {
                 remote: None,
                 sync: Sync::Queued,
             });
-            self.status = "saving draft…".into();
+            self.runtime.status = "saving draft…".into();
             self.create_drafts();
             return Some(id);
         };
@@ -780,18 +795,18 @@ impl App {
             return None;
         }
 
-        let draft = &mut self.drafts[index];
+        let draft = &mut self.review.drafts[index];
         let id = draft.id;
         draft.body = body;
 
         match draft.sync {
             // Nothing has left yet, so the new body is simply what gets sent.
-            Sync::Queued => self.status = "saving draft…".into(),
+            Sync::Queued => self.runtime.status = "saving draft…".into(),
             // An edit that beats its own creation home has nothing to address
             // itself to, so it rides along on that answer instead.
             Sync::Creating { .. } => {
                 draft.sync = Sync::Creating { is_dirty: true };
-                self.status = "saving draft…".into();
+                self.runtime.status = "saving draft…".into();
             }
             _ => self.update_draft(index),
         }
@@ -802,7 +817,7 @@ impl App {
     /// Sends the body of an already-created draft. A draft with no comment id
     /// has nothing to send it to, which only happens after a creation failed.
     fn update_draft(&mut self, index: usize) {
-        let draft = &mut self.drafts[index];
+        let draft = &mut self.review.drafts[index];
         let Some(comment) = draft.remote.clone() else {
             draft.sync = Sync::Queued;
             self.create_drafts();
@@ -816,7 +831,7 @@ impl App {
             comment,
             body,
         });
-        self.status = "saving draft…".into();
+        self.runtime.status = "saving draft…".into();
     }
 
     /// Sends every draft GitHub has not been told about yet.
@@ -825,18 +840,20 @@ impl App {
     /// it would open a second review, so nothing else leaves until that answer
     /// names the review the rest can join.
     pub(super) fn create_drafts(&mut self) {
-        let Some(pull_request) = self.pr.as_ref().map(|pr| pr.id.clone())
+        let Some(pull_request) =
+            self.review.pr.as_ref().map(|pr| pr.id.clone())
         else {
             return;
         };
 
-        let parent = match &self.pending_review {
+        let parent = match &self.review.pending_review {
             Some(review) => Parent::Review(review.clone()),
             None if self.is_draft_in_flight() => return,
             None => Parent::PullRequest(pull_request),
         };
 
         let queued = self
+            .review
             .drafts
             .iter()
             .filter(|draft| draft.sync == Sync::Queued)
@@ -844,10 +861,11 @@ impl App {
 
         let is_opening = matches!(parent, Parent::PullRequest(_));
         let limit = if is_opening { queued.min(1) } else { queued };
-        self.effects.reserve(limit);
+        self.runtime.effects.reserve(limit);
 
         let mut sent = 0;
         for draft in self
+            .review
             .drafts
             .iter_mut()
             .filter(|draft| draft.sync == Sync::Queued)
@@ -859,18 +877,21 @@ impl App {
             };
 
             draft.sync = Sync::Creating { is_dirty: false };
-            self.effects.push(Effect::Request(request));
+            self.runtime.effects.push(Effect::Request(request));
             sent += 1;
         }
-        self.in_flight += sent;
+        self.runtime.in_flight += sent;
     }
 
     fn is_draft_in_flight(&self) -> bool {
-        self.drafts.iter().any(|draft| draft.sync.is_in_flight())
+        self.review
+            .drafts
+            .iter()
+            .any(|draft| draft.sync.is_in_flight())
     }
 
     pub(super) fn draft_by_id(&self, id: u64) -> Option<usize> {
-        self.drafts.iter().position(|draft| draft.id == id)
+        self.review.drafts.iter().position(|draft| draft.id == id)
     }
 }
 
