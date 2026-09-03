@@ -121,7 +121,7 @@ src/
   cli.rs            Args, ThemeChoice, ImageChoice
   model/            PullRequest, ChangedFile, DiffLine, ReviewThread, Draft, Anchor
   provider/
-    mod.rs          shared types + host trait
+    mod.rs          host trait
     github/
       mod.rs        GitHub client and API operations
       transport.rs  agent, token, HTTP, pagination, error detail

@@ -1,10 +1,9 @@
 use crate::model::{
-    AddedThread, ChangedFile, Meta, NewThread, Parent, ReviewEvent,
+    AddedThread, ChangedFile, Check, CheckState, Meta, NewThread, Parent,
+    PullRequestList, PullRequestListItem, PullRequestListScope, Repo,
+    ReviewEvent, ReviewStatus, Reviewer, Summary, Threads, Verdict,
 };
-use crate::provider::{
-    Check, CheckState, LocatedPullRequest, Provider, PullRequest,
-    PullRequestList, Repo, ReviewStatus, Reviewer, Summary, Threads, Verdict,
-};
+use crate::provider::Provider;
 use crate::text::url::escape_path;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -225,6 +224,7 @@ query($endCursor:String) {
     ) {
       nodes {
         number title isDraft reviewDecision
+        author { login }
         repository { nameWithOwner }
       }
       pageInfo { hasNextPage endCursor }
@@ -352,9 +352,10 @@ enum ReviewDecision {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WireRepositoryPullRequest {
+struct WirePullRequest {
     number: u32,
     title: String,
+    author: Option<WireLogin>,
     is_draft: bool,
     #[serde(deserialize_with = "deserialize_cli_review_decision")]
     review_decision: Option<ReviewDecision>,
@@ -363,10 +364,8 @@ struct WireRepositoryPullRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireUserPullRequest {
-    number: u32,
-    title: String,
-    is_draft: bool,
-    review_decision: Option<ReviewDecision>,
+    #[serde(flatten)]
+    pull: WirePullRequest,
     repository: WireRepository,
 }
 
@@ -715,16 +714,20 @@ const fn review_status(
     }
 }
 
-const fn pull_request(
-    number: u32,
-    title: String,
-    is_draft: bool,
-    decision: Option<&ReviewDecision>,
-) -> PullRequest {
-    PullRequest {
-        number,
-        title,
-        review_status: review_status(is_draft, decision),
+impl WirePullRequest {
+    fn into_item(self, repo: Arc<Repo>) -> PullRequestListItem {
+        PullRequestListItem {
+            target: crate::model::PullRequestTarget {
+                repo,
+                number: self.number,
+            },
+            title: self.title,
+            author: self.author.map(|author| author.login).unwrap_or_default(),
+            review_status: review_status(
+                self.is_draft,
+                self.review_decision.as_ref(),
+            ),
+        }
     }
 }
 
@@ -732,22 +735,16 @@ fn parse_repository_pull_requests(
     repo: Repo,
     bytes: &[u8],
 ) -> Result<PullRequestList> {
-    let pulls: Vec<WireRepositoryPullRequest> =
-        serde_json::from_slice(bytes)
-            .context("failed to parse gh pr list output")?;
+    let pulls: Vec<WirePullRequest> = serde_json::from_slice(bytes)
+        .context("failed to parse gh pr list output")?;
 
-    Ok(PullRequestList::Repository {
-        repo,
-        pulls: pulls
+    let repo = Arc::new(repo);
+
+    Ok(PullRequestList {
+        scope: PullRequestListScope::Repository,
+        items: pulls
             .into_iter()
-            .map(|pull| {
-                pull_request(
-                    pull.number,
-                    pull.title,
-                    pull.is_draft,
-                    pull.review_decision.as_ref(),
-                )
-            })
+            .map(|pull| pull.into_item(Arc::clone(&repo)))
             .collect(),
     })
 }
@@ -759,19 +756,16 @@ fn parse_user_pull_requests(bytes: &[u8]) -> Result<PullRequestList> {
         .into_iter()
         .flat_map(|page| page.data.viewer.pull_requests.nodes)
         .map(|pull| {
-            Ok(LocatedPullRequest {
-                repo: Repo::parse(&pull.repository.name_with_owner)?,
-                pull: pull_request(
-                    pull.number,
-                    pull.title,
-                    pull.is_draft,
-                    pull.review_decision.as_ref(),
-                ),
-            })
+            let repo = Arc::new(Repo::parse(&pull.repository.name_with_owner)?);
+
+            Ok(pull.pull.into_item(repo))
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(PullRequestList::User { pulls })
+    Ok(PullRequestList {
+        scope: PullRequestListScope::User,
+        items: pulls,
+    })
 }
 
 /// Decodes pages in the same shape as `gh api --paginate --slurp`.
@@ -1286,7 +1280,7 @@ async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
             "--limit",
             "100",
             "--json",
-            "number,title,isDraft,reviewDecision",
+            "number,title,author,isDraft,reviewDecision",
         ],
         "gh pr list failed",
     )
@@ -1689,7 +1683,7 @@ mod tests {
         let local = parse_repository_pull_requests(
             Repo::parse("owner/repo").unwrap(),
             br#"[
-                {"number":12,"title":"Draft","isDraft":true,"reviewDecision":null},
+                {"number":12,"title":"Draft","author":{"login":"alice"},"isDraft":true,"reviewDecision":null},
                 {"number":13,"title":"Ready","isDraft":false,"reviewDecision":"APPROVED"},
                 {"number":14,"title":"Changes","isDraft":false,"reviewDecision":"CHANGES_REQUESTED"},
                 {"number":15,"title":"Review","isDraft":false,"reviewDecision":"REVIEW_REQUIRED"},
@@ -1697,26 +1691,24 @@ mod tests {
             ]"#,
         )
         .unwrap();
-        assert!(!local.shows_repositories());
-        assert_eq!(local.row(0).unwrap().number, 12);
+        assert_eq!(local.scope, PullRequestListScope::Repository);
+        assert_eq!(local.items[0].target.number, 12);
+        assert_eq!(local.items[0].author, "alice");
+        assert!(matches!(local.items[0].review_status, ReviewStatus::Draft));
         assert!(matches!(
-            local.row(0).unwrap().review_status,
-            ReviewStatus::Draft
-        ));
-        assert!(matches!(
-            local.row(1).unwrap().review_status,
+            local.items[1].review_status,
             ReviewStatus::Approved
         ));
         assert!(matches!(
-            local.row(2).unwrap().review_status,
+            local.items[2].review_status,
             ReviewStatus::ChangesRequested
         ));
         assert!(matches!(
-            local.row(3).unwrap().review_status,
+            local.items[3].review_status,
             ReviewStatus::ReviewRequired
         ));
         assert!(matches!(
-            local.row(4).unwrap().review_status,
+            local.items[4].review_status,
             ReviewStatus::NoDecision
         ));
 
@@ -1735,6 +1727,7 @@ mod tests {
                             "nodes": [{
                                 "number": 34,
                                 "title": "Global change",
+                                "author": { "login": "bob" },
                                 "isDraft": false,
                                 "reviewDecision": "CHANGES_REQUESTED",
                                 "repository": {
@@ -1751,11 +1744,14 @@ mod tests {
             }]"#,
         )
         .unwrap();
-        assert!(global.shows_repositories());
-        let row = global.row(0).unwrap();
-        assert_eq!(row.repository.unwrap().slug(), "other/repo");
-        assert_eq!(row.title, "Global change");
-        assert!(matches!(row.review_status, ReviewStatus::ChangesRequested));
+        assert_eq!(global.scope, PullRequestListScope::User);
+        assert_eq!(global.items[0].target.repo.slug(), "other/repo");
+        assert_eq!(global.items[0].title, "Global change");
+        assert_eq!(global.items[0].author, "bob");
+        assert!(matches!(
+            global.items[0].review_status,
+            ReviewStatus::ChangesRequested
+        ));
 
         let target = global.select(0).unwrap();
         assert_eq!(target.repo.slug(), "other/repo");

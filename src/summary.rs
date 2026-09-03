@@ -6,7 +6,7 @@
 //! are folded away until asked for: a busy repository reports dozens, and the
 //! tally is what a reader wants first.
 
-use prtui::provider::{Check, CheckState, Reviewer, Summary, Threads, Verdict};
+use prtui::model::{Check, CheckState, Reviewer, Summary, Threads, Verdict};
 use prtui::renderer::Theme;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

@@ -6,7 +6,7 @@ Use [`github/`](github/) as the reference implementation.
    implements the `Provider` trait from [`mod.rs`](mod.rs).
    Keep authentication, API URLs, pagination, and provider-specific errors in
    that module.
-2. Convert API responses into the shared types from `provider/mod.rs`. Keep raw
+2. Convert API responses into the shared types from `../model.rs`. Keep raw
    request and response schemas in the provider's own `wire.rs` rather than
    exposing them to the runtime or application model.
 3. Keep provider consumers generic over `Provider`. The trait returns concrete

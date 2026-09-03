@@ -12,10 +12,11 @@ use prtui::app::keymap::{Keymap, Resolution};
 use prtui::app::link::Origin;
 use prtui::app::mode::Mode;
 use prtui::app::search::Query;
-use prtui::provider::{
-    self, Provider, PullRequestList, PullRequestTarget, Repo, ReviewStatus,
-    Summary,
+use prtui::model::{
+    PullRequestList, PullRequestListItem, PullRequestListScope,
+    PullRequestTarget, Repo, ReviewStatus, Summary,
 };
+use prtui::provider::Provider;
 use prtui::renderer::{Theme, ThemeMode};
 use prtui::ui::{self, SPINNER};
 use prtui::vim::Cursor;
@@ -190,7 +191,7 @@ impl Selector {
     fn target(&self) -> Option<PullRequestTarget> {
         let row = *self.visible.get(self.cursor.index)?;
 
-        self.listing.rows()?.target(row)
+        Some(self.listing.rows()?.get(row)?.target.clone())
     }
 
     /// Reruns the filter, keeping the cursor on the pull request it was on
@@ -206,9 +207,9 @@ impl Selector {
             None => (0..pull_requests.len()).collect(),
             Some(query) => (0..pull_requests.len())
                 .filter(|index| {
-                    pull_requests
-                        .row(*index)
-                        .is_some_and(|row| query.is_match(&row_text(&row)))
+                    pull_requests.get(*index).is_some_and(|item| {
+                        query.is_match(&row_text(item, pull_requests.scope))
+                    })
                 })
                 .collect(),
         };
@@ -385,8 +386,9 @@ impl Selector {
     fn open_panel(&mut self) -> Option<Arc<PullRequestTarget>> {
         let row = *self.visible.get(self.cursor.index)?;
         let pull_requests = self.listing.rows()?;
-        let title = pull_requests.row(row)?.title.to_owned();
-        let target = Arc::new(pull_requests.target(row)?);
+        let item = pull_requests.get(row)?;
+        let title = item.title.clone();
+        let target = Arc::new(item.target.clone());
 
         self.panel = Some(Panel {
             target: Arc::clone(&target),
@@ -559,10 +561,17 @@ fn panel_len(panel: &Panel) -> usize {
 }
 
 /// What a search runs against: everything the row shows.
-fn row_text(row: &provider::PullRequestRow<'_>) -> String {
-    let repository = row.repository.map(Repo::slug).unwrap_or_default();
+fn row_text(item: &PullRequestListItem, scope: PullRequestListScope) -> String {
+    let repository = if scope == PullRequestListScope::User {
+        item.target.repo.slug()
+    } else {
+        String::new()
+    };
 
-    format!("{repository} #{} {}", row.number, row.title)
+    format!(
+        "{repository} #{} {} @{}",
+        item.target.number, item.title, item.author,
+    )
 }
 
 /// Reads the listing behind the selector so the wait is spent in the alternate
@@ -698,12 +707,22 @@ fn draw_table(
 ) {
     let mut headers = vec![Cell::from("REVIEW")];
     let mut widths = vec![Constraint::Length(18)];
-    if pull_requests.shows_repositories() {
+    let has_repository_column =
+        pull_requests.scope == PullRequestListScope::User;
+    if has_repository_column {
         headers.push(Cell::from("REPOSITORY"));
         widths.push(Constraint::Length(28));
     }
-    headers.extend([Cell::from("PR"), Cell::from("TITLE")]);
-    widths.extend([Constraint::Length(8), Constraint::Fill(1)]);
+    headers.extend([
+        Cell::from("PR"),
+        Cell::from("AUTHOR"),
+        Cell::from("TITLE"),
+    ]);
+    widths.extend([
+        Constraint::Length(8),
+        Constraint::Length(16),
+        Constraint::Fill(1),
+    ]);
 
     let header = Row::new(headers)
         .style(
@@ -713,19 +732,21 @@ fn draw_table(
         )
         .bottom_margin(1);
     let rows = selector.visible.iter().filter_map(|index| {
-        let choice = pull_requests.row(*index)?;
-        let mut cells = vec![review_cell(choice.review_status, theme)];
-        if pull_requests.shows_repositories() {
-            let repository =
-                choice.repository.map_or_else(String::new, Repo::slug);
+        let item = pull_requests.get(*index)?;
+        let mut cells = vec![review_cell(&item.review_status, theme)];
+        if has_repository_column {
             cells.push(
-                Cell::from(repository).style(Style::default().fg(theme.muted)),
+                Cell::from(item.target.repo.slug())
+                    .style(Style::default().fg(theme.muted)),
             );
         }
         cells.extend([
-            Cell::from(format!("#{}", choice.number))
+            Cell::from(format!("#{}", item.target.number))
                 .style(Style::default().fg(theme.warning)),
-            Cell::from(choice.title).style(Style::default().fg(theme.code)),
+            Cell::from(item.author.as_str())
+                .style(Style::default().fg(theme.accent)),
+            Cell::from(item.title.as_str())
+                .style(Style::default().fg(theme.code)),
         ]);
 
         Some(Row::new(cells))
@@ -1026,7 +1047,7 @@ fn review_cell(status: &ReviewStatus, theme: Theme) -> Cell<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prtui::provider::{LocatedPullRequest, PullRequest, Repo};
+    use prtui::model;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1034,23 +1055,23 @@ mod tests {
         number: u32,
         title: &str,
         review_status: ReviewStatus,
-    ) -> PullRequest {
-        PullRequest {
-            number,
+    ) -> PullRequestListItem {
+        PullRequestListItem {
+            target: PullRequestTarget {
+                repo: Arc::new(Repo::parse("owner/repo").unwrap()),
+                number,
+            },
             title: title.into(),
+            author: "alice".into(),
             review_status,
         }
     }
 
-    fn located(
-        number: u32,
-        title: &str,
-        review_status: ReviewStatus,
-    ) -> LocatedPullRequest {
-        LocatedPullRequest {
-            repo: Repo::parse("owner/repo").unwrap(),
-            pull: pull(number, title, review_status),
-        }
+    fn list(
+        scope: PullRequestListScope,
+        items: Vec<PullRequestListItem>,
+    ) -> PullRequestList {
+        PullRequestList { scope, items }
     }
 
     fn ready(pull_requests: PullRequestList) -> Selector {
@@ -1061,17 +1082,18 @@ mod tests {
     }
 
     fn many() -> PullRequestList {
-        PullRequestList::User {
-            pulls: (1..=40)
+        list(
+            PullRequestListScope::User,
+            (1..=40)
                 .map(|number| {
-                    located(
+                    pull(
                         number,
                         &format!("Change {number}"),
                         ReviewStatus::Approved,
                     )
                 })
                 .collect(),
-        }
+        )
     }
 
     fn press(selector: &mut Selector, chord: &str) {
@@ -1101,20 +1123,23 @@ mod tests {
 
     #[test]
     fn dashboard_uses_the_full_frame_and_shows_every_review_status() {
-        let pull_requests = PullRequestList::User {
-            pulls: vec![
-                located(1, "Draft", ReviewStatus::Draft),
-                located(2, "Needs work", ReviewStatus::ChangesRequested),
-                located(3, "Needs review", ReviewStatus::ReviewRequired),
-                located(4, "Ready", ReviewStatus::Approved),
-                located(5, "Pending", ReviewStatus::NoDecision),
+        let pull_requests = list(
+            PullRequestListScope::User,
+            vec![
+                pull(1, "Draft", ReviewStatus::Draft),
+                pull(2, "Needs work", ReviewStatus::ChangesRequested),
+                pull(3, "Needs review", ReviewStatus::ReviewRequired),
+                pull(4, "Ready", ReviewStatus::Approved),
+                pull(5, "Pending", ReviewStatus::NoDecision),
             ],
-        };
+        );
         let rendered = render(pull_requests);
 
         assert!(rendered.contains("Open pull requests · 5"));
         assert!(rendered.contains("REVIEW"));
         assert!(rendered.contains("REPOSITORY"));
+        assert!(rendered.contains("AUTHOR"));
+        assert!(rendered.contains("alice"));
         assert!(rendered.contains("DRAFT"));
         assert!(rendered.contains("CHANGES REQUESTED"));
         assert!(rendered.contains("REVIEW REQUIRED"));
@@ -1125,10 +1150,10 @@ mod tests {
 
     #[test]
     fn repository_dashboard_omits_the_redundant_repository_column() {
-        let pull_requests = PullRequestList::Repository {
-            repo: Repo::parse("owner/repo").unwrap(),
-            pulls: vec![pull(42, "Local change", ReviewStatus::Approved)],
-        };
+        let pull_requests = list(
+            PullRequestListScope::Repository,
+            vec![pull(42, "Local change", ReviewStatus::Approved)],
+        );
         let rendered = render(pull_requests);
 
         assert!(!rendered.contains("REPOSITORY"));
@@ -1160,10 +1185,7 @@ mod tests {
 
     #[test]
     fn an_empty_dashboard_cannot_select_a_pull_request() {
-        let pull_requests = PullRequestList::Repository {
-            repo: Repo::parse("owner/repo").unwrap(),
-            pulls: Vec::new(),
-        };
+        let pull_requests = list(PullRequestListScope::Repository, Vec::new());
         assert!(pull_requests.select(0).is_none());
     }
 
@@ -1319,28 +1341,28 @@ mod tests {
             updated_on: "2026-08-20".into(),
             comments: 3,
             checks: vec![
-                provider::Check {
+                model::Check {
                     name: "clippy".into(),
-                    state: provider::CheckState::Failed,
+                    state: model::CheckState::Failed,
                 },
-                provider::Check {
+                model::Check {
                     name: "build".into(),
-                    state: provider::CheckState::Passed,
+                    state: model::CheckState::Passed,
                 },
             ],
             reviewers: vec![
-                provider::Reviewer {
+                model::Reviewer {
                     name: "bob".into(),
                     is_team: false,
-                    verdict: provider::Verdict::ChangesRequested,
+                    verdict: model::Verdict::ChangesRequested,
                 },
-                provider::Reviewer {
+                model::Reviewer {
                     name: "owner/backend".into(),
                     is_team: true,
-                    verdict: provider::Verdict::Waiting,
+                    verdict: model::Verdict::Waiting,
                 },
             ],
-            threads: provider::Threads {
+            threads: model::Threads {
                 unresolved: 4,
                 total: 11,
                 is_truncated: false,

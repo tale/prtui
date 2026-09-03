@@ -271,3 +271,131 @@ pub struct AddedThread {
     pub review: Arc<str>,
     pub comment: Arc<str>,
 }
+
+#[derive(Clone)]
+pub struct Repo {
+    pub host: Option<String>,
+    pub namespace: String,
+    pub name: String,
+}
+
+impl Repo {
+    pub fn slug(&self) -> String {
+        match &self.host {
+            Some(host) => format!("{host}/{}/{}", self.namespace, self.name),
+            None => format!("{}/{}", self.namespace, self.name),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PullRequestTarget {
+    pub repo: Arc<Repo>,
+    pub number: u32,
+}
+
+pub struct PullRequestListItem {
+    pub target: PullRequestTarget,
+    pub title: String,
+    pub author: String,
+    pub review_status: ReviewStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestListScope {
+    Repository,
+    User,
+}
+
+pub struct PullRequestList {
+    pub scope: PullRequestListScope,
+    pub items: Vec<PullRequestListItem>,
+}
+
+impl PullRequestList {
+    pub const fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&PullRequestListItem> {
+        self.items.get(index)
+    }
+
+    pub fn select(mut self, index: usize) -> Option<PullRequestTarget> {
+        if index >= self.items.len() {
+            return None;
+        }
+
+        Some(self.items.swap_remove(index).target)
+    }
+}
+
+pub enum ReviewStatus {
+    Draft,
+    ChangesRequested,
+    ReviewRequired,
+    Approved,
+    NoDecision,
+}
+
+pub struct Summary {
+    pub author: String,
+    pub base_ref: String,
+    pub head_ref: String,
+    pub additions: u32,
+    pub deletions: u32,
+    pub changed_files: u32,
+    pub updated_on: String,
+    pub comments: u32,
+    pub checks: Vec<Check>,
+    pub reviewers: Vec<Reviewer>,
+    pub threads: Threads,
+}
+
+pub struct Check {
+    pub name: String,
+    pub state: CheckState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CheckState {
+    Failed,
+    Running,
+    Passed,
+    Skipped,
+}
+
+pub struct Reviewer {
+    pub name: String,
+    pub is_team: bool,
+    pub verdict: Verdict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Verdict {
+    ChangesRequested,
+    Waiting,
+    Commented,
+    Approved,
+}
+
+impl Verdict {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ChangesRequested => "changes requested",
+            Self::Waiting => "waiting",
+            Self::Commented => "commented",
+            Self::Approved => "approved",
+        }
+    }
+}
+
+pub struct Threads {
+    pub unresolved: u32,
+    pub total: u32,
+    pub is_truncated: bool,
+}

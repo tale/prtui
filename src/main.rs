@@ -7,8 +7,9 @@ use prtui::app::input::InputRouter;
 use prtui::app::link::{Errand, Origin};
 use prtui::app::review::{Failure, Request, Sent};
 use prtui::layout::Layout;
+use prtui::model::{PullRequestTarget, Repo};
+use prtui::provider::Provider;
 use prtui::provider::github::GitHub;
-use prtui::provider::{Provider, PullRequestTarget, Repo};
 use prtui::renderer::{self, Theme, ThemeMode};
 use prtui::ui;
 use std::{
@@ -290,7 +291,10 @@ async fn run<P: Provider>(
                     events,
                     &mut theme,
                     follow_terminal,
-                    PullRequestTarget { repo, number },
+                    PullRequestTarget {
+                        repo: Arc::new(repo),
+                        number,
+                    },
                     provider,
                     ReviewExit::Process,
                 )
@@ -350,7 +354,7 @@ async fn event_loop<P: Provider>(
 ) -> Result<ReviewExit> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let number = target.number;
-    let repo = Arc::new(target.repo);
+    let repo = target.repo;
     let mut app = App::with_theme(*theme);
     app.set_origin(Origin {
         repo_url: provider.repo_url(&repo),
