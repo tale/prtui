@@ -45,7 +45,7 @@ impl App {
 
         // The conversation this just unfolded is not in the drawn row list, so
         // the room it needs has to be measured against a fresh one.
-        let rows = layout.rebuild_rows(self);
+        let rows = layout.rebuild_rows(self.view());
         self.reveal_card(&rows, layout.diff_viewport());
     }
 
@@ -493,7 +493,7 @@ impl App {
 
         // A landing may have opened another file, whose rows the drawn layout
         // knows nothing about.
-        let rows = layout.rebuild_rows(self);
+        let rows = layout.rebuild_rows(self.view());
         self.reveal_card(&rows, layout.diff_viewport());
         self.status.clear();
     }

@@ -959,7 +959,6 @@ dependencies = [
  "similar",
  "syntect",
  "termina",
- "tokio",
  "two-face",
  "unicode-width",
 ]

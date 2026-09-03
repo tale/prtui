@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    ".",
+    "crates/prtui",
     "crates/prtui-core",
     "crates/prtui-github",
     "crates/prtui-tui",
@@ -34,40 +34,8 @@ too_many_lines = "allow"
 future_not_send = "allow"
 multiple_crate_versions = "allow"
 
-[package]
-name = "prtui"
-version.workspace = true
-edition.workspace = true
-description = "A terminal UI for reviewing GitHub pull requests"
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-documentation = "https://github.com/tale/prtui"
-readme = "README.md"
-categories = ["command-line-utilities", "development-tools"]
-keywords = ["github", "pull-request", "review", "tui"]
-exclude = ["/.github", "/.changeset", "/ARCHITECTURE.md", "/docs", "/flake.lock", "/flake.nix", "/knope.toml", "/lefthook.yml", "/mise.toml"]
-
-[lints]
-workspace = true
-
 [profile.release]
 codegen-units = 1
 lto = "fat"
 panic = "abort"
 strip = "symbols"
-
-[dependencies]
-anyhow = "1.0.104"
-clap = { version = "4.6.6", features = ["derive"] }
-prtui-core = { version = "0.2.0", path = "crates/prtui-core" }
-prtui-github = { version = "0.2.0", path = "crates/prtui-github" }
-prtui-tui = { version = "0.2.0", path = "crates/prtui-tui" }
-termina = { version = "0.3.3", features = ["event-stream"] }
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-
-[dev-dependencies]
-devicons = "0.6.13"
-ratatui = { version = "0.30.2", default-features = false, features = ["layout-cache", "termina"] }
-serde_json = "1.0.151"
-unicode-width = "0.2.2"

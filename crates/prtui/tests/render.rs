@@ -29,12 +29,12 @@ const FRAME: Rect = Rect {
 };
 
 fn layout_of(app: &App) -> Layout {
-    Layout::compute(FRAME, app)
+    Layout::compute(FRAME, app.view())
 }
 
 /// How far the open conversation can scroll in a terminal of this size.
 fn thread_limit(app: &App, width: u16, height: u16) -> usize {
-    Layout::compute(Rect::new(0, 0, width, height), app)
+    Layout::compute(Rect::new(0, 0, width, height), app.view())
         .rows
         .body_limit()
 }
@@ -68,8 +68,9 @@ fn summary(app: &App) -> (usize, usize) {
 /// Renders one frame through the path the event loop uses: layout first, then
 /// draw against it.
 fn paint(frame: &mut Frame, app: &App) {
-    let layout = Layout::compute(frame.area(), app);
-    ui::draw(frame, app, &layout, ui::ExitHint::Quit);
+    let view = app.view();
+    let layout = Layout::compute(frame.area(), view);
+    ui::draw(frame, view, &layout, ui::ExitHint::Quit);
 }
 
 /// Drives the app the way the event loop does: raw keys through the keymap.
@@ -121,8 +122,9 @@ fn draw_with_exit(app: &App, exit_hint: ui::ExitHint) -> String {
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     terminal
         .draw(|frame| {
-            let layout = Layout::compute(frame.area(), app);
-            ui::draw(frame, app, &layout, exit_hint);
+            let view = app.view();
+            let layout = Layout::compute(frame.area(), view);
+            ui::draw(frame, view, &layout, exit_hint);
         })
         .unwrap();
 
@@ -1182,7 +1184,7 @@ fn light_mode_uses_light_diff_and_syntax_palettes() {
 
     // A long line folds onto several rows, so where a source line landed is the
     // layout's answer rather than an offset into the patch.
-    let layout = Layout::compute(Rect::new(0, 0, 100, 30), &app);
+    let layout = Layout::compute(Rect::new(0, 0, 100, 30), app.view());
     let screen_row = layout.diff.y as usize + layout.rows.code_row(added);
 
     assert_eq!(
@@ -2333,7 +2335,7 @@ fn composing_paints_the_rows_the_comment_will_cover() {
                 paint(frame, app);
             })
             .unwrap();
-        let row = Layout::compute(FRAME, app).rows.code_row(4) as u16;
+        let row = Layout::compute(FRAME, app.view()).rows.code_row(4) as u16;
 
         terminal
             .backend()
@@ -2520,7 +2522,7 @@ fn single_line_file(text: &str) -> prtui_core::ChangedFile {
 
 /// Rows the open file's line `source` folds across.
 fn fold_count(app: &App, source: usize) -> usize {
-    Layout::compute(FRAME, app)
+    Layout::compute(FRAME, app.view())
         .rows
         .window(0, usize::MAX)
         .iter()
@@ -2563,7 +2565,7 @@ fn only_the_first_row_of_a_folded_line_carries_its_number() {
     app.pane = Pane::Diff;
 
     let (cells, _) = draw_cells(&app);
-    let layout = Layout::compute(FRAME, &app);
+    let layout = Layout::compute(FRAME, app.view());
     let first = layout.diff.y as usize + layout.rows.code_row(1);
 
     let numbered: String = cells[first][..GUTTER].iter().collect();
@@ -2617,7 +2619,7 @@ fn the_cursor_covers_every_row_of_the_line_it_is_on() {
         })
         .unwrap();
 
-    let layout = Layout::compute(FRAME, &app);
+    let layout = Layout::compute(FRAME, app.view());
     let first = layout.diff.y + layout.rows.code_row(1) as u16;
     let buffer = terminal.backend().buffer();
 

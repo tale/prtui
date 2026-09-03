@@ -3,7 +3,7 @@
 use super::{draw_centered, matched_spans, pane_block};
 use crate::app::mode::Mode;
 use crate::app::search::Query;
-use crate::app::{App, Pane, TreeRow};
+use crate::app::{Pane, TreeRow, View as AppView};
 use crate::layout::Layout;
 use crate::layout::tree::{self, Row as TreeNode};
 use crate::renderer::{Theme, ThemeMode};
@@ -23,7 +23,7 @@ const MARKER_WIDTH: usize = 2;
 /// `every_tree_icon_is_one_column` holds to.
 const ICON_WIDTH: usize = 2;
 
-pub(super) fn draw(frame: &mut Frame, app: &App, layout: &Layout) {
+pub(super) fn draw(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
     let Some(pane) = layout.files_pane else {
         return;
     };
@@ -53,8 +53,7 @@ pub(super) fn draw(frame: &mut Frame, app: &App, layout: &Layout) {
         return;
     }
 
-    if let (Some(filter), Some(prompt)) =
-        (app.file_filter.as_ref(), layout.files_prompt)
+    if let (Some(filter), Some(prompt)) = (app.file_filter, layout.files_prompt)
     {
         let query = &filter.lines()[0];
         let (_, cursor_byte) = filter.cursor();

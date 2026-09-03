@@ -11,7 +11,7 @@ use prtui_tui::app::review::{Failure, Request, Sent};
 use prtui_tui::layout::Layout;
 use prtui_tui::renderer::{self, Theme, ThemeMode};
 use prtui_tui::ui;
-use prtui_tui::{highlighter, selector, terminal};
+use prtui_tui::{highlighter, terminal};
 use std::{sync::Arc, time::Duration};
 use termina::escape::csi::{
     Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode,
@@ -19,6 +19,9 @@ use termina::escape::csi::{
 use termina::event::KeyEventKind;
 use termina::{Event, EventStream};
 use tokio::sync::mpsc;
+
+mod dashboard;
+mod external;
 
 #[derive(Parser)]
 #[command(
@@ -309,7 +312,7 @@ async fn run<P: Provider>(
                 .await?;
             }
             Launch::Select(repo) => {
-                let mut dashboard = selector::Dashboard::new(repo, provider);
+                let mut dashboard = dashboard::Dashboard::new(repo, provider);
                 let mut is_preloaded = false;
 
                 loop {
@@ -375,7 +378,7 @@ async fn event_loop<P: Provider>(
     let mut is_dirty = true;
     // Replaced by the first frame's own layout before any input is routed
     // against it, since the loop draws before it reads.
-    let mut layout = Layout::compute(terminal.get_frame().area(), &app);
+    let mut layout = Layout::compute(terminal.get_frame().area(), app.view());
     let mut animation = tokio::time::interval(Duration::from_millis(90));
     animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -421,7 +424,7 @@ async fn event_loop<P: Provider>(
                 }
                 Effect::Errand(Errand::Open(link)) => {
                     let url = resolve_link(provider, &repo, number, &link);
-                    if let Err(err) = terminal::open_url(&url) {
+                    if let Err(err) = external::open_url(&url) {
                         app.status = format!("error: {err}");
                     }
                 }
@@ -526,10 +529,11 @@ fn present_frame(
     app: &App,
     exit_hint: ui::ExitHint,
 ) -> Result<Layout> {
-    let layout = Layout::compute(terminal.get_frame().area(), app);
+    let view = app.view();
+    let layout = Layout::compute(terminal.get_frame().area(), view);
 
     terminal::render(terminal, |frame| {
-        ui::draw(frame, app, &layout, exit_hint);
+        ui::draw(frame, view, &layout, exit_hint);
     })
     .context("drawing a frame")?;
 

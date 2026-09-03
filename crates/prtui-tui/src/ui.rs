@@ -11,7 +11,7 @@ use crate::app::keymap::Reference;
 use crate::app::mode::Mode;
 use crate::app::review::ReviewEvent;
 use crate::app::search::Query;
-use crate::app::{App, Focus, OpenFile, Pane, Target};
+use crate::app::{Focus, OpenFile, Pane, Target, View as AppView};
 use crate::expand::Gap;
 use crate::layout::rows::{self, BodyRow, GUTTER, Row, ThreadState};
 use crate::layout::{Content, Layout};
@@ -46,7 +46,7 @@ impl ExitHint {
 
 pub fn draw(
     frame: &mut Frame,
-    app: &App,
+    app: AppView<'_>,
     layout: &Layout,
     exit_hint: ExitHint,
 ) {
@@ -75,7 +75,7 @@ const HELP_NAME: usize = 20;
 
 // The reference is styled here rather than in the layout because its columns
 // are budgeted against the width it is painted at.
-fn draw_overlay(frame: &mut Frame, app: &App, layout: &Layout) {
+fn draw_overlay(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
     let Some(overlay) = layout.overlay.as_ref() else {
         return;
     };
@@ -192,9 +192,9 @@ fn help_line(line: &Reference, width: usize, theme: Theme) -> Line<'static> {
     }
 }
 
-fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_header(frame: &mut Frame, app: AppView<'_>, area: Rect) {
     let theme = app.theme();
-    let spans = match &app.pr {
+    let spans = match app.pr {
         None => vec![Span::styled(
             " prtui ",
             Style::default()
@@ -313,7 +313,7 @@ fn matched_spans(
     spans
 }
 
-fn draw_diff(frame: &mut Frame, app: &App, layout: &Layout) {
+fn draw_diff(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
     let theme = app.theme();
     let is_focused = app.pane == Pane::Diff;
     let area = layout.diff;
@@ -921,10 +921,9 @@ fn thread_card_line(
 
 /// Sits below the diff rather than over it, so the lines being commented on stay
 /// on screen while typing.
-fn draw_composer(frame: &mut Frame, app: &App, layout: &Layout) {
+fn draw_composer(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
     let theme = app.theme();
-    let (Some(composer), Some(rect)) = (app.composer.as_ref(), layout.composer)
-    else {
+    let (Some(composer), Some(rect)) = (app.composer, layout.composer) else {
         return;
     };
 
@@ -1134,11 +1133,9 @@ const REJECTION_ROWS: usize = 3;
 
 /// Docked where the composer goes, for the same reason: the drafts being shipped
 /// stay readable behind the summary being written about them.
-fn draw_submit(frame: &mut Frame, app: &App, layout: &Layout) {
+fn draw_submit(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
     let theme = app.theme();
-    let (Some(submission), Some(rect)) =
-        (app.submission.as_ref(), layout.submit)
-    else {
+    let (Some(submission), Some(rect)) = (app.submission, layout.submit) else {
         return;
     };
 
@@ -1278,7 +1275,7 @@ pub fn draw_status_bar(
 
 fn draw_bottom_bar(
     frame: &mut Frame,
-    app: &App,
+    app: AppView<'_>,
     layout: &Layout,
     exit_hint: ExitHint,
 ) {
@@ -1330,12 +1327,8 @@ fn draw_bottom_bar(
 
     // The `:` line and the search box are the same widget in the same place,
     // so an open command line covers the query rather than sitting beside it.
-    let prompt = app.command_line.as_ref().map_or_else(
-        || {
-            app.search
-                .as_ref()
-                .map(|editor| ('/', editor, theme.warning))
-        },
+    let prompt = app.command_line.map_or_else(
+        || app.search.map(|editor| ('/', editor, theme.warning)),
         |editor| Some((':', editor, theme.accent)),
     );
 
@@ -1435,7 +1428,6 @@ fn draw_bottom_bar(
                 "esc",
                 if app
                     .submission
-                    .as_ref()
                     .is_some_and(|submission| submission.is_discard_armed)
                 {
                     "discard"
@@ -1451,7 +1443,6 @@ fn draw_bottom_bar(
                 "esc",
                 if app
                     .composer
-                    .as_ref()
                     .is_some_and(|composer| composer.is_discard_armed)
                 {
                     "discard"
@@ -1606,7 +1597,7 @@ fn hint_label(label: &str, bar: Style, theme: Theme) -> Span<'static> {
     Span::styled(format!(" {label} "), bar.fg(theme.dim))
 }
 
-fn draw_loading(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_loading(frame: &mut Frame, app: AppView<'_>, area: Rect) {
     if area.is_empty() {
         return;
     }

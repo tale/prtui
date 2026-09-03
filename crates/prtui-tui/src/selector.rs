@@ -8,16 +8,15 @@ use crate::app::action::Action;
 use crate::app::keymap::{Keymap, Resolution};
 use crate::app::mode::Mode;
 use crate::app::search::Query;
-use crate::renderer::{Theme, ThemeMode};
+use crate::renderer::Theme;
 use crate::summary;
-use crate::terminal;
 use crate::ui::{self, SPINNER};
 use crate::vim::Cursor;
-use anyhow::{Context, Result};
-use prtui_core::Provider;
+#[cfg(test)]
+use prtui_core::Repo;
 use prtui_core::{
     PullRequestList, PullRequestListItem, PullRequestListScope,
-    PullRequestTarget, Repo, ReviewStatus, Summary,
+    PullRequestTarget, ReviewStatus, Summary,
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -27,13 +26,8 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row,
     Table, TableState,
 };
-use std::{sync::Arc, time::Duration};
-use termina::escape::csi::{
-    Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode,
-};
-use termina::event::{KeyCode, KeyEvent, KeyEventKind, Modifiers};
-use termina::{Event, EventStream};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 /// The selector's keymap, in the same notation as the review surface's.
 ///
@@ -77,13 +71,21 @@ const PANEL_WIDTH: u16 = 80;
 /// than as a second pane.
 const PANEL_MARGIN: u16 = 2;
 
-enum Message {
-    Listed(Result<PullRequestList>),
-    Summarized(Arc<PullRequestTarget>, Result<Summary>),
+/// Result of work the selector asked the runtime to execute.
+pub enum Message {
+    /// A completed pull request listing.
+    Listed(Result<PullRequestList, String>),
+    /// A completed summary for the named pull request.
+    Summarized(Arc<PullRequestTarget>, Result<Summary, String>),
+    /// An external action that failed.
+    Failed(String),
 }
 
-enum Effect {
+/// Work the selector delegates to the runtime.
+pub enum Effect {
+    /// Fetch the summary for a pull request.
     Summarize(Arc<PullRequestTarget>),
+    /// Open a pull request in the browser.
     Open(PullRequestTarget),
 }
 
@@ -153,8 +155,15 @@ pub struct Selector {
     chosen: Option<PullRequestTarget>,
 }
 
+impl Default for Selector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Selector {
-    fn new() -> Self {
+    /// Creates a selector waiting for its initial listing.
+    pub fn new() -> Self {
         Self {
             listing: Listing::Loading,
             cursor: Cursor::default(),
@@ -171,7 +180,8 @@ impl Selector {
         }
     }
 
-    const fn is_waiting(&self) -> bool {
+    /// Whether a loading animation should advance.
+    pub const fn is_waiting(&self) -> bool {
         self.listing.is_loading()
             || matches!(
                 self.panel,
@@ -231,7 +241,8 @@ impl Selector {
         self.cursor.jump(landing, self.visible.len(), viewport);
     }
 
-    fn receive(&mut self, message: Message, viewport: usize) {
+    /// Applies one runtime result.
+    pub fn receive(&mut self, message: Message, viewport: usize) {
         match message {
             Message::Listed(Ok(pull_requests)) => {
                 self.listing = Listing::Ready(pull_requests);
@@ -243,6 +254,7 @@ impl Selector {
             Message::Summarized(target, summarized) => {
                 self.set_summary(&target, summarized);
             }
+            Message::Failed(error) => self.status = format!("error: {error}"),
         }
     }
 
@@ -252,7 +264,7 @@ impl Selector {
     fn set_summary(
         &mut self,
         target: &PullRequestTarget,
-        summarized: Result<Summary>,
+        summarized: Result<Summary, String>,
     ) {
         let Some(panel) = self.panel.as_mut() else {
             return;
@@ -272,7 +284,8 @@ impl Selector {
 
     /// One keystroke, resolved against the keymap and applied. Answers with the
     /// pull request to summarize, which the caller fetches.
-    fn press(&mut self, key: KeyEvent, viewport: usize) -> Option<Effect> {
+    /// Applies one key and returns any work it requests.
+    pub fn press(&mut self, key: KeyEvent, viewport: usize) -> Option<Effect> {
         match self.keymap.resolve(self.mode, key) {
             Resolution::Action(action) => self.apply(&action, viewport),
             Resolution::Pending => None,
@@ -433,118 +446,28 @@ impl Selector {
 
     /// A review returns to the list exactly where it left it. Only transient
     /// panel state is discarded; the listing, filter and cursor remain useful.
-    fn resume(&mut self) {
+    /// Restores the list after returning from a review.
+    pub fn resume(&mut self) {
         self.is_done = false;
         self.chosen = None;
         self.panel = None;
         self.status.clear();
         self.set_mode(Mode::Normal);
     }
-}
 
-/// One dashboard session. It owns its listing so opening a review and coming
-/// back does not throw away the reader's filter or place in the list.
-pub struct Dashboard<P: Provider> {
-    selector: Selector,
-    provider: P,
-    tx: mpsc::UnboundedSender<Message>,
-    rx: mpsc::UnboundedReceiver<Message>,
-}
-
-impl<P: Provider> Dashboard<P> {
-    pub fn new(repo: Option<Repo>, provider: P) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        spawn_listing(repo, provider, tx.clone());
-
-        Self {
-            selector: Selector::new(),
-            provider,
-            tx,
-            rx,
-        }
+    /// Advances the loading animation by one frame.
+    pub const fn advance_loading(&mut self) {
+        self.loading_frame = self.loading_frame.wrapping_add(1);
     }
 
-    pub async fn select(
-        &mut self,
-        terminal: &mut terminal::AppTerminal,
-        events: &mut EventStream,
-        theme: &mut Theme,
-        follow_terminal: bool,
-    ) -> Result<Option<PullRequestTarget>> {
-        self.selector.resume();
-        let mut animation = tokio::time::interval(Duration::from_millis(90));
-        animation
-            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    /// Whether selection has finished for this visit.
+    pub const fn is_done(&self) -> bool {
+        self.is_done
+    }
 
-        while !self.selector.is_done {
-            terminal::render(terminal, |frame| {
-                draw(frame, &self.selector, *theme);
-            })
-            .context("drawing pull request selector")?;
-
-            let viewport =
-                viewport(terminal.get_frame().area(), &self.selector);
-
-            let event = tokio::select! {
-                _ = animation.tick(), if self.selector.is_waiting() => {
-                    self.selector.loading_frame =
-                        self.selector.loading_frame.wrapping_add(1);
-                    continue;
-                }
-                message = self.rx.recv() => {
-                    let Some(message) = message else {
-                        anyhow::bail!("selector message channel closed");
-                    };
-                    self.selector.receive(message, viewport);
-                    continue;
-                }
-                event = terminal::next_event(events) => {
-                    event
-                        .context("terminal event stream closed")?
-                        .context("reading terminal event")?
-                }
-            };
-
-            match event {
-                Event::Key(key)
-                    if matches!(
-                        key.kind,
-                        KeyEventKind::Press | KeyEventKind::Repeat
-                    ) =>
-                {
-                    match self.selector.press(key, viewport) {
-                        Some(Effect::Summarize(target)) => {
-                            spawn_summary(
-                                target,
-                                self.provider,
-                                self.tx.clone(),
-                            );
-                        }
-                        Some(Effect::Open(target)) => {
-                            let url = self
-                                .provider
-                                .pull_request_url(&target.repo, target.number);
-                            if let Err(err) = terminal::open_url(&url) {
-                                self.selector.status = format!("error: {err}");
-                            }
-                        }
-                        None => {}
-                    }
-                }
-                Event::Csi(Csi::Mode(CsiMode::ReportTheme(terminal_mode)))
-                    if follow_terminal =>
-                {
-                    let mode = match terminal_mode {
-                        TerminalThemeMode::Dark => ThemeMode::Dark,
-                        TerminalThemeMode::Light => ThemeMode::Light,
-                    };
-                    *theme = Theme::for_mode(mode);
-                }
-                _ => {}
-            }
-        }
-
-        Ok(self.selector.chosen.take())
+    /// Takes the pull request chosen by the reader.
+    pub const fn take_chosen(&mut self) -> Option<PullRequestTarget> {
+        self.chosen.take()
     }
 }
 
@@ -571,37 +494,8 @@ fn row_text(item: &PullRequestListItem, scope: PullRequestListScope) -> String {
     )
 }
 
-/// Reads the listing behind the selector so the wait is spent in the alternate
-/// screen rather than in front of it.
-fn spawn_listing<P: Provider>(
-    repo: Option<Repo>,
-    provider: P,
-    tx: mpsc::UnboundedSender<Message>,
-) {
-    tokio::spawn(async move {
-        let listed = match repo {
-            Some(repo) => provider.repository_pull_requests(repo).await,
-            None => provider.user_pull_requests().await,
-        };
-
-        let _ = tx.send(Message::Listed(listed));
-    });
-}
-
-fn spawn_summary<P: Provider>(
-    target: Arc<PullRequestTarget>,
-    provider: P,
-    tx: mpsc::UnboundedSender<Message>,
-) {
-    tokio::spawn(async move {
-        let summarized =
-            provider.fetch_summary(&target.repo, target.number).await;
-        let _ = tx.send(Message::Summarized(target, summarized));
-    });
-}
-
 /// The rows a motion counts: the table's, or the panel's while one is open.
-fn viewport(area: Rect, selector: &Selector) -> usize {
+pub fn viewport(area: Rect, selector: &Selector) -> usize {
     let (body, _) = split(area);
 
     match selector.panel {
@@ -624,7 +518,8 @@ fn split(area: Rect) -> (Rect, Rect) {
     (panes[0], panes[1])
 }
 
-fn draw(frame: &mut Frame, selector: &Selector, theme: Theme) {
+/// Draws the selector without mutating its state.
+pub fn draw(frame: &mut Frame, selector: &Selector, theme: Theme) {
     let (area, status) = split(frame.area());
     draw_status(frame, selector, status, theme);
 
@@ -1174,10 +1069,7 @@ mod tests {
     #[test]
     fn a_failed_listing_stays_on_screen() {
         let mut selector = Selector::new();
-        selector.receive(
-            Message::Listed(Err(anyhow::anyhow!("gh pr list failed"))),
-            10,
-        );
+        selector.receive(Message::Listed(Err("gh pr list failed".into())), 10);
 
         assert!(
             render_selector(&selector).contains("error: gh pr list failed")

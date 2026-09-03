@@ -13,6 +13,9 @@ mod navigation;
 mod prompt;
 pub mod review;
 pub mod search;
+mod view;
+
+pub use view::View;
 
 use crate::expand::{self, Gap, Place, Reveal};
 use crate::layout::Layout;
@@ -1224,5 +1227,10 @@ impl App {
             }
             Action::EditLine(edit) => self.edit_line(edit, layout),
         }
+    }
+
+    /// Borrows the immutable state consumed by layout and rendering.
+    pub fn view(&self) -> View<'_> {
+        View::new(self)
     }
 }

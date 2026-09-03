@@ -1,0 +1,30 @@
+[package]
+name = "prtui"
+version.workspace = true
+edition.workspace = true
+description = "A terminal UI for reviewing GitHub pull requests"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://github.com/tale/prtui"
+readme = "../../README.md"
+categories = ["command-line-utilities", "development-tools"]
+keywords = ["github", "pull-request", "review", "tui"]
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+prtui-core = { version = "0.2.0", path = "../prtui-core" }
+prtui-github = { version = "0.2.0", path = "../prtui-github" }
+prtui-tui = { version = "0.2.0", path = "../prtui-tui" }
+termina = { version = "0.3.3", features = ["event-stream"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[dev-dependencies]
+devicons = "0.6.13"
+ratatui = { version = "0.30.2", default-features = false, features = ["layout-cache", "termina"] }
+serde_json = "1.0.151"
+unicode-width = "0.2.2"

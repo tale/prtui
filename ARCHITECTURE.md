@@ -89,14 +89,12 @@ Five invariants. The tree follows from them; these are the actual contract.
 Each is tagged with the step that delivers it, so a rule that is still a target
 is not mistaken for one the code already keeps.
 
-1. **The view never mutates.** *(Invariant live since A and B; the signature
-   below arrives with E.)* `view::draw(&Frame, &App, &Layout) ->
-   Vec<Placement>`. Anything render would otherwise discover is computed by
-   layout instead. Today this is `ui::draw(&mut Frame, &App, &Layout)`, which
-   already takes the model immutably; E is what renames it and lifts kitty
-   placements into the return.
+1. **The view never mutates.** *(Live since A and B.)* Layout and rendering
+   consume `app::View<'_>`, an explicit borrowed projection of `App`. Building
+   it clones and allocates nothing, and the view cannot reach state that was
+   not deliberately projected.
 2. **Layout is a value, computed once per frame.** *(Live since B.)*
-   `Layout::compute(area, &App)` holds the pane rects, the viewport heights,
+   `Layout::compute(area, app.view())` holds the pane rects, viewport heights,
    and the virtual row list. The loop computes it and hands the same value to
    both `apply` and `draw`. This is what removes the `viewport_height`
    parameter and the `- 3`.
@@ -116,9 +114,11 @@ is not mistaken for one the code already keeps.
 ## Tree
 
 ```
-src/
-  main.rs             CLI, provider switch, generic runtime
 crates/
+  prtui/src/
+    main.rs            CLI, provider switch, review runtime
+    dashboard.rs       selector runtime and provider effects
+    external.rs        operating-system actions
   prtui-core/src/
     lib.rs            provider-neutral view model
     provider.rs       statically-dispatched host contract
@@ -128,7 +128,7 @@ crates/
     wire.rs           deserialize structs + model conversion
   prtui-tui/src/
     app/              state machine and effects
-    selector.rs       selector state, rendering, and runtime
+    selector.rs       selector state, effects, and rendering
     highlighter.rs    syntax worker
     layout/           frame layout and virtual rows
     renderer/         markdown, syntax highlighting, theme
@@ -140,8 +140,9 @@ crates/
 
 `prtui-core` is the only shared boundary: providers depend on it to produce the
 models, while `prtui-tui` depends on it to consume them. Provider crates and
-the TUI do not depend on one another. The root binary chooses a concrete
-provider once, then enters a generic runtime with static dispatch.
+the TUI do not depend on one another. The `prtui` executable chooses a concrete
+provider once, then enters a generic runtime with static dispatch. The
+workspace root is only Cargo configuration.
 
 ## The virtual row model
 
@@ -171,10 +172,8 @@ same frame-behind relationship the old `viewport_height` had; the difference is
 that it is now a single named value the action and the renderer share, rather
 than an integer re-derived in two places.
 
-`view::draw` returns its image placements instead of the escape sequences, so it
-needs only `&App`. The loop pairs the placements with `Images::frame_commands`
-between `terminal::render` and `terminal::present`, which keeps both inside one
-synchronized update while leaving the render pass read-only.
+`ui::draw` receives only the borrowed `app::View` and the already-computed
+`Layout`, keeping the render pass read-only.
 
 ## Order of work
 

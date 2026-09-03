@@ -2,14 +2,14 @@ pub mod overview;
 pub mod rows;
 pub mod tree;
 
-use crate::app::App;
+use crate::app::View as AppView;
 use crate::app::keymap::Reference;
 use crate::app::mode::Mode;
 use crate::app::search::Query;
 use crate::expand::Gap;
 use ratatui::layout::{Constraint, Direction, Rect};
 use ratatui::text::Line;
-use rows::{Rows, View};
+use rows::{Rows, View as RowView};
 use tree::Tree;
 
 /// Narrowest the diff is allowed to get before the tree stops taking room.
@@ -47,7 +47,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn compute(area: Rect, app: &App) -> Self {
+    pub fn compute(area: Rect, app: AppView<'_>) -> Self {
         let panes = split(
             area,
             Direction::Vertical,
@@ -121,7 +121,7 @@ impl Layout {
     /// the ground under this one. Opening another file or unfolding a card
     /// changes the list, and a scroll measured against the drawn one lands
     /// nowhere near what the reader asked for.
-    pub fn rebuild_rows(&self, app: &App) -> Rows {
+    pub fn rebuild_rows(&self, app: AppView<'_>) -> Rows {
         build_rows(app, self.diff, &app.gaps())
     }
 
@@ -226,7 +226,7 @@ const OVERLAY_WIDTH: u16 = 80;
 /// below so it reads as a panel rather than as a second pane.
 const OVERLAY_MARGIN: u16 = 2;
 
-fn build_overlay(app: &App, body: Rect) -> Option<Overlay> {
+fn build_overlay(app: AppView<'_>, body: Rect) -> Option<Overlay> {
     let mode = app.overlay_mode()?;
 
     let width = OVERLAY_WIDTH.min(body.width);
@@ -245,8 +245,8 @@ fn build_overlay(app: &App, body: Rect) -> Option<Overlay> {
         (
             " overview ",
             Content::Prose(overview::build(
-                app.pr.as_ref(),
-                &app.discussion,
+                app.pr,
+                app.discussion,
                 inner.width as usize,
                 app.theme(),
             )),
@@ -284,7 +284,7 @@ const SUBMIT_HEIGHT: u16 = COMPOSER_HEIGHT + 2;
 /// commented on visible: the diff viewport shrinks, so the cursor scrolls into
 /// what is left of it. Only one editor is ever open, and the submit form wins if
 /// both somehow are.
-fn dock(diff: Rect, app: &App) -> (Rect, Option<Rect>, Option<Rect>) {
+fn dock(diff: Rect, app: AppView<'_>) -> (Rect, Option<Rect>, Option<Rect>) {
     let wanted = if app.submission.is_some() {
         SUBMIT_HEIGHT
     } else if app.composer.is_some() {
@@ -310,7 +310,7 @@ fn dock(diff: Rect, app: &App) -> (Rect, Option<Rect>, Option<Rect>) {
 }
 
 /// The file tree, scrolled to wherever the cursor is resting.
-fn build_tree(app: &App, height: usize) -> Tree {
+fn build_tree(app: AppView<'_>, height: usize) -> Tree {
     let unresolved: Vec<usize> = app
         .files
         .iter()
@@ -318,7 +318,7 @@ fn build_tree(app: &App, height: usize) -> Tree {
         .collect();
 
     let mut tree = Tree::build(
-        &app.files,
+        app.files,
         &app.filtered_file_indices(),
         app.collapsed(),
         app.file_filter.is_some(),
@@ -334,7 +334,7 @@ fn build_tree(app: &App, height: usize) -> Tree {
     tree
 }
 
-fn build_rows(app: &App, diff: Rect, gaps: &[Gap]) -> Rows {
+fn build_rows(app: AppView<'_>, diff: Rect, gaps: &[Gap]) -> Rows {
     let Some(open) = app.open() else {
         return Rows::empty();
     };
@@ -342,9 +342,9 @@ fn build_rows(app: &App, diff: Rect, gaps: &[Gap]) -> Rows {
     Rows::build(
         open.patch,
         open.threads,
-        View {
-            focused: app.focused_card.as_ref(),
-            expanded: app.expanded_card.as_ref(),
+        RowView {
+            focused: app.focused_card,
+            expanded: app.expanded_card,
             scroll: app.thread_scroll,
             width: diff.width as usize,
             window: rows::thread_window(diff.height as usize),
@@ -386,6 +386,7 @@ fn files_width(total: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
 
     #[test]
     fn the_tree_never_starves_the_diff() {
@@ -398,7 +399,8 @@ mod tests {
 
     #[test]
     fn splits_a_frame_into_header_body_and_status() {
-        let layout = Layout::compute(Rect::new(0, 0, 120, 30), &App::new());
+        let app = App::new();
+        let layout = Layout::compute(Rect::new(0, 0, 120, 30), app.view());
 
         assert_eq!(layout.header, Rect::new(0, 0, 120, 1));
         assert_eq!(layout.status, Rect::new(0, 29, 120, 1));

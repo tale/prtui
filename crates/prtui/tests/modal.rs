@@ -25,7 +25,7 @@ const FRAME: Rect = Rect {
 };
 
 fn layout_of(app: &App) -> Layout {
-    Layout::compute(FRAME, app)
+    Layout::compute(FRAME, app.view())
 }
 
 /// One key through the router, laid out the way the event loop lays it out.

@@ -8,7 +8,6 @@ use std::future::poll_fn;
 use std::io::{self, Write};
 use std::ops::AsyncFnOnce;
 use std::pin::Pin;
-use std::process::Stdio;
 use std::rc::Rc;
 use std::time::Duration;
 use termina::escape::csi::{
@@ -192,25 +191,6 @@ pub fn copy(terminal: &mut AppTerminal, text: &str) -> io::Result<()> {
         Osc::SetSelection(Selection::CLIPBOARD, text)
     )?;
     terminal.backend_mut().flush()
-}
-
-/// Opens a URL without tying the application model to an operating system.
-pub fn open_url(url: &str) -> Result<()> {
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-
-    tokio::process::Command::new(opener)
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("failed to spawn {opener}"))?;
-
-    Ok(())
 }
 
 /// Waits for the next terminal event.
