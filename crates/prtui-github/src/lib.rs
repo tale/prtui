@@ -3,8 +3,9 @@ use anyhow::{Context, Result, bail};
 use prtui_core::Provider;
 use prtui_core::{
     AddedThread, ChangedFile, Check, CheckState, Meta, NewThread, Parent,
-    PullRequestList, PullRequestListItem, PullRequestListScope, Repo,
-    ReviewEvent, ReviewStatus, Reviewer, Summary, Threads, Verdict,
+    PullRequestList, PullRequestListItem, PullRequestListScope,
+    PullRequestOverview, Repo, ReviewEvent, ReviewStatus, Reviewer, Summary,
+    Threads, Verdict,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -165,19 +166,21 @@ mutation($input:AddPullRequestReviewInput!) {
 }
 ";
 
-/// Everything the selector's summary panel reads, in one round trip.
-///
-/// Connections are capped at their first page: the panel counts rather than
-/// lists, and a review with more than a hundred threads says `100+` instead of
-/// paying for pages nobody reads.
+/// Summary facts, plus prose when the caller has no metadata of its own.
+/// Thread counts stay capped and say `100+`; overview discussion is paginated.
 const SUMMARY_QUERY: &str = r"
-query($owner:String!, $repo:String!, $number:Int!) {
+query($owner:String!, $repo:String!, $number:Int!, $includeProse:Boolean!) {
   repository(owner:$owner, name:$repo) {
     pullRequest(number:$number) {
       additions deletions changedFiles updatedAt
       author { login }
       baseRefName headRefName
+      body @include(if:$includeProse)
       comments { totalCount }
+      discussion: comments(first:100) @include(if:$includeProse) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id fullDatabaseId author { login } body createdAt }
+      }
       reviewRequests(first:100) {
         nodes {
           requestedReviewer {
@@ -404,6 +407,28 @@ struct WireSummaryData {
 #[serde(rename_all = "camelCase")]
 struct WireSummaryRepository {
     pull_request: Option<WireSummary>,
+}
+
+#[derive(Deserialize)]
+struct WireOverviewResponse {
+    data: WireOverviewData,
+}
+
+#[derive(Deserialize)]
+struct WireOverviewData {
+    repository: Option<WireOverviewRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireOverviewRepository {
+    pull_request: Option<WireOverview>,
+}
+
+#[derive(Deserialize)]
+struct WireOverview {
+    body: String,
+    discussion: WireNodes<wire::WireDiscussionComment>,
 }
 
 #[derive(Deserialize)]
@@ -665,6 +690,23 @@ fn parse_summary(val: &serde_json::Value) -> Result<Summary> {
             pr.review_requests.nodes,
         ),
         threads,
+    })
+}
+
+fn parse_overview(val: &serde_json::Value) -> Result<PullRequestOverview> {
+    let summary = parse_summary(val)?;
+    let response = WireOverviewResponse::deserialize(val)
+        .context("unexpected pull request overview response")?;
+    let pr = response
+        .data
+        .repository
+        .and_then(|repository| repository.pull_request)
+        .context("PR not found in graphql response")?;
+
+    Ok(PullRequestOverview {
+        summary,
+        body: pr.body,
+        discussion: pr.discussion.nodes.into_iter().map(Into::into).collect(),
     })
 }
 
@@ -979,6 +1021,38 @@ fn complete_meta(
     }
 
     Ok(())
+}
+
+fn complete_overview(
+    url: &str,
+    token: Option<&str>,
+    variables: &serde_json::Value,
+    value: &mut serde_json::Value,
+) -> Result<()> {
+    let pr = &mut value["data"]["repository"]["pullRequest"];
+    if pr.is_null() {
+        return Ok(());
+    }
+    let discussion = &mut pr["discussion"];
+
+    drain(discussion, |after| {
+        let variables = serde_json::json!({
+            "owner": variables["owner"],
+            "repo": variables["repo"],
+            "number": variables["number"],
+            "after": after,
+        });
+        let mut answer = graphql(
+            url,
+            token,
+            MORE_DISCUSSION_QUERY,
+            &variables,
+            "fetching pull request comments",
+            Retry::Transient,
+        )?;
+
+        Ok(answer["data"]["repository"]["pullRequest"]["discussion"].take())
+    })
 }
 
 /// PR metadata plus review threads, in one round trip plus whatever the caps
@@ -1302,6 +1376,7 @@ async fn fetch_summary(repo: &Repo, number: u32) -> Result<Summary> {
         "owner": repo.namespace,
         "repo": repo.name,
         "number": number,
+        "includeProse": false,
     });
 
     tokio::task::spawn_blocking(move || {
@@ -1318,6 +1393,36 @@ async fn fetch_summary(repo: &Repo, number: u32) -> Result<Summary> {
     })
     .await
     .context("summary fetch panicked")?
+}
+
+async fn fetch_overview(
+    repo: &Repo,
+    number: u32,
+) -> Result<PullRequestOverview> {
+    let token = token(repo.host.as_deref()).await;
+    let url = graphql_url(repo);
+    let variables = serde_json::json!({
+        "owner": repo.namespace,
+        "repo": repo.name,
+        "number": number,
+        "includeProse": true,
+    });
+
+    tokio::task::spawn_blocking(move || {
+        let mut value = graphql(
+            &url,
+            token.as_deref(),
+            SUMMARY_QUERY,
+            &variables,
+            "fetching the pull request overview",
+            Retry::Transient,
+        )?;
+        complete_overview(&url, token.as_deref(), &variables, &mut value)?;
+
+        parse_overview(&value)
+    })
+    .await
+    .context("overview fetch panicked")?
 }
 
 async fn user_pull_requests() -> Result<PullRequestList> {
@@ -1426,6 +1531,14 @@ impl Provider for GitHub {
 
     async fn fetch_summary(self, repo: &Repo, number: u32) -> Result<Summary> {
         fetch_summary(repo, number).await
+    }
+
+    async fn fetch_overview(
+        self,
+        repo: &Repo,
+        number: u32,
+    ) -> Result<PullRequestOverview> {
+        fetch_overview(repo, number).await
     }
 
     async fn fetch_files(
@@ -1911,6 +2024,41 @@ mod tests {
         assert!(summary.checks.is_empty());
         assert!(summary.reviewers.is_empty());
         assert_eq!(summary.author, "");
+    }
+
+    #[test]
+    fn an_overview_carries_the_description_and_discussion() {
+        let value = serde_json::json!({
+            "data": { "repository": { "pullRequest": {
+                "additions": 1,
+                "deletions": 0,
+                "changedFiles": 1,
+                "updatedAt": "2026-09-03T20:04:55Z",
+                "author": { "login": "tale" },
+                "baseRefName": "main",
+                "headRefName": "overview",
+                "body": "Why this exists",
+                "comments": { "totalCount": 1 },
+                "discussion": { "nodes": [{
+                    "id": "IC_1",
+                    "fullDatabaseId": "7",
+                    "author": { "login": "alice" },
+                    "body": "ship it",
+                    "createdAt": "2026-09-03T20:04:55Z"
+                }] },
+                "reviewRequests": { "nodes": [] },
+                "latestReviews": { "nodes": [] },
+                "reviewThreads": { "totalCount": 0, "nodes": [] },
+                "commits": { "nodes": [] }
+            } } }
+        });
+
+        let overview = parse_overview(&value).unwrap();
+
+        assert_eq!(overview.summary.author, "tale");
+        assert_eq!(overview.body, "Why this exists");
+        assert_eq!(overview.discussion.len(), 1);
+        assert_eq!(overview.discussion[0].author, "alice");
     }
 
     /// More threads than the one page counted makes the tally a floor, which

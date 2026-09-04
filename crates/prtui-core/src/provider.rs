@@ -5,8 +5,8 @@
 //! formats behind an implementation of [`Provider`].
 
 use crate::{
-    AddedThread, ChangedFile, Meta, NewThread, Parent, PullRequestList, Repo,
-    ReviewEvent, Summary,
+    AddedThread, ChangedFile, Meta, NewThread, Parent, PullRequestList,
+    PullRequestOverview, Repo, ReviewEvent, Summary,
 };
 use anyhow::Result;
 use std::{future::Future, sync::Arc};
@@ -62,6 +62,13 @@ pub trait Provider: Copy + Send + 'static {
         repo: &Repo,
         number: u32,
     ) -> impl Future<Output = Result<Summary>> + Send;
+
+    /// Fetches the summary and complete prose shown by the selector overview.
+    fn fetch_overview(
+        self,
+        repo: &Repo,
+        number: u32,
+    ) -> impl Future<Output = Result<PullRequestOverview>> + Send;
 
     /// Fetches all changed files and their parsed patches.
     fn fetch_files(

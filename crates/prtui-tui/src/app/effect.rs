@@ -6,13 +6,14 @@
 
 use super::link::Errand;
 use super::review::{Failure, Request, Sent};
-use prtui_core::{ChangedFile, Meta};
+use prtui_core::{ChangedFile, Meta, Summary};
 use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Effect {
     FetchFiles,
     FetchMeta { generation: u64 },
+    FetchSummary { generation: u64 },
     ProbeOutage,
     Request(Request),
     HighlightAll,
@@ -26,6 +27,10 @@ pub enum Message {
     Meta {
         generation: u64,
         outcome: Result<Box<Meta>, String>,
+    },
+    Summary {
+        generation: u64,
+        outcome: Result<Box<Summary>, String>,
     },
     Request(Result<Sent, Failure>),
     Outage(String),

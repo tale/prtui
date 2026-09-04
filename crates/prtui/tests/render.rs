@@ -2,7 +2,7 @@ use prtui_core::{LineKind, Side};
 use prtui_github::{parse_files, parse_meta};
 use prtui_tui::app::action::{Action, Motion};
 use prtui_tui::app::draft::Parent;
-use prtui_tui::app::effect::Message as AppMessage;
+use prtui_tui::app::effect::{Effect, Message as AppMessage};
 use prtui_tui::app::input::DispatchResult;
 use prtui_tui::app::input::InputRouter;
 use prtui_tui::app::review::{Failure, Request, Sent};
@@ -318,6 +318,42 @@ fn load() -> App {
     app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
     app.set_meta(parse_meta(include_bytes!("fixtures/meta.json")).unwrap());
     app
+}
+
+fn overview_summary() -> prtui_core::Summary {
+    prtui_core::Summary {
+        author: "tale".into(),
+        base_ref: "main".into(),
+        head_ref: "work".into(),
+        additions: 12,
+        deletions: 3,
+        changed_files: 2,
+        updated_on: "2026-09-03".into(),
+        comments: 1,
+        checks: Vec::new(),
+        reviewers: Vec::new(),
+        threads: prtui_core::Threads {
+            unresolved: 1,
+            total: 1,
+            is_truncated: false,
+        },
+    }
+}
+
+fn open_overview(app: &mut App) {
+    press(app, "K");
+    let generation = app
+        .take_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::FetchSummary { generation } => Some(generation),
+            _ => None,
+        })
+        .expect("opening the overview fetches its summary");
+    app.receive(AppMessage::Summary {
+        generation,
+        outcome: Ok(Box::new(overview_summary())),
+    });
 }
 
 /// The file at head, long enough for any gap in the fixture to open into it.
@@ -1605,12 +1641,14 @@ fn the_reference_scrolls_to_its_last_group() {
 #[test]
 fn the_overview_paints_the_description_over_the_panes() {
     let mut app = load();
-    press(&mut app, "o");
+    open_overview(&mut app);
 
     let rendered = draw(&app);
     assert!(rendered.contains("OVERVIEW"), "{rendered}");
     assert!(rendered.contains("overview"), "{rendered}");
+    assert!(rendered.contains("@tale  main ← work"), "{rendered}");
     assert!(rendered.contains("Relates #8995"), "{rendered}");
+    assert!(!rendered.contains("Held off on tests"), "{rendered}");
     assert!(rendered.contains("esc close"), "{rendered}");
 }
 
@@ -1618,13 +1656,28 @@ fn the_overview_paints_the_description_over_the_panes() {
 #[test]
 fn the_overview_scrolls_into_the_discussion() {
     let mut app = load();
-    press(&mut app, "o");
+    open_overview(&mut app);
     assert!(!draw(&app).contains("@malept"));
 
     press(&mut app, "G");
     let rendered = draw(&app);
     assert!(rendered.contains("@malept"), "{rendered}");
     assert!(rendered.contains("2024-05-14"), "{rendered}");
+}
+
+#[test]
+fn the_overview_opens_one_collapsed_comment_at_a_time() {
+    let mut app = load();
+    open_overview(&mut app);
+    press(&mut app, "G");
+    assert!(!draw(&app).contains("Agreed. Opened"));
+
+    let mut input = InputRouter::default();
+    send(&mut input, &mut app, KeyCode::Enter.into());
+
+    let rendered = draw(&app);
+    assert!(rendered.contains("Agreed. Opened"), "{rendered}");
+    assert!(!rendered.contains("Held off on tests"), "{rendered}");
 }
 
 /// The bar truncates from the tail, so the key that leads to every other key
@@ -1649,7 +1702,7 @@ fn the_bar_offers_a_way_out_and_a_way_in() {
     let rendered = draw(&app);
 
     assert!(rendered.contains("q quit"), "{rendered}");
-    assert!(rendered.contains("o description"), "{rendered}");
+    assert!(rendered.contains("K description"), "{rendered}");
     assert!(rendered.contains("? keys"), "{rendered}");
 
     let returning = draw_with_exit(&app, ui::ExitHint::Back);

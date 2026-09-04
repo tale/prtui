@@ -194,10 +194,9 @@ impl App {
 
     pub(super) fn travel(&mut self, motion: Motion, layout: &Layout) {
         if self.navigation.mode.is_overlay() {
-            self.navigation.overlay_scroll = step(
+            self.navigation.overlay.apply(
                 motion,
-                self.navigation.overlay_scroll,
-                layout.overlay_limit() + 1,
+                layout.overlay_len(),
                 layout.overlay_viewport(),
             );
             return;

@@ -8,15 +8,16 @@ use crate::app::action::Action;
 use crate::app::keymap::{Keymap, Resolution};
 use crate::app::mode::Mode;
 use crate::app::search::Query;
+use crate::layout::{panel_area, panel_inner};
+use crate::overview::{self, FoldState};
 use crate::renderer::Theme;
-use crate::summary;
 use crate::ui::{self, SPINNER};
 use crate::vim::Cursor;
 #[cfg(test)]
 use prtui_core::Repo;
 use prtui_core::{
     PullRequestList, PullRequestListItem, PullRequestListScope,
-    PullRequestTarget, ReviewStatus, Summary,
+    PullRequestOverview, PullRequestTarget, ReviewStatus,
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -63,28 +64,20 @@ const KEYS: &[(&str, &str, &str)] = &[
 /// and the blank row under it.
 const HEADER_ROWS: u16 = 2;
 
-/// Widest the summary panel gets before it stops using the whole terminal,
-/// matching the panels the review surface opens.
-const PANEL_WIDTH: u16 = 80;
-
-/// Rows of margin above and below the panel, so it reads as a panel rather
-/// than as a second pane.
-const PANEL_MARGIN: u16 = 2;
-
 /// Result of work the selector asked the runtime to execute.
 pub enum Message {
     /// A completed pull request listing.
     Listed(Result<PullRequestList, String>),
-    /// A completed summary for the named pull request.
-    Summarized(Arc<PullRequestTarget>, Result<Summary, String>),
+    /// A completed overview for the named pull request.
+    Overview(Arc<PullRequestTarget>, Result<PullRequestOverview, String>),
     /// An external action that failed.
     Failed(String),
 }
 
 /// Work the selector delegates to the runtime.
 pub enum Effect {
-    /// Fetch the summary for a pull request.
-    Summarize(Arc<PullRequestTarget>),
+    /// Fetch an overview for a pull request.
+    FetchOverview(Arc<PullRequestTarget>),
     /// Open a pull request in the browser.
     Open(PullRequestTarget),
 }
@@ -114,7 +107,7 @@ impl Listing {
     }
 }
 
-/// The summary panel, pinned to the pull request it was opened on the way an
+/// The overview panel, pinned to the pull request it was opened on the way an
 /// editor's hover is pinned to the symbol under the cursor.
 struct Panel {
     target: Arc<PullRequestTarget>,
@@ -127,12 +120,12 @@ struct Panel {
     cursor: Cursor,
     /// A busy repository reports dozens of checks, so they open on the tally
     /// and the list is asked for with `za`.
-    is_checks_open: bool,
+    folds: FoldState,
 }
 
 enum PanelState {
     Loading,
-    Ready(Box<Summary>),
+    Ready(Box<PullRequestOverview>),
     Failed(String),
 }
 
@@ -242,7 +235,8 @@ impl Selector {
     }
 
     /// Applies one runtime result.
-    pub fn receive(&mut self, message: Message, viewport: usize) {
+    pub fn receive(&mut self, message: Message, metrics: Metrics) {
+        let viewport = metrics.viewport;
         match message {
             Message::Listed(Ok(pull_requests)) => {
                 self.listing = Listing::Ready(pull_requests);
@@ -251,8 +245,8 @@ impl Selector {
             Message::Listed(Err(err)) => {
                 self.listing = Listing::Failed(format!("error: {err}"));
             }
-            Message::Summarized(target, summarized) => {
-                self.set_summary(&target, summarized);
+            Message::Overview(target, overview) => {
+                self.set_overview(&target, overview);
             }
             Message::Failed(error) => self.status = format!("error: {error}"),
         }
@@ -261,10 +255,10 @@ impl Selector {
     /// A summary that arrives after the panel moved on belongs to nothing on
     /// screen, so it is dropped rather than painted over the panel that
     /// replaced it.
-    fn set_summary(
+    fn set_overview(
         &mut self,
         target: &PullRequestTarget,
-        summarized: Result<Summary, String>,
+        overview: Result<PullRequestOverview, String>,
     ) {
         let Some(panel) = self.panel.as_mut() else {
             return;
@@ -276,8 +270,8 @@ impl Selector {
             return;
         }
 
-        panel.state = match summarized {
-            Ok(summary) => PanelState::Ready(Box::new(summary)),
+        panel.state = match overview {
+            Ok(overview) => PanelState::Ready(Box::new(overview)),
             Err(err) => PanelState::Failed(format!("error: {err}")),
         };
     }
@@ -285,23 +279,25 @@ impl Selector {
     /// One keystroke, resolved against the keymap and applied. Answers with the
     /// pull request to summarize, which the caller fetches.
     /// Applies one key and returns any work it requests.
-    pub fn press(&mut self, key: KeyEvent, viewport: usize) -> Option<Effect> {
+    pub fn press(&mut self, key: KeyEvent, metrics: Metrics) -> Option<Effect> {
         match self.keymap.resolve(self.mode, key) {
-            Resolution::Action(action) => self.apply(&action, viewport),
+            Resolution::Action(action) => self.apply(&action, metrics),
             Resolution::Pending => None,
             Resolution::Unbound => {
-                self.type_key(key, viewport);
+                self.type_key(key, metrics.viewport);
                 None
             }
         }
     }
 
-    fn apply(&mut self, action: &Action, viewport: usize) -> Option<Effect> {
+    fn apply(&mut self, action: &Action, metrics: Metrics) -> Option<Effect> {
+        let viewport = metrics.viewport;
         match action {
             Action::Move(motion) => {
                 match self.panel.as_mut() {
                     Some(panel) => {
-                        let len = panel_len(panel);
+                        let len =
+                            panel_len(panel, metrics.width, metrics.theme);
                         panel.cursor.apply(*motion, len, viewport);
                     }
                     None => {
@@ -316,8 +312,10 @@ impl Selector {
             }
             // Inside the panel `<CR>` opens what the cursor is on, which is
             // the fold on its own row and the pull request everywhere else.
-            Action::Activate if self.is_on_fold() => {
-                self.toggle_checks();
+            Action::Activate
+                if self.is_on_fold(metrics.width, metrics.theme) =>
+            {
+                self.toggle_fold(metrics);
             }
             Action::Activate => {
                 self.chosen = self.target();
@@ -334,14 +332,14 @@ impl Selector {
                 self.sync_visible(viewport);
             }
             Action::OpenOverview => {
-                return self.open_panel().map(Effect::Summarize);
+                return self.open_panel().map(Effect::FetchOverview);
             }
             Action::OpenInBrowser => {
                 let target = self.target()?;
                 return Some(Effect::Open(target));
             }
             Action::CloseOverlay => self.close_panel(),
-            Action::Expand(_) => self.toggle_checks(),
+            Action::Expand(_) => self.toggle_fold(metrics),
             // The line starts empty each time: the list it narrows is right
             // there, so there is nothing to recall.
             Action::StartFind => {
@@ -407,7 +405,7 @@ impl Selector {
             title,
             state: PanelState::Loading,
             cursor: Cursor::default(),
-            is_checks_open: false,
+            folds: FoldState::default(),
         });
         self.set_mode(Mode::Overview);
 
@@ -415,28 +413,33 @@ impl Selector {
     }
 
     /// Whether the panel's cursor is parked on the checks fold.
-    fn is_on_fold(&self) -> bool {
+    fn is_on_fold(&self, width: usize, theme: Theme) -> bool {
         let Some(panel) = self.panel.as_ref() else {
             return false;
         };
-        let PanelState::Ready(summary) = &panel.state else {
+        let PanelState::Ready(_) = &panel.state else {
             return false;
         };
 
-        panel.cursor.index == summary::checks_row(summary)
+        panel_rows(panel, width, theme, self.loading_frame)
+            .fold_at(panel.cursor.index)
+            .is_some()
     }
 
-    fn toggle_checks(&mut self) {
+    fn toggle_fold(&mut self, metrics: Metrics) {
         let Some(panel) = self.panel.as_mut() else {
             return;
         };
+        let rows =
+            panel_rows(panel, metrics.width, metrics.theme, self.loading_frame);
+        let Some(fold) = rows.fold_at(panel.cursor.index).cloned() else {
+            return;
+        };
 
-        panel.is_checks_open = !panel.is_checks_open;
+        panel.folds.toggle(&fold);
 
-        // The fold keeps the row it opened from under the cursor; only what
-        // is below it moves.
-        let len = panel_len(panel);
-        panel.cursor.jump(panel.cursor.index.min(len), len, len);
+        let len = panel_len(panel, metrics.width, metrics.theme);
+        panel.cursor.jump(panel.cursor.index, len, metrics.viewport);
     }
 
     fn close_panel(&mut self) {
@@ -471,12 +474,40 @@ impl Selector {
     }
 }
 
-fn panel_len(panel: &Panel) -> usize {
+fn panel_len(panel: &Panel, width: usize, theme: Theme) -> usize {
+    panel_rows(panel, width, theme, 0).len()
+}
+
+fn panel_rows(
+    panel: &Panel,
+    width: usize,
+    theme: Theme,
+    loading_frame: usize,
+) -> overview::Rows {
     match &panel.state {
-        PanelState::Ready(summary) => {
-            summary::line_count(summary, panel.is_checks_open)
-        }
-        _ => 1,
+        PanelState::Ready(value) => overview::build(
+            &value.summary,
+            &value.body,
+            &value.discussion,
+            &panel.folds,
+            width,
+            theme,
+        ),
+        PanelState::Loading => overview::Rows {
+            lines: vec![spinner_line(
+                loading_frame,
+                "loading the overview",
+                theme,
+            )],
+            folds: vec![None],
+        },
+        PanelState::Failed(failure) => overview::Rows {
+            lines: vec![Line::styled(
+                failure.clone(),
+                Style::default().fg(theme.danger),
+            )],
+            folds: vec![None],
+        },
     }
 }
 
@@ -494,17 +525,36 @@ fn row_text(item: &PullRequestListItem, scope: PullRequestListScope) -> String {
     )
 }
 
-/// The rows a motion counts: the table's, or the panel's while one is open.
-pub fn viewport(area: Rect, selector: &Selector) -> usize {
+/// Frame dimensions needed to route selector input.
+#[derive(Clone, Copy)]
+pub struct Metrics {
+    viewport: usize,
+    width: usize,
+    theme: Theme,
+}
+
+/// Measures the active selector surface.
+pub fn metrics(area: Rect, selector: &Selector, theme: Theme) -> Metrics {
     let (body, _) = split(area);
 
-    match selector.panel {
-        Some(_) => panel_area(body).height.saturating_sub(4) as usize,
-        None => body
-            .height
-            .saturating_sub(2)
-            .saturating_sub(HEADER_ROWS)
-            .into(),
+    let (viewport, width) = match selector.panel {
+        Some(_) => {
+            let inner = panel_inner(panel_area(body));
+            (inner.height as usize, inner.width as usize)
+        }
+        None => (
+            body.height
+                .saturating_sub(2)
+                .saturating_sub(HEADER_ROWS)
+                .into(),
+            0,
+        ),
+    };
+
+    Metrics {
+        viewport,
+        width,
+        theme,
     }
 }
 
@@ -521,7 +571,8 @@ fn split(area: Rect) -> (Rect, Rect) {
 /// Draws the selector without mutating its state.
 pub fn draw(frame: &mut Frame, selector: &Selector, theme: Theme) {
     let (area, status) = split(frame.area());
-    draw_status(frame, selector, status, theme);
+    let metrics = metrics(frame.area(), selector, theme);
+    draw_status(frame, selector, status, metrics, theme);
 
     let title = match selector.listing.rows() {
         Some(pull_requests) => {
@@ -586,7 +637,7 @@ pub fn draw(frame: &mut Frame, selector: &Selector, theme: Theme) {
         );
     }
 
-    draw_panel(frame, selector, area, theme);
+    draw_panel(frame, selector, area, metrics, theme);
 }
 
 fn draw_table(
@@ -662,24 +713,11 @@ fn draw_table(
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-/// The panel floats over the list rather than docking beside it: it is read,
-/// and the row it belongs to is the one the cursor is already parked on.
-fn panel_area(area: Rect) -> Rect {
-    let width = PANEL_WIDTH.min(area.width);
-    let height = area.height.saturating_sub(PANEL_MARGIN * 2).max(3);
-
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    }
-}
-
 fn draw_panel(
     frame: &mut Frame,
     selector: &Selector,
     area: Rect,
+    metrics: Metrics,
     theme: Theme,
 ) {
     let Some(panel) = selector.panel.as_ref() else {
@@ -687,10 +725,11 @@ fn draw_panel(
     };
 
     let outer = panel_area(area);
-    let actions = if selector.is_on_fold() {
-        " ↵ checks · gx browser · esc close "
+    let rows = panel_rows(panel, metrics.width, theme, selector.loading_frame);
+    let actions = if rows.fold_at(panel.cursor.index).is_some() {
+        " ↵/za toggle · gx browser · esc close "
     } else {
-        " ↵ review · gx browser · za checks · esc close "
+        " ↵ review · gx browser · esc close "
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -713,41 +752,23 @@ fn draw_panel(
         );
     // A row of padding inside each border, so the panel reads as a panel
     // rather than as a second pane.
-    let inner = Rect {
-        x: outer.x + 2,
-        y: outer.y + 2,
-        width: outer.width.saturating_sub(4),
-        height: outer.height.saturating_sub(4),
-    };
+    let inner = panel_inner(outer);
 
     frame.render_widget(Clear, outer);
     frame.render_widget(block, outer);
 
-    let lines = match &panel.state {
-        PanelState::Ready(summary) => {
-            summary::build(summary, panel.is_checks_open, theme)
-        }
-        PanelState::Loading => vec![spinner_line(
-            selector.loading_frame,
-            "loading the summary",
-            theme,
-        )],
-        PanelState::Failed(failure) => vec![Line::styled(
-            failure.clone(),
-            Style::default().fg(theme.danger),
-        )],
-    };
     // The cursor is a painted row rather than a terminal cursor, the way the
     // tree and the diff carry theirs.
     let width = inner.width as usize;
-    let visible: Vec<Line> = lines
+    let visible: Vec<Line> = rows
+        .lines
         .into_iter()
         .enumerate()
         .skip(panel.cursor.scroll)
         .take(inner.height as usize)
         .map(|(row, line)| {
             if row == panel.cursor.index {
-                cursor_line(line, width, theme)
+                ui::cursor_line(line, width, theme)
             } else {
                 line
             }
@@ -757,27 +778,13 @@ fn draw_panel(
     frame.render_widget(Paragraph::new(visible), inner);
 }
 
-/// One row under the panel's cursor, padded so the highlight covers the width
-/// rather than stopping at the text.
-fn cursor_line(
-    mut line: Line<'static>,
-    width: usize,
-    theme: Theme,
-) -> Line<'static> {
-    let pad = width.saturating_sub(line.width());
-    if pad > 0 {
-        line.spans.push(Span::raw(" ".repeat(pad)));
-    }
-
-    line.style(Style::default().bg(theme.cursor))
-}
-
 /// The same bar the review surface wears, so the mode, the `/` line and the
 /// keys sit where the reader already looks for them.
 fn draw_status(
     frame: &mut Frame,
     selector: &Selector,
     area: Rect,
+    metrics: Metrics,
     theme: Theme,
 ) {
     let bar = ui::bar_style(theme);
@@ -789,7 +796,10 @@ fn draw_status(
             .push(Span::styled(selector.filter.clone(), bar.fg(theme.heading)));
     }
 
-    spans.push(Span::styled(position(selector), bar.fg(theme.muted)));
+    spans.push(Span::styled(
+        position(selector, metrics),
+        bar.fg(theme.muted),
+    ));
 
     let pending = selector.keymap.pending_hint();
     if !pending.is_empty() {
@@ -814,7 +824,14 @@ fn draw_status(
     }
 
     let left_width = Line::from(spans.clone()).width();
-    ui::draw_status_bar(frame, area, spans, key_hints(selector), &[], theme);
+    ui::draw_status_bar(
+        frame,
+        area,
+        spans,
+        key_hints(selector, metrics),
+        &[],
+        theme,
+    );
 
     // The `/` line is typed on the bar, so the terminal cursor belongs there.
     if selector.mode == Mode::Filter {
@@ -827,9 +844,13 @@ fn draw_status(
 
 /// Where the cursor is: in the panel while one is open, otherwise in the list,
 /// counted against what the filter left.
-fn position(selector: &Selector) -> String {
+fn position(selector: &Selector, metrics: Metrics) -> String {
     if let Some(panel) = selector.panel.as_ref() {
-        return format!("  {}/{}", panel.cursor.index + 1, panel_len(panel));
+        return format!(
+            "  {}/{}",
+            panel.cursor.index + 1,
+            panel_len(panel, metrics.width, metrics.theme)
+        );
     }
 
     if selector.visible.is_empty() {
@@ -846,16 +867,19 @@ fn position(selector: &Selector) -> String {
     format!("{where_in} of {}", selector.listing.len())
 }
 
-fn key_hints(selector: &Selector) -> &'static [(&'static str, &'static str)] {
+fn key_hints(
+    selector: &Selector,
+    metrics: Metrics,
+) -> &'static [(&'static str, &'static str)] {
     if selector.mode == Mode::Filter {
         return &[("↑↓", "select"), ("↵", "apply"), ("esc", "cancel")];
     }
 
     if selector.panel.is_some() {
-        if selector.is_on_fold() {
+        if selector.is_on_fold(metrics.width, metrics.theme) {
             return &[
                 ("j/k", "move"),
-                ("↵", "checks"),
+                ("↵/za", "toggle"),
                 ("gx", "browser"),
                 ("esc", "close"),
             ];
@@ -863,7 +887,6 @@ fn key_hints(selector: &Selector) -> &'static [(&'static str, &'static str)] {
 
         return &[
             ("j/k", "move"),
-            ("za", "checks"),
             ("↵", "review"),
             ("gx", "browser"),
             ("esc", "close"),
@@ -972,7 +995,8 @@ mod tests {
 
     fn ready(pull_requests: PullRequestList) -> Selector {
         let mut selector = Selector::new();
-        selector.receive(Message::Listed(Ok(pull_requests)), 10);
+        let metrics = frame_metrics(&selector);
+        selector.receive(Message::Listed(Ok(pull_requests)), metrics);
 
         selector
     }
@@ -999,7 +1023,7 @@ mod tests {
     }
 
     fn press_key(selector: &mut Selector, code: KeyCode, modifiers: Modifiers) {
-        selector.press(KeyEvent::new(code, modifiers), 10);
+        selector.press(KeyEvent::new(code, modifiers), frame_metrics(selector));
     }
 
     fn render(pull_requests: PullRequestList) -> String {
@@ -1007,7 +1031,8 @@ mod tests {
     }
 
     fn render_selector(selector: &Selector) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
+        let mut terminal =
+            Terminal::new(TestBackend::new(FRAME.width, FRAME.height)).unwrap();
         terminal
             .draw(|frame| {
                 draw(frame, selector, Theme::dark());
@@ -1015,6 +1040,17 @@ mod tests {
             .unwrap();
 
         terminal.backend().to_string()
+    }
+
+    const FRAME: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 110,
+        height: 20,
+    };
+
+    fn frame_metrics(selector: &Selector) -> Metrics {
+        metrics(FRAME, selector, Theme::dark())
     }
 
     #[test]
@@ -1069,7 +1105,9 @@ mod tests {
     #[test]
     fn a_failed_listing_stays_on_screen() {
         let mut selector = Selector::new();
-        selector.receive(Message::Listed(Err("gh pr list failed".into())), 10);
+        let metrics = frame_metrics(&selector);
+        selector
+            .receive(Message::Listed(Err("gh pr list failed".into())), metrics);
 
         assert!(
             render_selector(&selector).contains("error: gh pr list failed")
@@ -1104,9 +1142,10 @@ mod tests {
     #[test]
     fn a_half_page_scroll_moves_by_the_viewport() {
         let mut selector = ready(many());
+        let half = frame_metrics(&selector).viewport / 2;
 
         press_key(&mut selector, KeyCode::Char('d'), Modifiers::CONTROL);
-        assert_eq!(selector.cursor.index, 5);
+        assert_eq!(selector.cursor.index, half);
 
         press_key(&mut selector, KeyCode::Char('u'), Modifiers::CONTROL);
         assert_eq!(selector.cursor.index, 0);
@@ -1208,23 +1247,23 @@ mod tests {
         let mut selector = ready(many());
 
         press(&mut selector, "5G");
-        let Some(Effect::Summarize(asked)) =
-            selector.apply(&Action::OpenOverview, 10)
+        let Some(Effect::FetchOverview(asked)) =
+            selector.apply(&Action::OpenOverview, frame_metrics(&selector))
         else {
             panic!("K did not request a summary");
         };
 
         assert_eq!(asked.number, 5);
         assert_eq!(selector.mode, Mode::Overview);
-        assert!(render_selector(&selector).contains("loading the summary"));
+        assert!(render_selector(&selector).contains("loading the overview"));
 
         press(&mut selector, "K");
         assert!(selector.panel.is_none());
         assert_eq!(selector.mode, Mode::Normal);
     }
 
-    fn summary() -> Summary {
-        Summary {
+    fn summary() -> model::Summary {
+        model::Summary {
             author: "tale".into(),
             base_ref: "main".into(),
             head_ref: "rows".into(),
@@ -1263,19 +1302,34 @@ mod tests {
         }
     }
 
-    fn summarized(selector: &mut Selector) {
-        let Some(Effect::Summarize(target)) =
-            selector.apply(&Action::OpenOverview, 10)
+    fn overview_ready(selector: &mut Selector) {
+        let Some(Effect::FetchOverview(target)) =
+            selector.apply(&Action::OpenOverview, frame_metrics(selector))
         else {
             panic!("K did not request a summary");
         };
-        selector.receive(Message::Summarized(target, Ok(summary())), 10);
+        let overview = PullRequestOverview {
+            summary: summary(),
+            body: "Why this change exists.".into(),
+            discussion: vec![model::Comment {
+                id: "IC_1".into(),
+                reply_target: None,
+                author: "alice".into(),
+                body: "ship it".into(),
+                created_at: "2026-09-03T10:00:00Z".into(),
+                is_pending: false,
+            }],
+        };
+        selector.receive(
+            Message::Overview(target, Ok(overview)),
+            frame_metrics(selector),
+        );
     }
 
     #[test]
     fn the_panel_names_the_reviewers_and_folds_the_checks() {
         let mut selector = ready(many());
-        summarized(&mut selector);
+        overview_ready(&mut selector);
         let rendered = render_selector(&selector);
 
         assert!(rendered.contains("owner/repo #1"));
@@ -1286,6 +1340,23 @@ mod tests {
         assert!(rendered.contains("@owner/backend (team)"));
         assert!(rendered.contains("1 failed · 1 passed"));
         assert!(!rendered.contains("clippy"));
+
+        press(&mut selector, "G");
+        let rendered = render_selector(&selector);
+        assert!(rendered.contains("@alice · 2026-09-03"));
+        assert!(!rendered.contains("ship it"));
+    }
+
+    #[test]
+    fn enter_opens_the_comment_under_the_cursor() {
+        let mut selector = ready(many());
+        overview_ready(&mut selector);
+
+        press(&mut selector, "G");
+        press_key(&mut selector, KeyCode::Enter, Modifiers::NONE);
+
+        assert!(render_selector(&selector).contains("ship it"));
+        assert!(!selector.is_done);
     }
 
     /// The fold is what the cursor is on, so `<CR>` opens it there and the
@@ -1293,10 +1364,11 @@ mod tests {
     #[test]
     fn the_checks_open_from_the_row_the_cursor_is_on() {
         let mut selector = ready(many());
-        summarized(&mut selector);
+        overview_ready(&mut selector);
 
         press(&mut selector, "7G");
-        assert!(selector.is_on_fold());
+        let metrics = frame_metrics(&selector);
+        assert!(selector.is_on_fold(metrics.width, metrics.theme));
 
         press_key(&mut selector, KeyCode::Enter, Modifiers::NONE);
         assert!(!selector.is_done);
@@ -1305,15 +1377,16 @@ mod tests {
 
         assert!(rendered.contains("clippy"));
         assert!(rendered.contains("build"));
-        assert!(rendered.contains("↵ checks"));
+        assert!(rendered.contains("↵/za toggle"));
     }
 
-    /// `za` works wherever the cursor is parked.
+    /// `za` toggles the fold under the cursor.
     #[test]
-    fn za_folds_the_checks_from_anywhere_in_the_panel() {
+    fn za_folds_the_checks_under_the_cursor() {
         let mut selector = ready(many());
-        summarized(&mut selector);
+        overview_ready(&mut selector);
 
+        press(&mut selector, "7G");
         press(&mut selector, "za");
         assert!(render_selector(&selector).contains("clippy"));
 
@@ -1325,7 +1398,7 @@ mod tests {
     #[test]
     fn the_panel_carries_a_cursor_rather_than_a_scroll() {
         let mut selector = ready(many());
-        summarized(&mut selector);
+        overview_ready(&mut selector);
 
         press(&mut selector, "3j");
         let panel = selector.panel.as_ref().unwrap();
@@ -1339,7 +1412,7 @@ mod tests {
     #[test]
     fn motions_scroll_the_panel_rather_than_the_list() {
         let mut selector = ready(many());
-        selector.apply(&Action::OpenOverview, 10);
+        selector.apply(&Action::OpenOverview, frame_metrics(&selector));
         let row = selector.cursor.index;
 
         press(&mut selector, "j");
@@ -1363,8 +1436,10 @@ mod tests {
         let mut selector = ready(many());
 
         press_key(&mut selector, KeyCode::Char('g'), Modifiers::NONE);
-        let effect = selector
-            .press(KeyEvent::new(KeyCode::Char('x'), Modifiers::NONE), 10);
+        let effect = selector.press(
+            KeyEvent::new(KeyCode::Char('x'), Modifiers::NONE),
+            frame_metrics(&selector),
+        );
 
         let Some(Effect::Open(target)) = effect else {
             panic!("gx did not produce a browser action");

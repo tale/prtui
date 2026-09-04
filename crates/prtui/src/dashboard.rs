@@ -50,8 +50,11 @@ impl<P: Provider> Dashboard<P> {
             })
             .context("drawing pull request selector")?;
 
-            let viewport =
-                selector::viewport(terminal.get_frame().area(), &self.selector);
+            let metrics = selector::metrics(
+                terminal.get_frame().area(),
+                &self.selector,
+                *theme,
+            );
 
             let event = tokio::select! {
                 _ = animation.tick(), if self.selector.is_waiting() => {
@@ -62,7 +65,7 @@ impl<P: Provider> Dashboard<P> {
                     let Some(message) = message else {
                         bail!("selector message channel closed");
                     };
-                    self.selector.receive(message, viewport);
+                    self.selector.receive(message, metrics);
                     continue;
                 }
                 event = terminal::next_event(events) => {
@@ -79,7 +82,7 @@ impl<P: Provider> Dashboard<P> {
                         KeyEventKind::Press | KeyEventKind::Repeat
                     ) =>
                 {
-                    let effect = self.selector.press(key, viewport);
+                    let effect = self.selector.press(key, metrics);
                     self.execute(effect);
                 }
                 Event::Csi(Csi::Mode(CsiMode::ReportTheme(terminal_mode)))
@@ -100,8 +103,8 @@ impl<P: Provider> Dashboard<P> {
 
     fn execute(&self, effect: Option<Effect>) {
         match effect {
-            Some(Effect::Summarize(target)) => {
-                spawn_summary(target, self.provider, self.tx.clone());
+            Some(Effect::FetchOverview(target)) => {
+                spawn_overview(target, self.provider, self.tx.clone());
             }
             Some(Effect::Open(target)) => {
                 let url =
@@ -131,16 +134,16 @@ fn spawn_listing<P: Provider>(
     });
 }
 
-fn spawn_summary<P: Provider>(
+fn spawn_overview<P: Provider>(
     target: Arc<PullRequestTarget>,
     provider: P,
     tx: mpsc::UnboundedSender<Message>,
 ) {
     tokio::spawn(async move {
-        let summarized = provider
-            .fetch_summary(&target.repo, target.number)
+        let overview = provider
+            .fetch_overview(&target.repo, target.number)
             .await
             .map_err(|err| err.to_string());
-        let _ = tx.send(Message::Summarized(target, summarized));
+        let _ = tx.send(Message::Overview(target, overview));
     });
 }

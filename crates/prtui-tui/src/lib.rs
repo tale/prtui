@@ -4,6 +4,7 @@ pub mod app;
 pub mod expand;
 pub mod highlighter;
 pub mod layout;
+mod overview;
 pub mod renderer;
 pub mod selector;
 pub mod summary;

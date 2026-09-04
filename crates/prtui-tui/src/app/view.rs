@@ -3,10 +3,14 @@ use super::editor::CommentEditor;
 use super::keymap::Keymap;
 use super::mode::{Mode, Selection};
 use super::review::Submission;
-use super::{App, Card, Composer, Focus, OpenFile, Pane, TreeRow};
+use super::{
+    App, Card, Composer, Focus, OpenFile, Pane, SummaryState, TreeRow,
+};
 use crate::expand::Gap;
 use crate::layout::Layout;
+use crate::overview::FoldState;
 use crate::renderer::Theme;
+use crate::vim::Cursor;
 use prtui_core::{ChangedFile, Comment, PullRequest, ReviewThread};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -41,7 +45,9 @@ pub struct View<'a> {
     pub status: &'a str,
     pub loading_frame: usize,
     pub in_flight: usize,
-    pub overlay_scroll: usize,
+    pub overlay: Cursor,
+    pub(crate) summary: &'a SummaryState,
+    pub(crate) overview_folds: &'a FoldState,
 }
 
 impl<'a> View<'a> {
@@ -71,7 +77,9 @@ impl<'a> View<'a> {
             status: &app.runtime.status,
             loading_frame: app.runtime.loading_frame,
             in_flight: app.runtime.in_flight,
-            overlay_scroll: app.navigation.overlay_scroll,
+            overlay: app.navigation.overlay,
+            summary: &app.review.summary,
+            overview_folds: &app.navigation.overview_folds,
         }
     }
 

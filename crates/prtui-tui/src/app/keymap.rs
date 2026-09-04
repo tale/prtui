@@ -36,7 +36,7 @@ const DEFAULT: &[(&str, &str, &str)] = &[
     ("n", "/", "find"),
     ("n", ":", "command-line"),
     ("n", "?", "help"),
-    ("n", "o", "overview"),
+    ("n", "K", "overview"),
     ("n", "gx", "open"),
     ("nv", "y", "yank"),
     ("n", "v", "enter-visual"),
@@ -107,10 +107,13 @@ const DEFAULT: &[(&str, &str, &str)] = &[
     ("ho", "/", "find"),
     ("ho", "n", "next-match"),
     ("ho", "N", "prev-match"),
+    ("o", "za", "expand-all"),
+    ("o", "<CR>", "activate"),
+    ("o", "gx", "open"),
     ("ho", "<Esc>", "close-panel"),
     ("ho", "q", "close-panel"),
     ("h", "?", "close-panel"),
-    ("o", "o", "close-panel"),
+    ("o", "K", "close-panel"),
 ];
 
 /// One line of the key reference.

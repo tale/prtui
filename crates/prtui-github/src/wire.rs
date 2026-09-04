@@ -292,7 +292,7 @@ impl RestId {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WireDiscussionComment {
+pub struct WireDiscussionComment {
     id: String,
     full_database_id: Option<RestId>,
     author: Option<Author>,

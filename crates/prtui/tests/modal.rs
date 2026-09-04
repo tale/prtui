@@ -2,6 +2,7 @@ use prtui_github::{parse_files, parse_meta};
 use prtui_tui::app::action::{Action, Motion};
 use prtui_tui::app::draft::{Parent, Side, Sync};
 use prtui_tui::app::editor::CommentEditor;
+use prtui_tui::app::effect::{Effect, Message as AppMessage};
 use prtui_tui::app::input::{DispatchResult, InputRouter};
 use prtui_tui::app::keymap::{Keymap, Resolution};
 use prtui_tui::app::link::{Errand, Link};
@@ -226,6 +227,42 @@ fn load() -> App {
         .unwrap();
     select_file(&mut app, selected);
     app
+}
+
+fn overview_summary() -> prtui_core::Summary {
+    prtui_core::Summary {
+        author: "tale".into(),
+        base_ref: "main".into(),
+        head_ref: "work".into(),
+        additions: 12,
+        deletions: 3,
+        changed_files: 2,
+        updated_on: "2026-09-03".into(),
+        comments: 1,
+        checks: Vec::new(),
+        reviewers: Vec::new(),
+        threads: prtui_core::Threads {
+            unresolved: 1,
+            total: 1,
+            is_truncated: false,
+        },
+    }
+}
+
+fn open_overview(app: &mut App) {
+    press(app, "K");
+    let generation = app
+        .take_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::FetchSummary { generation } => Some(generation),
+            _ => None,
+        })
+        .expect("opening the overview fetches its summary");
+    app.receive(AppMessage::Summary {
+        generation,
+        outcome: Ok(Box::new(overview_summary())),
+    });
 }
 
 /// Row 0 of any diff is a hunk header, which is deliberately not commentable.
@@ -530,9 +567,9 @@ fn the_overview_reads_the_description_and_the_discussion() {
     let mut app = load();
     let (cursor, scroll) = (app.view().cursor, app.view().diff_scroll);
 
-    press(&mut app, "o");
+    open_overview(&mut app);
     assert_eq!(app.view().mode, Mode::Overview);
-    assert_eq!(app.view().overlay_scroll, 0);
+    assert_eq!(app.view().overlay.scroll, 0);
 
     let layout = layout_of(&app);
     let panel = drawn_lines(&layout);
@@ -544,7 +581,7 @@ fn the_overview_reads_the_description_and_the_discussion() {
     // The fixture's discussion is under the description, so it takes a scroll
     // to reach.
     press(&mut app, "G");
-    assert!(app.view().overlay_scroll > 0);
+    assert!(app.view().overlay.scroll > 0);
     let panel = drawn_lines(&layout_of(&app));
     assert!(
         panel.iter().any(|line| line.contains("@malept")),
@@ -552,14 +589,28 @@ fn the_overview_reads_the_description_and_the_discussion() {
     );
 
     // Reading it must not move the cursor, the way the reference does not.
-    press(&mut app, "o");
+    press(&mut app, "K");
     assert_eq!(app.view().mode, Mode::Normal);
-    assert_eq!(app.view().overlay_scroll, 0);
+    assert_eq!(app.view().overlay.scroll, 0);
     assert_eq!(
         (app.view().cursor, app.view().diff_scroll),
         (cursor, scroll)
     );
     assert!(!app.should_quit());
+}
+
+#[test]
+fn the_overview_moves_a_row_cursor() {
+    let mut app = load();
+    open_overview(&mut app);
+
+    press(&mut app, "5j");
+    assert_eq!(app.view().overlay.index, 5);
+    assert_eq!(app.view().overlay.scroll, 0);
+
+    press(&mut app, "G");
+    assert_eq!(app.view().overlay.index + 1, layout_of(&app).overlay_len());
+    assert!(app.view().overlay.scroll > 0);
 }
 
 /// The panel's lines, as the view would paint them.
@@ -569,8 +620,8 @@ fn drawn_lines(layout: &Layout) -> Vec<String> {
     let overlay = layout.overlay.as_ref().expect("a panel is open");
     match &overlay.content {
         Content::Keys(_) => panic!("the reference is open, not the overview"),
-        Content::Prose(lines) => {
-            lines.iter().map(ToString::to_string).collect()
+        Content::Overview(rows) => {
+            rows.lines.iter().map(ToString::to_string).collect()
         }
     }
 }
@@ -702,7 +753,7 @@ fn the_reference_searches_and_steps_its_hits() {
 #[test]
 fn searching_the_overview_scrolls_the_hit_into_the_panel() {
     let mut app = load();
-    press(&mut app, "o");
+    open_overview(&mut app);
 
     let mut input = InputRouter::default();
     send(
@@ -721,8 +772,8 @@ fn searching_the_overview_scrolls_the_hit_into_the_panel() {
         row >= layout.overlay_viewport(),
         "the hit is past the first screen"
     );
-    assert!(app.view().overlay_scroll <= row);
-    assert!(row < app.view().overlay_scroll + layout.overlay_viewport());
+    assert!(app.view().overlay.scroll <= row);
+    assert!(row < app.view().overlay.scroll + layout.overlay_viewport());
     assert_eq!(app.search_summary(&layout), (1, 1));
 }
 
@@ -731,9 +782,9 @@ fn searching_the_overview_scrolls_the_hit_into_the_panel() {
 #[test]
 fn cancelling_a_panel_search_restores_the_scroll() {
     let mut app = load();
-    press(&mut app, "o");
+    open_overview(&mut app);
     press(&mut app, "5j");
-    let scroll = app.view().overlay_scroll;
+    let overlay = app.view().overlay;
 
     let mut input = InputRouter::default();
     send(
@@ -745,7 +796,7 @@ fn cancelling_a_panel_search_restores_the_scroll() {
     send(&mut input, &mut app, KeyCode::Escape.into());
 
     assert_eq!(app.view().mode, Mode::Overview);
-    assert_eq!(app.view().overlay_scroll, scroll);
+    assert_eq!(app.view().overlay, overlay);
     assert!(app.view().search.is_none());
 }
 
@@ -781,22 +832,23 @@ fn the_reference_opens_scrolls_and_closes() {
 
     press(&mut app, "?");
     assert_eq!(app.view().mode, Mode::Help);
-    assert_eq!(app.view().overlay_scroll, 0);
+    assert_eq!(app.view().overlay.index, 0);
 
     press(&mut app, "5j");
-    assert_eq!(app.view().overlay_scroll, 5);
+    assert_eq!(app.view().overlay.index, 5);
     press(&mut app, "2k");
-    assert_eq!(app.view().overlay_scroll, 3);
+    assert_eq!(app.view().overlay.index, 3);
     press(&mut app, "gg");
-    assert_eq!(app.view().overlay_scroll, 0);
+    assert_eq!(app.view().overlay.index, 0);
 
     // The reference is longer than the box it is read in.
     press(&mut app, "G");
-    assert!(app.view().overlay_scroll > 0);
+    assert!(app.view().overlay.scroll > 0);
 
     press(&mut app, "q");
     assert_eq!(app.view().mode, Mode::Normal);
-    assert_eq!(app.view().overlay_scroll, 0);
+    assert_eq!(app.view().overlay.index, 0);
+    assert_eq!(app.view().overlay.scroll, 0);
     assert!(!app.should_quit());
 }
 
@@ -1552,7 +1604,7 @@ fn ctrl_c_quits_from_every_mode() {
             Mode::Search => press(&mut app, "/"),
             Mode::CommandLine => press(&mut app, ":"),
             Mode::Help => press(&mut app, "?"),
-            Mode::Overview => press(&mut app, "o"),
+            Mode::Overview => press(&mut app, "K"),
             Mode::Submit => press(&mut app, "s"),
         }
         assert_eq!(app.view().mode, mode);

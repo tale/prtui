@@ -1,14 +1,17 @@
-pub mod overview;
 pub mod rows;
 pub mod tree;
 
+use crate::app::SummaryState;
 use crate::app::View as AppView;
 use crate::app::keymap::Reference;
 use crate::app::mode::Mode;
 use crate::app::search::Query;
 use crate::expand::Gap;
+use crate::overview;
+use crate::ui::SPINNER;
 use ratatui::layout::{Constraint, Direction, Rect};
-use ratatui::text::Line;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use rows::{Rows, View as RowView};
 use tree::Tree;
 
@@ -147,13 +150,14 @@ impl Layout {
             .map_or(0, |overlay| overlay.inner.height as usize)
     }
 
+    pub fn overlay_len(&self) -> usize {
+        self.overlay
+            .as_ref()
+            .map_or(0, |overlay| overlay.content.len())
+    }
+
     pub fn overlay_limit(&self) -> usize {
-        self.overlay.as_ref().map_or(0, |overlay| {
-            overlay
-                .content
-                .len()
-                .saturating_sub(overlay.inner.height as usize)
-        })
+        self.overlay_len().saturating_sub(self.overlay_viewport())
     }
 }
 
@@ -174,14 +178,14 @@ pub struct Overlay {
 /// which is settled here.
 pub enum Content {
     Keys(Vec<Reference>),
-    Prose(Vec<Line<'static>>),
+    Overview(overview::Rows),
 }
 
 impl Content {
     const fn len(&self) -> usize {
         match self {
             Self::Keys(lines) => lines.len(),
-            Self::Prose(lines) => lines.len(),
+            Self::Overview(rows) => rows.len(),
         }
     }
 
@@ -200,7 +204,9 @@ impl Content {
                     } => format!("{keys} {name} {summary}"),
                 })
             }
-            Self::Prose(lines) => lines.get(index).map(ToString::to_string),
+            Self::Overview(rows) => {
+                rows.lines.get(index).map(ToString::to_string)
+            }
         }
     }
 }
@@ -226,30 +232,39 @@ const OVERLAY_WIDTH: u16 = 80;
 /// below so it reads as a panel rather than as a second pane.
 const OVERLAY_MARGIN: u16 = 2;
 
+pub(crate) fn panel_area(area: Rect) -> Rect {
+    let width = OVERLAY_WIDTH.min(area.width);
+    let height = area.height.saturating_sub(OVERLAY_MARGIN * 2).max(3);
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+pub(crate) const fn panel_inner(area: Rect) -> Rect {
+    Rect {
+        x: area.x + 2,
+        y: area.y + 2,
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(4),
+    }
+}
+
 fn build_overlay(app: AppView<'_>, body: Rect) -> Option<Overlay> {
     let mode = app.overlay_mode()?;
 
-    let width = OVERLAY_WIDTH.min(body.width);
-    let height = body.height.saturating_sub(OVERLAY_MARGIN * 2).max(3);
-    let area = Rect {
-        x: body.x + (body.width.saturating_sub(width)) / 2,
-        y: body.y + (body.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
-    let inner = inside_border(area);
+    let area = panel_area(body);
+    let inner = panel_inner(area);
 
     let (title, content) = if mode == Mode::Help {
         (" keys ", Content::Keys(app.keymap().reference()))
     } else {
         (
             " overview ",
-            Content::Prose(overview::build(
-                app.pr,
-                app.discussion,
-                inner.width as usize,
-                app.theme(),
-            )),
+            Content::Overview(build_overview(app, inner.width)),
         )
     };
 
@@ -261,14 +276,36 @@ fn build_overlay(app: AppView<'_>, body: Rect) -> Option<Overlay> {
     })
 }
 
-/// The area a bordered box leaves for its content, with a column of padding on
-/// each side.
-const fn inside_border(area: Rect) -> Rect {
-    Rect {
-        x: area.x + 2,
-        y: area.y + 1,
-        width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(2),
+fn build_overview(app: AppView<'_>, width: u16) -> overview::Rows {
+    match app.summary {
+        SummaryState::Ready(summary) => overview::build(
+            summary,
+            app.pr.map_or("", |pr| pr.body.as_str()),
+            app.discussion,
+            app.overview_folds,
+            width as usize,
+            app.theme(),
+        ),
+        SummaryState::Failed(error) => overview::Rows {
+            lines: vec![Line::styled(
+                format!("error: {error}"),
+                Style::default().fg(app.theme().danger),
+            )],
+            folds: vec![None],
+        },
+        SummaryState::Absent | SummaryState::Loading => overview::Rows {
+            lines: vec![Line::from(vec![
+                Span::styled(
+                    SPINNER[app.loading_frame % SPINNER.len()],
+                    Style::default().fg(app.theme().accent),
+                ),
+                Span::styled(
+                    "  loading the overview",
+                    Style::default().fg(app.theme().dim),
+                ),
+            ])],
+            folds: vec![None],
+        },
     }
 }
 

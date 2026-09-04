@@ -431,7 +431,19 @@ pub enum ReviewStatus {
     NoDecision,
 }
 
-/// Pull request facts rendered by the selector's summary panel.
+/// Everything the selector needs to render a pull request overview.
+#[derive(Debug)]
+pub struct PullRequestOverview {
+    /// Review state and change tallies.
+    pub summary: Summary,
+    /// Markdown pull request description.
+    pub body: String,
+    /// Pull request discussion in provider order.
+    pub discussion: Vec<Comment>,
+}
+
+/// Pull request facts rendered at the top of an overview.
+#[derive(Debug)]
 pub struct Summary {
     /// Display name of the author.
     pub author: String,
@@ -458,6 +470,7 @@ pub struct Summary {
 }
 
 /// One continuous-integration check.
+#[derive(Debug)]
 pub struct Check {
     /// Display name of the check.
     pub name: String,
@@ -479,6 +492,7 @@ pub enum CheckState {
 }
 
 /// A user or team participating in review.
+#[derive(Debug)]
 pub struct Reviewer {
     /// Display name of the user or team.
     pub name: String,
@@ -514,6 +528,7 @@ impl Verdict {
 }
 
 /// Aggregate review conversation counts.
+#[derive(Debug)]
 pub struct Threads {
     /// Number of unresolved conversations.
     pub unresolved: u32,

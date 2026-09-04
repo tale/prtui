@@ -299,7 +299,7 @@ impl App {
             cursor: self.navigation.cursor,
             focused_card: self.navigation.focused_card.clone(),
             diff_scroll: self.navigation.diff_scroll,
-            overlay_scroll: self.navigation.overlay_scroll,
+            overlay: self.navigation.overlay,
             mode: self.navigation.mode,
         });
         self.prompts.search = Some(CommentEditor::default());
@@ -354,7 +354,7 @@ impl App {
         self.prompts.search = None;
 
         if origin.mode.is_overlay() {
-            self.navigation.overlay_scroll = origin.overlay_scroll;
+            self.navigation.overlay = origin.overlay;
             self.navigation.overlay_match = None;
             return;
         }
@@ -372,8 +372,8 @@ impl App {
         };
 
         if origin.mode.is_overlay() {
-            let from = origin.overlay_scroll;
-            self.navigation.overlay_scroll = from;
+            let from = origin.overlay.index;
+            self.navigation.overlay = origin.overlay;
             self.navigation.overlay_match = None;
             self.land_on_overlay_hit(from, layout);
             return;
@@ -482,16 +482,11 @@ impl App {
         else {
             return;
         };
-        let viewport = layout.overlay_viewport().max(1);
-
-        if row < self.navigation.overlay_scroll {
-            self.navigation.overlay_scroll = row;
-        } else if row >= self.navigation.overlay_scroll + viewport {
-            self.navigation.overlay_scroll = row + 1 - viewport;
-        }
-
-        self.navigation.overlay_scroll =
-            self.navigation.overlay_scroll.min(layout.overlay_limit());
+        self.navigation.overlay.jump(
+            row,
+            layout.overlay_len(),
+            layout.overlay_viewport(),
+        );
     }
 
     /// The search box holds a single line, so the query is a slice of it.

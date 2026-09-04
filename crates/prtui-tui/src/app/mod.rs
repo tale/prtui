@@ -18,8 +18,10 @@ mod view;
 pub use view::View;
 
 use crate::expand::{self, Gap, Place, Reveal};
-use crate::layout::Layout;
+use crate::layout::{Content, Layout};
+use crate::overview::{self, FoldState};
 use crate::renderer::{Segment, Theme, ThemeMode};
+use crate::vim::Cursor;
 use action::Action;
 use draft::{Anchor, Attachment, Draft, Sync};
 use editor::{CommentEditor, Edit};
@@ -28,7 +30,7 @@ use keymap::{Keymap, Resolution};
 use link::{Errand, Link};
 use mode::{Mode, Selection};
 use prtui_core::{
-    ChangedFile, Comment, DiffLine, Meta, PullRequest, ReviewThread,
+    ChangedFile, Comment, DiffLine, Meta, PullRequest, ReviewThread, Summary,
 };
 use review::{Request, Sent, Submission};
 use search::Query;
@@ -218,7 +220,7 @@ struct SearchOrigin {
     cursor: usize,
     focused_card: Option<Card>,
     diff_scroll: usize,
-    overlay_scroll: usize,
+    overlay: Cursor,
     /// The mode the search was opened from, which is the one accepting or
     /// cancelling returns to. A search started inside a panel has to leave the
     /// reader in that panel.
@@ -309,6 +311,17 @@ struct ReviewState {
     next_draft_id: u64,
 
     discussion: Vec<Comment>,
+    summary: SummaryState,
+    summary_generation: u64,
+}
+
+#[derive(Default)]
+pub(crate) enum SummaryState {
+    #[default]
+    Absent,
+    Loading,
+    Ready(Box<Summary>),
+    Failed(String),
 }
 
 struct NavigationState {
@@ -324,8 +337,9 @@ struct NavigationState {
     diff_scroll: usize,
     pane: Pane,
     is_files_visible: bool,
-    overlay_scroll: usize,
+    overlay: Cursor,
     overlay_match: Option<usize>,
+    overview_folds: FoldState,
 }
 
 impl Default for NavigationState {
@@ -343,8 +357,9 @@ impl Default for NavigationState {
             diff_scroll: 0,
             pane: Pane::Files,
             is_files_visible: true,
-            overlay_scroll: 0,
+            overlay: Cursor::default(),
             overlay_match: None,
+            overview_folds: FoldState::default(),
         }
     }
 }
@@ -556,6 +571,20 @@ impl App {
                     true
                 }
             },
+            Message::Summary {
+                generation,
+                outcome,
+            } => {
+                if generation != self.review.summary_generation {
+                    return false;
+                }
+
+                self.review.summary = match outcome {
+                    Ok(summary) => SummaryState::Ready(summary),
+                    Err(error) => SummaryState::Failed(error),
+                };
+                true
+            }
             Message::Request(outcome) => {
                 let sent = outcome.as_ref().ok();
                 let needs_refetch = sent.is_some_and(Sent::needs_refetch);
@@ -1155,6 +1184,11 @@ impl App {
                     self.navigation.pane = Pane::Diff;
                 }
             }
+            Action::Activate | Action::Expand(_)
+                if self.navigation.mode.is_overlay() =>
+            {
+                self.toggle_overview_fold(layout);
+            }
             Action::Activate => self.activate(layout),
             Action::LeaveThread => self.set_focus(None),
             Action::FocusFiles => self.focus_files(),
@@ -1213,15 +1247,17 @@ impl App {
 
             Action::OpenHelp => {
                 self.navigation.mode = Mode::Help;
-                self.navigation.overlay_scroll = 0;
+                self.navigation.overlay = Cursor::default();
             }
             Action::OpenOverview => {
                 self.navigation.mode = Mode::Overview;
-                self.navigation.overlay_scroll = 0;
+                self.navigation.overlay = Cursor::default();
+                self.navigation.overview_folds = FoldState::default();
+                self.request_summary();
             }
             Action::CloseOverlay => {
                 self.navigation.mode = Mode::Normal;
-                self.navigation.overlay_scroll = 0;
+                self.navigation.overlay = Cursor::default();
                 self.navigation.overlay_match = None;
             }
             Action::OpenInBrowser => self.open_link(),
@@ -1234,6 +1270,58 @@ impl App {
             }
             Action::EditLine(edit) => self.edit_line(edit, layout),
         }
+    }
+
+    fn request_summary(&mut self) {
+        self.review.summary_generation =
+            self.review.summary_generation.wrapping_add(1);
+        let generation = self.review.summary_generation;
+
+        self.review.summary = SummaryState::Loading;
+        self.runtime
+            .effects
+            .push(Effect::FetchSummary { generation });
+    }
+
+    fn toggle_overview_fold(&mut self, layout: &Layout) {
+        if self.navigation.mode != Mode::Overview {
+            return;
+        }
+
+        let Some(Content::Overview(rows)) =
+            layout.overlay.as_ref().map(|overlay| &overlay.content)
+        else {
+            return;
+        };
+        let Some(fold) = rows.fold_at(self.navigation.overlay.index).cloned()
+        else {
+            return;
+        };
+
+        self.navigation.overview_folds.toggle(&fold);
+
+        let SummaryState::Ready(summary) = &self.review.summary else {
+            return;
+        };
+        let width = layout
+            .overlay
+            .as_ref()
+            .map_or(0, |overlay| overlay.inner.width as usize);
+        let body = self.review.pr.as_ref().map_or("", |pr| pr.body.as_str());
+        let len = overview::build(
+            summary,
+            body,
+            &self.review.discussion,
+            &self.navigation.overview_folds,
+            width,
+            self.theme,
+        )
+        .len();
+        self.navigation.overlay.jump(
+            self.navigation.overlay.index,
+            len,
+            layout.overlay_viewport(),
+        );
     }
 
     /// Borrows the immutable state consumed by layout and rendering.

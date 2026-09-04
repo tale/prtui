@@ -90,16 +90,16 @@ below is a named command, so anything bound to a key is also reachable as
 **The selector** — the list `prtui` opens on takes the same motions as the
 rest of the app: `j`/`k`, `<C-d>`/`<C-u>`, `gg`/`G`, and a count like `12G`.
 `/` narrows the list as you type, over titles and repositories: `<CR>` keeps
-the narrowing, `esc` puts back the list and the row you opened it on. `K`
-summarizes the pull request under the cursor: who it is waiting on, named one
-per row, its unresolved conversations, and a tally of its checks that `za` or
-`<CR>` unfolds into the list. The panel names the pull request and keeps its
-available actions on its lower edge. `<CR>` anywhere else opens the review.
-`gx` opens the selected pull request in a browser from either surface.
+the narrowing, `esc` puts back the list and the row you opened it on. `K` opens
+an overview of the pull request under the cursor: its review and check summary,
+description, and one collapsed row per discussion comment. Move onto a fold
+and use `<CR>` or `za` to open it. `<CR>` anywhere else opens the review, and
+`gx` opens the pull request in a browser.
 
-**The pull request** — `o` opens the description and the discussion over the
-panes, and `?` opens the key reference. Both scroll with the same keys the rest
-of the app uses, both are searchable with `/`, and `esc` closes either.
+**The pull request** — `K` opens the same overview over the panes, using the
+description and discussion already kept current by the review. `?` opens the
+key reference. Both panels have a highlighted row cursor, take the same
+motions as the rest of the app, and close with `esc`; `/` searches them here.
 
 **Motion** — `j`/`k` a row, `<C-d>`/`<C-u>` half a screen, `gg`/`G` the first
 and last line. A count works where you would expect: `10j`.
@@ -188,7 +188,7 @@ line as a title and everything after it as a body, so wrapping turns a bullet
 into a heading and splits the sentence wherever the wrap fell.
 
 Write it the way a release note reads, not the way a commit message does: what
-the tool now does, in the words the keys and the panes already go by. `` `o`
+the tool now does, in the words the keys and the panes already go by. `` `K`
 opens the pull request description ``, not `Add an overview overlay`.
 
 ## License

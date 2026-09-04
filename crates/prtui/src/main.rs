@@ -119,6 +119,26 @@ fn spawn_meta_fetch<P: Provider>(
     });
 }
 
+fn spawn_summary_fetch<P: Provider>(
+    provider: P,
+    repo: Arc<Repo>,
+    number: u32,
+    generation: u64,
+    tx: mpsc::UnboundedSender<Message>,
+) {
+    tokio::spawn(async move {
+        let outcome = provider
+            .fetch_summary(&repo, number)
+            .await
+            .map(Box::new)
+            .map_err(|err| err.to_string());
+        let _ = tx.send(Message::App(AppMessage::Summary {
+            generation,
+            outcome,
+        }));
+    });
+}
+
 fn spawn_files_fetch<P: Provider>(
     provider: P,
     repo: Arc<Repo>,
@@ -395,6 +415,13 @@ async fn event_loop<P: Provider>(
                     );
                 }
                 Effect::FetchMeta { generation } => spawn_meta_fetch(
+                    provider,
+                    Arc::clone(&repo),
+                    number,
+                    generation,
+                    tx.clone(),
+                ),
+                Effect::FetchSummary { generation } => spawn_summary_fetch(
                     provider,
                     Arc::clone(&repo),
                     number,

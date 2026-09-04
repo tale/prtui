@@ -80,20 +80,30 @@ fn draw_overlay(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
         return;
     };
     let theme = app.theme();
+    let is_on_fold = matches!(
+        &overlay.content,
+        Content::Overview(rows) if rows.fold_at(app.overlay.index).is_some()
+    );
+    let actions = match (app.mode, is_on_fold) {
+        (Mode::Overview, true) => {
+            " j/k move · ↵/za toggle · gx browser · / find · esc close "
+        }
+        (Mode::Overview, false) => {
+            " j/k move · gx browser · / find · esc close "
+        }
+        _ => " j/k move · / find · esc close ",
+    };
 
     let block = docked_block(overlay.title.to_owned(), theme.accent)
         .title_bottom(
-            Line::styled(
-                " j/k scroll · / find · esc close ",
-                Style::default().fg(theme.dim),
-            )
-            .right_aligned(),
+            Line::styled(actions, Style::default().fg(theme.dim))
+                .right_aligned(),
         );
     frame.render_widget(Clear, overlay.area);
     frame.render_widget(block, overlay.area);
 
     let width = overlay.inner.width as usize;
-    let scroll = app.overlay_scroll;
+    let scroll = app.overlay.scroll;
     let height = overlay.inner.height as usize;
     let query = app.live_query();
     let current = app.overlay_match_row(layout);
@@ -105,22 +115,31 @@ fn draw_overlay(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
         })
     };
 
+    let paint = |row: usize, line: Line<'static>| {
+        let line = paint_hits(line, query, hit(row));
+
+        if row == app.overlay.index {
+            return cursor_line(line, width, theme);
+        }
+
+        line
+    };
+
     let lines: Vec<Line> = match &overlay.content {
         Content::Keys(entries) => entries
             .iter()
             .enumerate()
             .skip(scroll)
             .take(height)
-            .map(|(row, entry)| {
-                paint_hits(help_line(entry, width, theme), query, hit(row))
-            })
+            .map(|(row, entry)| paint(row, help_line(entry, width, theme)))
             .collect(),
-        Content::Prose(prose) => prose
+        Content::Overview(rows) => rows
+            .lines
             .iter()
             .enumerate()
             .skip(scroll)
             .take(height)
-            .map(|(row, line)| paint_hits(line.clone(), query, hit(row)))
+            .map(|(row, line)| paint(row, line.clone()))
             .collect(),
     };
 
@@ -152,6 +171,19 @@ fn paint_hits(
         .collect();
 
     Line::from(spans).style(line.style)
+}
+
+pub(crate) fn cursor_line(
+    mut line: Line<'static>,
+    width: usize,
+    theme: Theme,
+) -> Line<'static> {
+    let pad = width.saturating_sub(line.width());
+    if pad > 0 {
+        line.spans.push(Span::raw(" ".repeat(pad)));
+    }
+
+    line.style(Style::default().bg(theme.cursor))
 }
 
 fn help_line(line: &Reference, width: usize, theme: Theme) -> Line<'static> {
@@ -1284,9 +1316,11 @@ fn draw_bottom_bar(
     let theme = app.theme();
     let bar = bar_style(theme);
 
-    let pane = match app.pane {
-        Pane::Files => " files",
-        Pane::Diff => " diff",
+    let pane = match (app.overlay_mode(), app.pane) {
+        (Some(Mode::Overview), _) => " overview",
+        (Some(Mode::Help), _) => " keys",
+        (_, Pane::Files) => " files",
+        (_, Pane::Diff) => " diff",
     };
 
     let show_search_position = app.search.is_some()
@@ -1295,29 +1329,39 @@ fn draw_bottom_bar(
         || (app.mode == Mode::Normal
             && app.pane == Pane::Files
             && app.file_filter.is_some());
-    let position = match (
-        show_search_position,
-        show_match_position,
-        app.current_file(),
-    ) {
-        (true, _, _) => {
-            let (current, total) = app.search_summary(layout);
-            format!("  {current}/{total} matches")
+    let is_on_overview_fold = layout.overlay.as_ref().is_some_and(|overlay| {
+        matches!(
+            &overlay.content,
+            Content::Overview(rows) if rows.fold_at(app.overlay.index).is_some()
+        )
+    });
+    let position = if app.mode.is_overlay() && !show_search_position {
+        format!("  {}/{}", app.overlay.index + 1, layout.overlay_len())
+    } else {
+        match (
+            show_search_position,
+            show_match_position,
+            app.current_file(),
+        ) {
+            (true, _, _) => {
+                let (current, total) = app.search_summary(layout);
+                format!("  {current}/{total} matches")
+            }
+            (false, true, _) => format!(
+                "  {}/{} matches",
+                layout.files.file_position(app.selected_file),
+                layout.files.file_count()
+            ),
+            // Two bare ratios said nothing about what they counted.
+            (false, false, Some(file)) => format!(
+                "  file {}/{} · line {}/{}",
+                layout.files.file_position(app.selected_file),
+                app.files.len(),
+                (app.cursor + 1).min(file.lines.len().max(1)),
+                file.lines.len()
+            ),
+            (false, false, None) => String::new(),
         }
-        (false, true, _) => format!(
-            "  {}/{} matches",
-            layout.files.file_position(app.selected_file),
-            layout.files.file_count()
-        ),
-        // Two bare ratios said nothing about what they counted.
-        (false, false, Some(file)) => format!(
-            "  file {}/{} · line {}/{}",
-            layout.files.file_position(app.selected_file),
-            app.files.len(),
-            (app.cursor + 1).min(file.lines.len().max(1)),
-            file.lines.len()
-        ),
-        (false, false, None) => String::new(),
     };
 
     let mut spans = vec![
@@ -1412,9 +1456,20 @@ fn draw_bottom_bar(
         (Mode::Help | Mode::Overview, _) if app.search.is_some() => {
             &[("n/N", "step"), ("/", "find"), ("esc", "close")]
         }
-        (Mode::Help | Mode::Overview, _) => {
-            &[("j/k", "scroll"), ("/", "find"), ("esc", "close")]
-        }
+        (Mode::Overview, _) if is_on_overview_fold => &[
+            ("j/k", "move"),
+            ("↵/za", "toggle"),
+            ("gx", "browser"),
+            ("/", "find"),
+            ("esc", "close"),
+        ],
+        (Mode::Overview, _) => &[
+            ("j/k", "move"),
+            ("gx", "browser"),
+            ("/", "find"),
+            ("esc", "close"),
+        ],
+        (Mode::Help, _) => &[("j/k", "move"), ("/", "find"), ("esc", "close")],
         (Mode::CommandLine, _) => &[
             (":42", "line"),
             ("↑↓", "history"),
@@ -1457,7 +1512,7 @@ fn draw_bottom_bar(
         (Mode::Normal, Pane::Files) => &[
             ("j/k", "move"),
             ("↵", "open"),
-            ("o", "description"),
+            ("K", "description"),
             if app.file_filter.is_some() {
                 ("/", "edit filter")
             } else {
