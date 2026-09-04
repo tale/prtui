@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 (2026-09-04)
+
+### Breaking Changes
+
+- Split the library API into core, TUI, and GitHub provider crates.
+
+### Features
+
+- Edit every free-text prompt with readline commands such as `<C-a>` and `<C-e>`.
+- `K` opens a Vim-style PR summary with individually folded comments.
+- The file tree now wraps around when you go past the end of it.
+
+### Fixes
+
+- Show which pane is focused with an emphasized title and cut off cursor line.
+- Load the full diff for large files that GitHub doesn't send by default.
+
 ## 0.2.0 (2026-08-30)
 
 ### Breaking Changes

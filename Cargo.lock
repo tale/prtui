@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "prtui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -929,14 +929,14 @@ dependencies = [
 
 [[package]]
 name = "prtui-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "prtui-github"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "prtui-core",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "prtui-tui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "devicons",
