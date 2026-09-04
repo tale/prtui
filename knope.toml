@@ -2,7 +2,18 @@
 ignore_conventional_commits = true
 
 [package]
-versioned_files = ["Cargo.toml", "Cargo.lock"]
+versioned_files = [
+    "Cargo.toml",
+    { path = "Cargo.lock", dependency = "prtui" },
+    { path = "Cargo.lock", dependency = "prtui-core" },
+    { path = "Cargo.lock", dependency = "prtui-github" },
+    { path = "Cargo.lock", dependency = "prtui-tui" },
+    { path = "crates/prtui-github/Cargo.toml", dependency = "prtui-core" },
+    { path = "crates/prtui-tui/Cargo.toml", dependency = "prtui-core" },
+    { path = "crates/prtui/Cargo.toml", dependency = "prtui-core" },
+    { path = "crates/prtui/Cargo.toml", dependency = "prtui-github" },
+    { path = "crates/prtui/Cargo.toml", dependency = "prtui-tui" },
+]
 changelog = "CHANGELOG.md"
 
 [[workflows]]
@@ -19,7 +30,7 @@ type = "PrepareRelease"
 
 [[workflows.steps]]
 type = "Command"
-command = "git commit -m 'chore: release $version' Cargo.toml Cargo.lock CHANGELOG.md .changeset"
+command = "git commit -m 'chore: release $version' Cargo.toml Cargo.lock crates/*/Cargo.toml CHANGELOG.md .changeset"
 
 [[workflows.steps]]
 type = "Release"

@@ -1,5 +1,5 @@
 ---
-default: minor
+default: major
 ---
 
-Move GitHub behind an extensible code-review provider boundary.
+Split the library API into core, TUI, and GitHub provider crates.
