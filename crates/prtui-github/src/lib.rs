@@ -227,7 +227,7 @@ query($endCursor:String) {
       orderBy:{field:UPDATED_AT,direction:DESC}
     ) {
       nodes {
-        number title isDraft reviewDecision
+        number title isDraft reviewDecision updatedAt
         author { login }
         repository { nameWithOwner }
       }
@@ -352,6 +352,7 @@ struct WirePullRequest {
     title: String,
     author: Option<WireLogin>,
     is_draft: bool,
+    updated_at: String,
     #[serde(deserialize_with = "deserialize_cli_review_decision")]
     review_decision: Option<ReviewDecision>,
 }
@@ -769,8 +770,14 @@ fn parse_repository_pull_requests(
     repo: Repo,
     bytes: &[u8],
 ) -> Result<PullRequestList> {
-    let pulls: Vec<WirePullRequest> = serde_json::from_slice(bytes)
+    let mut pulls: Vec<WirePullRequest> = serde_json::from_slice(bytes)
         .context("failed to parse gh pr list output")?;
+    pulls.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.number.cmp(&right.number))
+    });
 
     let repo = Arc::new(repo);
 
@@ -786,9 +793,24 @@ fn parse_repository_pull_requests(
 fn parse_user_pull_requests(bytes: &[u8]) -> Result<PullRequestList> {
     let pages: Vec<WireUserPullRequestPage> = serde_json::from_slice(bytes)
         .context("failed to parse user pull requests response")?;
-    let pulls = pages
+    let mut pulls: Vec<_> = pages
         .into_iter()
         .flat_map(|page| page.data.viewer.pull_requests.nodes)
+        .collect();
+    pulls.sort_by(|left, right| {
+        right
+            .pull
+            .updated_at
+            .cmp(&left.pull.updated_at)
+            .then_with(|| {
+                left.repository
+                    .name_with_owner
+                    .cmp(&right.repository.name_with_owner)
+            })
+            .then_with(|| left.pull.number.cmp(&right.pull.number))
+    });
+    let pulls = pulls
+        .into_iter()
         .map(|pull| {
             let repo = Arc::new(parse_repo(&pull.repository.name_with_owner)?);
 
@@ -1355,10 +1377,12 @@ async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
             &slug,
             "--state",
             "open",
+            "--search",
+            "sort:updated-desc",
             "--limit",
             "100",
             "--json",
-            "number,title,author,isDraft,reviewDecision",
+            "number,title,author,isDraft,reviewDecision,updatedAt",
         ],
         "gh pr list failed",
     )
@@ -1831,15 +1855,53 @@ mod tests {
     }
 
     #[test]
+    fn listings_sort_by_update_then_repository_and_number() {
+        let pulls = serde_json::json!([
+            {"number":9,"title":"Approved","isDraft":false,"reviewDecision":"APPROVED","updatedAt":"2026-09-07T12:00:00Z","repository":{"nameWithOwner":"a/repo"}},
+            {"number":3,"title":"Review","isDraft":false,"reviewDecision":"REVIEW_REQUIRED","updatedAt":"2026-09-08T12:00:00Z","repository":{"nameWithOwner":"b/repo"}},
+            {"number":2,"title":"Draft","isDraft":true,"reviewDecision":null,"updatedAt":"2026-09-08T12:00:00Z","repository":{"nameWithOwner":"a/repo"}},
+            {"number":1,"title":"Changes","isDraft":false,"reviewDecision":"CHANGES_REQUESTED","updatedAt":"2026-09-08T12:00:00Z","repository":{"nameWithOwner":"b/repo"}}
+        ]);
+        let local = parse_repository_pull_requests(
+            parse_repo("owner/repo").unwrap(),
+            &serde_json::to_vec(&pulls).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            local
+                .items
+                .iter()
+                .map(|item| item.target.number)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 9]
+        );
+
+        let pages: Vec<_> = pulls.as_array().unwrap().chunks(2).map(|nodes| {
+            serde_json::json!({"data":{"viewer":{"pullRequests":{"nodes":nodes}}}})
+        }).collect();
+        let global =
+            parse_user_pull_requests(&serde_json::to_vec(&pages).unwrap())
+                .unwrap();
+        assert_eq!(
+            global
+                .items
+                .iter()
+                .map(|item| item.target.number)
+                .collect::<Vec<_>>(),
+            [2, 1, 3, 9]
+        );
+    }
+
+    #[test]
     fn parses_repository_pull_requests_and_moves_the_repository_once() {
         let local = parse_repository_pull_requests(
             parse_repo("owner/repo").unwrap(),
             br#"[
-                {"number":12,"title":"Draft","author":{"login":"alice"},"isDraft":true,"reviewDecision":null},
-                {"number":13,"title":"Ready","isDraft":false,"reviewDecision":"APPROVED"},
-                {"number":14,"title":"Changes","isDraft":false,"reviewDecision":"CHANGES_REQUESTED"},
-                {"number":15,"title":"Review","isDraft":false,"reviewDecision":"REVIEW_REQUIRED"},
-                {"number":16,"title":"Unreviewed","isDraft":false,"reviewDecision":""}
+                {"number":12,"title":"Draft","author":{"login":"alice"},"isDraft":true,"updatedAt":"2026-09-08T12:00:00Z","reviewDecision":null},
+                {"number":13,"title":"Ready","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","reviewDecision":"APPROVED"},
+                {"number":14,"title":"Changes","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","reviewDecision":"CHANGES_REQUESTED"},
+                {"number":15,"title":"Review","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","reviewDecision":"REVIEW_REQUIRED"},
+                {"number":16,"title":"Unreviewed","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","reviewDecision":""}
             ]"#,
         )
         .unwrap();
@@ -1881,7 +1943,7 @@ mod tests {
                                 "title": "Global change",
                                 "author": { "login": "bob" },
                                 "isDraft": false,
-                                "reviewDecision": "CHANGES_REQUESTED",
+                                "updatedAt":"2026-09-08T12:00:00Z","reviewDecision": "CHANGES_REQUESTED",
                                 "repository": {
                                     "nameWithOwner": "other/repo"
                                 }
@@ -2096,14 +2158,14 @@ mod tests {
         let local = parse_repository_pull_requests(
             parse_repo("owner/repo").unwrap(),
             br#"[{"number":1,"title":"Unknown","isDraft":false,
-                "reviewDecision":"QUEUED"}]"#,
+                "updatedAt":"2026-09-08T12:00:00Z","reviewDecision":"QUEUED"}]"#,
         );
         assert!(local.is_err());
 
         let global = parse_user_pull_requests(
             br#"[{"data":{"viewer":{"pullRequests":{"nodes":[{
                 "number":1,"title":"Unknown","isDraft":false,
-                "reviewDecision":"QUEUED",
+                "updatedAt":"2026-09-08T12:00:00Z","reviewDecision":"QUEUED",
                 "repository":{"nameWithOwner":"owner/repo"}
             }],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]"#,
         );
