@@ -648,7 +648,7 @@ fn draw_table(
     area: Rect,
     theme: Theme,
 ) {
-    let mut headers = vec![Cell::from("REVIEW")];
+    let mut headers = vec![Cell::from("STATUS")];
     let mut widths = vec![Constraint::Length(18)];
     let has_repository_column =
         pull_requests.scope == PullRequestListScope::User;
@@ -676,7 +676,7 @@ fn draw_table(
         .bottom_margin(1);
     let rows = selector.visible.iter().filter_map(|index| {
         let item = pull_requests.get(*index)?;
-        let mut cells = vec![review_cell(&item.review_status, theme)];
+        let mut cells = vec![status_cell(&item.review_status, theme)];
         if has_repository_column {
             cells.push(
                 Cell::from(item.target.repo.slug())
@@ -944,13 +944,14 @@ fn draw_centered(frame: &mut Frame, area: Rect, line: Line<'static>) {
     );
 }
 
-fn review_cell(status: &ReviewStatus, theme: Theme) -> Cell<'static> {
+fn status_cell(status: &ReviewStatus, theme: Theme) -> Cell<'static> {
     let (label, color) = match status {
         ReviewStatus::Draft => ("DRAFT", theme.dim),
         ReviewStatus::ChangesRequested => ("CHANGES REQUESTED", theme.danger),
-        ReviewStatus::ReviewRequired => ("REVIEW REQUIRED", theme.warning),
+        ReviewStatus::ReviewRequired | ReviewStatus::NoDecision => {
+            ("NEEDS REVIEW", theme.warning)
+        }
         ReviewStatus::Approved => ("APPROVED", theme.success),
-        ReviewStatus::NoDecision => ("NO DECISION", theme.muted),
     };
 
     Cell::from(Line::from(Span::styled(
@@ -1068,15 +1069,14 @@ mod tests {
         let rendered = render(pull_requests);
 
         assert!(rendered.contains("Open pull requests · 5"));
-        assert!(rendered.contains("REVIEW"));
+        assert!(rendered.contains("STATUS"));
+        assert_eq!(rendered.matches("NEEDS REVIEW").count(), 2);
         assert!(rendered.contains("REPOSITORY"));
         assert!(rendered.contains("AUTHOR"));
         assert!(rendered.contains("alice"));
         assert!(rendered.contains("DRAFT"));
         assert!(rendered.contains("CHANGES REQUESTED"));
-        assert!(rendered.contains("REVIEW REQUIRED"));
         assert!(rendered.contains("APPROVED"));
-        assert!(rendered.contains("NO DECISION"));
         assert!(rendered.contains("owner/repo"));
     }
 
