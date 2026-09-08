@@ -27,7 +27,7 @@ mod external;
 #[derive(Parser)]
 #[command(
     name = "prtui",
-    version,
+    version = env!("PRTUI_VERSION"),
     about = "Review GitHub pull requests in the terminal"
 )]
 struct Args {
