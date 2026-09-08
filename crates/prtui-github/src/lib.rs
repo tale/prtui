@@ -217,6 +217,23 @@ query($owner:String!, $repo:String!, $number:Int!, $includeProse:Boolean!) {
 }
 ";
 
+const REPOSITORY_PULL_REQUESTS_QUERY: &str = r"
+query($owner:String!, $repo:String!) {
+  repository(owner:$owner, name:$repo) {
+    pullRequests(
+      first:100
+      states:OPEN
+      orderBy:{field:UPDATED_AT,direction:DESC}
+    ) {
+      nodes {
+        number title isDraft reviewDecision updatedAt
+        author { login }
+      }
+    }
+  }
+}
+";
+
 const USER_PULL_REQUESTS_QUERY: &str = r"
 query($endCursor:String) {
   viewer {
@@ -771,7 +788,7 @@ fn parse_repository_pull_requests(
     bytes: &[u8],
 ) -> Result<PullRequestList> {
     let mut pulls: Vec<WirePullRequest> = serde_json::from_slice(bytes)
-        .context("failed to parse gh pr list output")?;
+        .context("failed to parse repository pull requests")?;
     pulls.sort_by(|left, right| {
         right
             .updated_at
@@ -1368,27 +1385,28 @@ async fn gh_output(args: &[&str], failure: &str) -> Result<Vec<u8>> {
 }
 
 async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
-    let slug = repo.slug();
-    let output = gh_output(
-        &[
-            "pr",
-            "list",
-            "--repo",
-            &slug,
-            "--state",
-            "open",
-            "--search",
-            "sort:updated-desc",
-            "--limit",
-            "100",
-            "--json",
-            "number,title,author,isDraft,reviewDecision,updatedAt",
-        ],
-        "gh pr list failed",
-    )
-    .await?;
+    let token = write_token(&repo).await?;
+    let url = graphql_url(&repo);
+    let variables = serde_json::json!({
+        "owner": repo.namespace,
+        "repo": repo.name,
+    });
 
-    parse_repository_pull_requests(repo, &output)
+    tokio::task::spawn_blocking(move || {
+        let value = graphql(
+            &url,
+            Some(&token),
+            REPOSITORY_PULL_REQUESTS_QUERY,
+            &variables,
+            "listing repository pull requests",
+            Retry::Transient,
+        )?;
+        let nodes = &value["data"]["repository"]["pullRequests"]["nodes"];
+
+        parse_repository_pull_requests(repo, &serde_json::to_vec(nodes)?)
+    })
+    .await
+    .context("repository listing panicked")?
 }
 
 /// The summary panel's one round trip, asked for only when the panel is
@@ -1450,21 +1468,50 @@ async fn fetch_overview(
 }
 
 async fn user_pull_requests() -> Result<PullRequestList> {
-    let query = format!("query={USER_PULL_REQUESTS_QUERY}");
-    let output = gh_output(
-        &[
-            "api",
-            "graphql",
-            "--paginate",
-            "--slurp",
-            "--raw-field",
-            &query,
-        ],
-        "gh api graphql failed",
-    )
-    .await?;
+    let host = std::env::var("GH_HOST")
+        .ok()
+        .filter(|host| !host.is_empty());
+    let repo = Repo {
+        host,
+        namespace: String::new(),
+        name: String::new(),
+    };
+    let token = write_token(&repo).await?;
+    let url = graphql_url(&repo);
 
-    parse_user_pull_requests(&output)
+    tokio::task::spawn_blocking(move || {
+        let mut value = graphql(
+            &url,
+            Some(&token),
+            USER_PULL_REQUESTS_QUERY,
+            &serde_json::json!({}),
+            "listing user pull requests",
+            Retry::Transient,
+        )?;
+        drain(&mut value["data"]["viewer"]["pullRequests"], |cursor| {
+            let mut page = graphql(
+                &url,
+                Some(&token),
+                USER_PULL_REQUESTS_QUERY,
+                &serde_json::json!({"endCursor": cursor}),
+                "listing more user pull requests",
+                Retry::Transient,
+            )?;
+
+            Ok(page["data"]["viewer"]["pullRequests"].take())
+        })?;
+        let mut list =
+            parse_user_pull_requests(&serde_json::to_vec(&[value])?)?;
+        for item in &mut list.items {
+            Arc::make_mut(&mut item.target.repo)
+                .host
+                .clone_from(&repo.host);
+        }
+
+        Ok(list)
+    })
+    .await
+    .context("user listing panicked")?
 }
 
 /// Returns the current GitHub repository when the process is inside a Git
