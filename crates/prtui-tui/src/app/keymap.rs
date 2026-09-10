@@ -258,6 +258,24 @@ impl Keymap {
             });
         }
 
+        if self.is_local {
+            use super::local::Staging;
+
+            lines.push(Reference::Heading("local staging"));
+            for staging in [
+                Staging::Staged,
+                Staging::Unstaged,
+                Staging::Mixed,
+                Staging::Untracked,
+            ] {
+                lines.push(Reference::Entry {
+                    keys: staging.marker().to_string(),
+                    name: staging.label(),
+                    summary: "file tree marker",
+                });
+            }
+        }
+
         lines
     }
 

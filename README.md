@@ -27,8 +27,14 @@ prtui diff --theme light
 ```
 
 This shows staged and unstaged changes together against `HEAD`, plus untracked
-files. Ignored files are excluded. Navigation, search, syntax highlighting, and
-context expansion are available; review comments and browser links are not.
+files. Ignored files are excluded. Two columns in the file tree show staging:
+`S ` for staged, ` U` for unstaged, `SU` for both, and ` ?` for untracked.
+The status bar shows the selected file’s full staging status; `?` opens the
+marker legend in help. Files whose staged and unstaged changes
+cancel out remain listed, with an explanation in the diff pane.
+
+Navigation, search, syntax highlighting, and context expansion are available;
+review comments and browser links are not.
 The view is a snapshot; rerun the command to pick up further edits. Local diffs
 require Git but no GitHub account or `gh` authentication.
 

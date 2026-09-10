@@ -1,12 +1,15 @@
 use anyhow::{Context, Result, bail};
 use prtui_core::{ChangedFile, LineKind, parse_patch};
 use prtui_tui::{
-    app::App,
+    app::{
+        App,
+        local::{LocalFile, Staging},
+    },
     renderer::{self, Theme},
     terminal,
 };
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     process::{Command, Output},
     sync::Arc,
@@ -18,6 +21,7 @@ struct Snapshot {
     root: PathBuf,
     files: Vec<ChangedFile>,
     blobs: HashMap<Arc<str>, Arc<[String]>>,
+    states: HashMap<Arc<str>, LocalFile>,
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<Output> {
@@ -35,6 +39,32 @@ fn checked(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
         bail!("git: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(output.stdout)
+}
+
+fn changed_paths(
+    root: &Path,
+    revisions: &[&str],
+) -> Result<HashMap<String, String>> {
+    let mut args = vec!["diff", "--no-renames", "--name-status", "-z"];
+    args.extend_from_slice(revisions);
+    args.push("--");
+    let names = String::from_utf8(checked(root, &args)?)
+        .context("file paths must be UTF-8")?;
+    let mut paths = HashMap::new();
+    let mut fields = names.split_terminator('\0');
+    while let Some(status) = fields.next() {
+        let path = fields.next().context("missing diff path")?;
+        paths.insert(
+            path.to_string(),
+            match status {
+                "A" => "added",
+                "D" => "removed",
+                _ => "modified",
+            }
+            .to_string(),
+        );
+    }
+    Ok(paths)
 }
 
 impl Snapshot {
@@ -56,45 +86,54 @@ impl Snapshot {
             .trim()
             .to_string()
         };
-        let names = checked(
-            &root,
-            &["diff", "--no-renames", "--name-status", "-z", &base, "--"],
-        )?;
-        let names =
-            String::from_utf8(names).context("file paths must be UTF-8")?;
-        let mut paths = Vec::new();
-        let mut fields = names.split_terminator('\0');
-        while let Some(status) = fields.next() {
-            let path = fields.next().context("missing diff path")?;
-            paths.push((
-                path.to_string(),
-                match status {
-                    "A" => "added",
-                    "D" => "removed",
-                    _ => "modified",
-                },
-                false,
-            ));
-        }
+        let combined = changed_paths(&root, &[&base])?;
+        let staged = changed_paths(&root, &["--cached", &base])?;
+        let unstaged = changed_paths(&root, &[])?;
         let untracked = checked(
             &root,
             &["ls-files", "--others", "--exclude-standard", "-z"],
         )?;
         let untracked =
             String::from_utf8(untracked).context("file paths must be UTF-8")?;
-        paths.extend(
-            untracked
-                .split_terminator('\0')
-                .map(|path| (path.to_string(), "added", true)),
-        );
-        paths.sort_by(|a, b| a.0.cmp(&b.0));
+        let untracked: HashSet<&str> =
+            untracked.split_terminator('\0').collect();
+        let paths: BTreeSet<&str> = combined
+            .keys()
+            .chain(staged.keys())
+            .chain(unstaged.keys())
+            .map(String::as_str)
+            .chain(untracked.iter().copied())
+            .collect();
 
         let mut snapshot = Self {
             root,
             files: Vec::new(),
             blobs: HashMap::new(),
+            states: HashMap::new(),
         };
-        for (path, status, is_untracked) in paths {
+        for path in paths {
+            let has_staged = staged.contains_key(path);
+            let has_unstaged =
+                unstaged.contains_key(path) || untracked.contains(path);
+            let is_untracked = untracked.contains(path)
+                && !has_staged
+                && !unstaged.contains_key(path);
+            let staging = match (has_staged, has_unstaged) {
+                _ if is_untracked => Staging::Untracked,
+                (true, true) => Staging::Mixed,
+                (true, false) => Staging::Staged,
+                _ => Staging::Unstaged,
+            };
+            let status = combined
+                .get(path)
+                .or_else(|| staged.get(path))
+                .or_else(|| unstaged.get(path))
+                .map_or("added", String::as_str);
+            let state = LocalFile {
+                staging,
+                has_net_changes: combined.contains_key(path) || is_untracked,
+            };
+
             let mut args = vec![
                 "diff",
                 "--no-ext-diff",
@@ -104,9 +143,9 @@ impl Snapshot {
                 "--unified=3",
             ];
             if is_untracked {
-                args.extend(["--no-index", "--", "/dev/null", &path]);
+                args.extend(["--no-index", "--", "/dev/null", path]);
             } else {
-                args.extend([&base, "--", &path]);
+                args.extend([&base, "--", path]);
             }
             let output = git(&snapshot.root, &args)?;
             if !(output.status.success()
@@ -125,6 +164,7 @@ impl Snapshot {
                 )
             });
             let path: Arc<str> = path.into();
+            snapshot.states.insert(path.clone(), state);
             let file = snapshot.root.join(&*path);
             if !file.is_symlink()
                 && let Ok(content) = std::fs::read(&file)
@@ -171,6 +211,7 @@ pub async fn run(choice: ThemeChoice) -> Result<()> {
         snapshot.root.display().to_string(),
         snapshot.files,
         snapshot.blobs,
+        snapshot.states,
     );
     std::thread::spawn(move || renderer::preload(theme.mode));
     terminal::scope(choice.follows_terminal(), async move |terminal, events| {
@@ -293,6 +334,8 @@ mod tests {
         repo.write("untracked", "second\n");
         let snapshot = Snapshot::load(&repo.0).unwrap();
         assert_eq!(snapshot.files.len(), 2);
+        assert_eq!(snapshot.states["staged"].staging, Staging::Staged);
+        assert_eq!(snapshot.states["untracked"].staging, Staging::Untracked);
         assert!(
             snapshot
                 .files
@@ -301,6 +344,65 @@ mod tests {
         );
         repo.commit();
         assert!(Snapshot::load(&repo.0).unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn retains_cancelled_changes_and_classifies_each_file() {
+        let repo = Repository::new();
+        for path in ["cancelled", "staged", "unstaged", "deleted"] {
+            repo.write(path, "original\n");
+        }
+        repo.commit();
+        repo.write("cancelled", "staged version\n");
+        repo.write("staged", "ready\n");
+        repo.write("added", "new\n");
+        checked(&repo.0, &["add", "."]).unwrap();
+        repo.write("cancelled", "original\n");
+        repo.write("unstaged", "working\n");
+        std::fs::remove_file(repo.0.join("deleted")).unwrap();
+        std::fs::remove_file(repo.0.join("added")).unwrap();
+        repo.write("new\tfile\nname", "untracked\n");
+        let index_before = std::fs::read(repo.0.join(".git/index")).unwrap();
+
+        let snapshot = Snapshot::load(&repo.0).unwrap();
+        assert_eq!(snapshot.files.len(), 6);
+        for (path, staging) in [
+            ("cancelled", Staging::Mixed),
+            ("added", Staging::Mixed),
+            ("staged", Staging::Staged),
+            ("unstaged", Staging::Unstaged),
+            ("deleted", Staging::Unstaged),
+            ("new\tfile\nname", Staging::Untracked),
+        ] {
+            assert_eq!(snapshot.states[path].staging, staging, "{path}");
+        }
+        for path in ["cancelled", "added"] {
+            assert!(!snapshot.states[path].has_net_changes);
+            let file = snapshot
+                .files
+                .iter()
+                .find(|file| &*file.path == path)
+                .unwrap();
+            assert!(file.lines.is_empty());
+            assert_eq!((file.additions, file.deletions), (0, 0));
+        }
+        assert_eq!(
+            std::fs::read(repo.0.join(".git/index")).unwrap(),
+            index_before
+        );
+    }
+
+    #[test]
+    fn a_staged_deletion_recreated_as_untracked_is_listed_once() {
+        let repo = Repository::new();
+        repo.write("file", "original\n");
+        repo.commit();
+        checked(&repo.0, &["rm", "file"]).unwrap();
+        repo.write("file", "replacement\n");
+
+        let snapshot = Snapshot::load(&repo.0).unwrap();
+        assert_eq!(snapshot.files.len(), 1);
+        assert_eq!(snapshot.states["file"].staging, Staging::Mixed);
     }
 
     #[test]

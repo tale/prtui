@@ -393,6 +393,20 @@ fn draw_diff(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
         layout.diff_pane,
     );
 
+    if app
+        .tree_row(app.selected_file)
+        .and_then(|row| row.local)
+        .is_some_and(|state| !state.has_net_changes)
+    {
+        draw_centered(
+            frame,
+            area,
+            "Staged and unstaged changes cancel out against HEAD",
+            theme.muted,
+        );
+        return;
+    }
+
     let Some(open) = app.open() else {
         draw_centered(frame, area, "no diff selected", theme.dim);
         return;
@@ -1380,6 +1394,16 @@ fn draw_bottom_bar(
         mode_chip(app.mode, theme),
         Span::styled(pane, bar.fg(theme.accent).add_modifier(Modifier::BOLD)),
     ];
+
+    if app.overlay_mode().is_none()
+        && let Some(local) =
+            app.tree_row(app.selected_file).and_then(|row| row.local)
+    {
+        spans.push(Span::styled(
+            format!(" · {}", local.staging.label()),
+            bar.fg(theme.muted),
+        ));
+    }
 
     // The `:` line and the search box are the same widget in the same place,
     // so an open command line covers the query rather than sitting beside it.

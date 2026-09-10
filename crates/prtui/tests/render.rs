@@ -2915,6 +2915,7 @@ fn local_diff_renders_without_review_actions() {
             Arc::from("local.rs"),
             Arc::from(["new".to_string(), "unchanged".to_string()]),
         )]),
+        std::collections::HashMap::new(),
     );
     assert!(!app.is_loading());
     assert!(app.view().pr.is_none());
@@ -2974,4 +2975,97 @@ fn local_diff_renders_without_review_actions() {
         .collect();
     assert!(screen.contains("local changes  /repo"));
     assert!(!screen.contains("browser"));
+}
+
+#[test]
+fn local_tree_shows_staging_and_explains_cancelled_changes() {
+    use prtui_tui::app::local::{LocalFile, Staging};
+    use std::collections::HashMap;
+
+    let states: HashMap<Arc<str>, LocalFile> = [
+        ("a.rs", Staging::Mixed),
+        ("b.rs", Staging::Staged),
+        ("c.rs", Staging::Unstaged),
+        ("d.rs", Staging::Untracked),
+    ]
+    .into_iter()
+    .map(|(path, staging)| {
+        (
+            Arc::from(path),
+            LocalFile {
+                staging,
+                has_net_changes: path != "a.rs",
+            },
+        )
+    })
+    .collect();
+    let files = ["a.rs", "b.rs", "c.rs", "d.rs"]
+        .map(|path| prtui_core::ChangedFile {
+            path: path.into(),
+            status: "modified".into(),
+            additions: 0,
+            deletions: 0,
+            lines: Vec::new(),
+        })
+        .to_vec();
+    let mut app = App::local(
+        prtui_tui::renderer::Theme::dark(),
+        "/repo".into(),
+        files,
+        HashMap::new(),
+        states,
+    );
+    let layout = layout_of(&app);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, app.view(), &layout, ui::ExitHint::Quit))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let tree = layout.files_list.unwrap();
+    for (index, label) in ["SU", "S ", " U", " ?"].iter().enumerate() {
+        let row: String = (tree.x..tree.right())
+            .map(|x| buffer[(x, tree.y + index as u16)].symbol())
+            .collect();
+        assert!(row.ends_with(label), "{row}");
+        assert!(
+            row.contains(["a.rs", "b.rs", "c.rs", "d.rs"][index]),
+            "{row}"
+        );
+    }
+    let screen: String = buffer
+        .content
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+    assert!(
+        screen.contains("Staged and unstaged changes cancel out against HEAD")
+    );
+    for (index, label) in
+        ["staged + unstaged", "staged", "unstaged", "untracked"]
+            .iter()
+            .enumerate()
+    {
+        if index > 0 {
+            app.apply(&Action::NextFile(1), &layout_of(&app));
+        }
+        let layout = layout_of(&app);
+        terminal
+            .draw(|frame| {
+                ui::draw(frame, app.view(), &layout, ui::ExitHint::Quit);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let bottom_bar: String = (layout.status.x..layout.status.right())
+            .map(|x| buffer[(x, layout.status.y)].symbol())
+            .collect();
+        assert!(
+            bottom_bar.contains(&format!(" · {label}  file")),
+            "{bottom_bar}"
+        );
+    }
+    let reference = app.keymap().reference();
+    for marker in ["S ", " U", "SU", " ?"] {
+        assert!(reference.iter().any(|entry| matches!(entry,
+            prtui_tui::app::keymap::Reference::Entry { keys, .. } if keys == marker)));
+    }
 }

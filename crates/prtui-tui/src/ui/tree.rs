@@ -259,6 +259,7 @@ fn file_line<'a>(
         file,
         is_selected,
         is_viewed,
+        local,
         threads,
         unresolved,
     } = *row;
@@ -284,8 +285,11 @@ fn file_line<'a>(
         .as_ref()
         .map_or(0, |(adds, dels)| adds.len() + dels.len() + 2);
     let indent = depth * tree::INDENT;
-    let name_width =
-        width.saturating_sub(counts_width + MARKER_WIDTH + indent + ICON_WIDTH);
+    let staging = local.map(|state| state.staging.marker());
+    let staging_width = staging.map_or(0, |label| label.len() + 1);
+    let name_width = width.saturating_sub(
+        counts_width + MARKER_WIDTH + indent + ICON_WIDTH + staging_width,
+    );
 
     // Two things to say and no bar left to say one of them: the background is
     // where the cursor is, the weight is which file the diff is showing. They
@@ -341,6 +345,10 @@ fn file_line<'a>(
             Span::styled(" ", base),
             Span::styled(dels, base.fg(theme.danger)),
         ]);
+    }
+
+    if let Some(label) = staging {
+        spans.push(Span::styled(format!(" {label}"), base.fg(theme.muted)));
     }
 
     Line::from(spans)

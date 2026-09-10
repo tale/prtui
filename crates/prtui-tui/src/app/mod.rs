@@ -8,6 +8,7 @@ pub mod input;
 pub mod keymap;
 pub mod keys;
 pub mod link;
+pub mod local;
 pub mod mode;
 mod navigation;
 mod prompt;
@@ -69,6 +70,7 @@ pub struct TreeRow<'a> {
     pub file: &'a ChangedFile,
     pub is_selected: bool,
     pub is_viewed: bool,
+    pub local: Option<local::LocalFile>,
     pub threads: usize,
     pub unresolved: usize,
 }
@@ -394,6 +396,7 @@ struct RuntimeState {
 
 pub struct App {
     local_root: Option<String>,
+    local_files: HashMap<Arc<str>, local::LocalFile>,
     review: ReviewState,
     navigation: NavigationState,
     prompts: PromptState,
@@ -430,6 +433,7 @@ impl App {
     pub fn with_theme(theme: Theme) -> Self {
         Self {
             local_root: None,
+            local_files: HashMap::new(),
             review: ReviewState::default(),
             navigation: NavigationState::default(),
             prompts: PromptState::default(),
@@ -449,9 +453,11 @@ impl App {
         root: String,
         files: Vec<ChangedFile>,
         blobs: HashMap<Arc<str>, Arc<[String]>>,
+        local_files: HashMap<Arc<str>, local::LocalFile>,
     ) -> Self {
         let mut app = Self::with_theme(theme);
         app.local_root = Some(root);
+        app.local_files = local_files;
         app.keymap = Keymap::local();
         app.runtime.loading.meta_ready();
         app.set_files(files);
@@ -860,6 +866,7 @@ impl App {
             file,
             is_selected: index == self.navigation.selected_file,
             is_viewed: self.review.viewed.contains(&file.path),
+            local: self.local_files.get(&file.path).copied(),
             threads: threads.len(),
             unresolved: threads.iter().filter(|t| !t.is_resolved).count(),
         })
