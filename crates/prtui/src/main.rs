@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use prtui_core::Provider;
 use prtui_core::{PullRequestTarget, Repo};
 use prtui_github::GitHub;
@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 mod dashboard;
 mod detection;
 mod external;
+mod local;
 
 #[derive(Parser)]
 #[command(
@@ -32,6 +33,9 @@ mod external;
     about = "Review GitHub pull requests in the terminal"
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Pull request number
     number: Option<u32>,
 
@@ -44,8 +48,14 @@ struct Args {
     provider: Option<ProviderChoice>,
 
     /// Color theme; auto queries the terminal's actual background
-    #[arg(long, value_enum, default_value_t = ThemeChoice::Auto)]
+    #[arg(long, global = true, value_enum, default_value_t = ThemeChoice::Auto)]
     theme: ThemeChoice,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// View staged, unstaged, and untracked local changes
+    Diff,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -279,6 +289,18 @@ impl ReviewExit {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    if matches!(args.command, Some(Command::Diff)) {
+        if args.number.is_some()
+            || args.repo.is_some()
+            || args.provider.is_some()
+        {
+            bail!(
+                "diff uses the current local repository; omit the PR number, --repo, and --provider"
+            );
+        }
+        return local::run(args.theme).await;
+    }
+
     let (provider, slug) = detection::resolve(&args).await?;
 
     match provider {
@@ -389,29 +411,21 @@ async fn event_loop<P: Provider>(
     follow_terminal: bool,
     target: PullRequestTarget,
     provider: P,
-    mut exit: ReviewExit,
+    exit: ReviewExit,
 ) -> Result<ReviewExit> {
-    let (tx, mut rx) = mpsc::unbounded_channel();
     let number = target.number;
     let repo = target.repo;
     let mut app = App::with_theme(*theme);
     app.start();
-    let mut input = InputRouter::default();
-    let highlighter = highlighter::Highlighter::new({
-        let tx = tx.clone();
-        move |output| {
-            let _ = tx.send(Message::Highlight(output));
-        }
-    });
-    let mut is_dirty = true;
-    // Replaced by the first frame's own layout before any input is routed
-    // against it, since the loop draws before it reads.
-    let mut layout = Layout::compute(terminal.get_frame().area(), app.view());
-    let mut animation = tokio::time::interval(Duration::from_millis(90));
-    animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    while !app.should_quit() {
-        for effect in app.take_effects() {
+    viewer_loop(
+        terminal,
+        events,
+        theme,
+        follow_terminal,
+        app,
+        exit,
+        move |effect, tx, terminal| {
             match effect {
                 Effect::FetchFiles => {
                     spawn_files_fetch(
@@ -445,6 +459,58 @@ async fn event_loop<P: Provider>(
                     number,
                     tx.clone(),
                 ),
+                Effect::Errand(Errand::Open(link)) => {
+                    let url = resolve_link(provider, &repo, number, &link);
+                    if let Err(err) = external::open_url(&url) {
+                        let _ = tx.send(Message::App(
+                            AppMessage::ExternalFailure(err.to_string()),
+                        ));
+                    }
+                }
+                Effect::Errand(Errand::Copy(link)) => {
+                    let url = resolve_link(provider, &repo, number, &link);
+                    terminal::copy(terminal, &url)
+                        .context("copying to the clipboard")?;
+                }
+                Effect::HighlightAll | Effect::Highlight(_) => unreachable!(),
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+async fn viewer_loop(
+    terminal: &mut terminal::AppTerminal,
+    events: &mut EventStream,
+    theme: &mut Theme,
+    follow_terminal: bool,
+    mut app: App,
+    mut exit: ReviewExit,
+    mut execute: impl FnMut(
+        Effect,
+        &mpsc::UnboundedSender<Message>,
+        &mut terminal::AppTerminal,
+    ) -> Result<()>,
+) -> Result<ReviewExit> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut input = InputRouter::default();
+    let highlighter = highlighter::Highlighter::new({
+        let tx = tx.clone();
+        move |output| {
+            let _ = tx.send(Message::Highlight(output));
+        }
+    });
+    let mut is_dirty = true;
+    // Replaced by the first frame's own layout before any input is routed
+    // against it, since the loop draws before it reads.
+    let mut layout = Layout::compute(terminal.get_frame().area(), app.view());
+    let mut animation = tokio::time::interval(Duration::from_millis(90));
+    animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    while !app.should_quit() {
+        for effect in app.take_effects() {
+            match effect {
                 Effect::HighlightAll => {
                     let view = app.view();
                     highlighter.all(
@@ -461,19 +527,7 @@ async fn event_loop<P: Provider>(
                         highlighter.one(file, view.theme().mode);
                     }
                 }
-                Effect::Errand(Errand::Open(link)) => {
-                    let url = resolve_link(provider, &repo, number, &link);
-                    if let Err(err) = external::open_url(&url) {
-                        app.receive(AppMessage::ExternalFailure(
-                            err.to_string(),
-                        ));
-                    }
-                }
-                Effect::Errand(Errand::Copy(link)) => {
-                    let url = resolve_link(provider, &repo, number, &link);
-                    terminal::copy(terminal, &url)
-                        .context("copying to the clipboard")?;
-                }
+                effect => execute(effect, &tx, terminal)?,
             }
         }
 

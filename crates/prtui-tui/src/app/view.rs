@@ -83,6 +83,10 @@ impl<'a> View<'a> {
         }
     }
 
+    pub fn local_root(self) -> Option<&'a str> {
+        self.app.local_root.as_deref()
+    }
+
     pub const fn theme(self) -> Theme {
         self.app.theme()
     }

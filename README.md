@@ -19,6 +19,19 @@ prtui -R owner/repo 123
 prtui -R owner/repo
 ```
 
+Review uncommitted changes from anywhere inside a Git working tree:
+
+```sh
+prtui diff
+prtui diff --theme light
+```
+
+This shows staged and unstaged changes together against `HEAD`, plus untracked
+files. Ignored files are excluded. Navigation, search, syntax highlighting, and
+context expansion are available; review comments and browser links are not.
+The view is a snapshot; rerun the command to pick up further edits. Local diffs
+require Git but no GitHub account or `gh` authentication.
+
 ## Install
 
 Any of these work. All of them need the [GitHub CLI][gh] on your `PATH`, which

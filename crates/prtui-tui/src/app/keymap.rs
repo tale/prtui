@@ -170,6 +170,7 @@ struct Binding {
 /// and the keys of a chord still waiting for its last one (`g`, `z`).
 pub struct Keymap {
     bindings: Vec<Binding>,
+    is_local: bool,
     count: Option<usize>,
     pending: Vec<Key>,
 }
@@ -198,9 +199,22 @@ impl Keymap {
 
         Self {
             bindings,
+            is_local: false,
             count: None,
             pending: Vec::new(),
         }
+    }
+
+    /// Builds the bindings available when viewing local changes.
+    pub fn local() -> Self {
+        let mut keymap = Self {
+            is_local: true,
+            ..Self::default()
+        };
+        keymap.bindings.retain(|binding| {
+            (binding.command.build)(Count::default()).is_local()
+        });
+        keymap
     }
 
     /// The key reference: the command table, annotated with the chords bound
@@ -214,6 +228,10 @@ impl Keymap {
         let mut group = "";
 
         for command in command::COMMANDS {
+            if self.is_local && !(command.build)(Count::default()).is_local() {
+                continue;
+            }
+
             if command.group != group {
                 group = command.group;
                 lines.push(Reference::Heading(group));

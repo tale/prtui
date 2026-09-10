@@ -2897,3 +2897,81 @@ fn pending_threads_come_back_as_drafts() {
         app.view().threads_by_path.values().map(Vec::len).sum();
     assert_eq!(threads, 1);
 }
+
+#[test]
+fn local_diff_renders_without_review_actions() {
+    let files = vec![prtui_core::ChangedFile {
+        path: "local.rs".into(),
+        status: "modified".into(),
+        additions: 1,
+        deletions: 1,
+        lines: prtui_core::parse_patch("@@ -1 +1 @@\n-old\n+new"),
+    }];
+    let mut app = App::local(
+        prtui_tui::renderer::Theme::dark(),
+        "/repo".into(),
+        files,
+        std::collections::HashMap::from([(
+            Arc::from("local.rs"),
+            Arc::from(["new".to_string(), "unchanged".to_string()]),
+        )]),
+    );
+    assert!(!app.is_loading());
+    assert!(app.view().pr.is_none());
+    assert!(matches!(
+        app.take_effects().as_slice(),
+        [Effect::HighlightAll]
+    ));
+    app.start();
+    let layout = layout_of(&app);
+    for action in [
+        Action::StartComment,
+        Action::StartFileComment,
+        Action::StartSubmit,
+        Action::OpenOverview,
+        Action::OpenInBrowser,
+        Action::YankLink,
+        Action::ToggleViewed,
+    ] {
+        app.apply(&action, &layout);
+    }
+    assert!(app.take_effects().is_empty());
+    assert!(app.view().composer.is_none());
+    assert!(app.view().submission.is_none());
+    assert_eq!(app.view().mode, prtui_tui::app::mode::Mode::Normal);
+    app.apply(&Action::ExpandFile, &layout);
+    assert!(
+        app.current_file()
+            .unwrap()
+            .lines
+            .iter()
+            .any(|line| line.text == "unchanged")
+    );
+    assert!(
+        app.take_effects()
+            .iter()
+            .all(|effect| matches!(effect, Effect::Highlight(_)))
+    );
+    let reference = app.keymap().reference();
+    assert!(!reference.iter().any(|entry| matches!(
+        entry,
+        prtui_tui::app::keymap::Reference::Entry {
+            name: "comment" | "submit" | "overview" | "open",
+            ..
+        }
+    )));
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, app.view(), &layout, ui::ExitHint::Quit))
+        .unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+    assert!(screen.contains("local changes  /repo"));
+    assert!(!screen.contains("browser"));
+}

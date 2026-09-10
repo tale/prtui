@@ -227,6 +227,18 @@ fn help_line(line: &Reference, width: usize, theme: Theme) -> Line<'static> {
 fn draw_header(frame: &mut Frame, app: AppView<'_>, area: Rect) {
     let theme = app.theme();
     let spans = match app.pr {
+        None if app.local_root().is_some() => vec![Span::styled(
+            truncate(
+                &format!(
+                    " local changes  {}",
+                    app.local_root().unwrap_or_default()
+                ),
+                area.width as usize,
+            ),
+            Style::default()
+                .fg(theme.heading)
+                .add_modifier(Modifier::BOLD),
+        )],
         None => vec![Span::styled(
             " prtui ",
             Style::default()
@@ -1447,6 +1459,13 @@ fn draw_bottom_bar(
 
     let exit_label = exit_hint.label();
     let keys: &[(&str, &str)] = match (app.mode, app.pane) {
+        (Mode::Normal | Mode::Visual, _) if app.local_root().is_some() => &[
+            ("j/k", "move"),
+            ("tab", "pane"),
+            ("[/]", "file"),
+            ("/", "find"),
+            ("zR", "expand"),
+        ],
         (Mode::Filter, _) => {
             &[("↑↓", "select"), ("↵", "apply"), ("esc", "cancel")]
         }

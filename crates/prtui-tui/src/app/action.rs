@@ -93,3 +93,28 @@ pub enum Action {
 
     Quit,
 }
+
+impl Action {
+    pub const fn is_local(&self) -> bool {
+        !matches!(
+            self,
+            Self::NextComment(_)
+                | Self::PrevComment(_)
+                | Self::StartComment
+                | Self::StartFileComment
+                | Self::CommitComment
+                | Self::CancelComment
+                | Self::EditDraft
+                | Self::DeleteDraft
+                | Self::ToggleResolved
+                | Self::ToggleViewed
+                | Self::StartSubmit
+                | Self::CommitSubmit
+                | Self::CancelSubmit
+                | Self::CycleEvent(_)
+                | Self::OpenOverview
+                | Self::OpenInBrowser
+                | Self::YankLink
+        )
+    }
+}

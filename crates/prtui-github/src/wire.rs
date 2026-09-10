@@ -5,8 +5,8 @@
 
 use anyhow::{Context, Result};
 use prtui_core::{
-    AddedThread, ChangedFile, Comment, DiffLine, LineKind, Meta, NewThread,
-    Parent, PullRequest, ReviewEvent, ReviewThread, Side, parse_hunk_header,
+    AddedThread, ChangedFile, Comment, DiffLine, Meta, NewThread, Parent,
+    PullRequest, ReviewEvent, ReviewThread, Side, parse_patch,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -34,61 +34,6 @@ impl From<File> for ChangedFile {
             lines,
         }
     }
-}
-
-fn parse_patch(patch: &str) -> Vec<DiffLine> {
-    let mut lines = Vec::with_capacity(patch.lines().count());
-    let mut old_line = 0;
-    let mut new_line = 0;
-
-    for raw in patch.lines() {
-        if raw.starts_with("@@") {
-            let Some((old, new)) = parse_hunk_header(raw) else {
-                continue;
-            };
-
-            old_line = old;
-            new_line = new;
-            lines.push(DiffLine {
-                kind: LineKind::Hunk,
-                text: raw.to_string(),
-                old_line: None,
-                new_line: None,
-            });
-            continue;
-        }
-
-        let (kind, text) = match raw.as_bytes().first() {
-            Some(b'+') => (LineKind::Added, &raw[1..]),
-            Some(b'-') => (LineKind::Removed, &raw[1..]),
-            Some(b' ') => (LineKind::Context, &raw[1..]),
-            _ => continue,
-        };
-
-        let (old, new) = match kind {
-            LineKind::Added => (None, Some(new_line)),
-            LineKind::Removed => (Some(old_line), None),
-            LineKind::Context | LineKind::Hunk => {
-                (Some(old_line), Some(new_line))
-            }
-        };
-
-        if kind != LineKind::Added {
-            old_line += 1;
-        }
-        if kind != LineKind::Removed {
-            new_line += 1;
-        }
-
-        lines.push(DiffLine {
-            kind,
-            text: text.to_string(),
-            old_line: old,
-            new_line: new,
-        });
-    }
-
-    lines
 }
 
 /// The path a `---`/`+++` header names, ignoring the side that is `/dev/null`.
@@ -525,7 +470,7 @@ pub fn review_variables(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prtui_core::Anchor;
+    use prtui_core::{Anchor, LineKind};
 
     fn response(pull_request: &Value) -> Value {
         json!({ "data": { "repository": { "pullRequest": pull_request } } })

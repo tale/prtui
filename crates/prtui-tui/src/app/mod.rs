@@ -393,6 +393,7 @@ struct RuntimeState {
 }
 
 pub struct App {
+    local_root: Option<String>,
     review: ReviewState,
     navigation: NavigationState,
     prompts: PromptState,
@@ -428,6 +429,7 @@ impl App {
 
     pub fn with_theme(theme: Theme) -> Self {
         Self {
+            local_root: None,
             review: ReviewState::default(),
             navigation: NavigationState::default(),
             prompts: PromptState::default(),
@@ -439,6 +441,23 @@ impl App {
             fetching: HashSet::new(),
             deferred: None,
         }
+    }
+
+    /// Opens a local snapshot with file navigation and no provider actions.
+    pub fn local(
+        theme: Theme,
+        root: String,
+        files: Vec<ChangedFile>,
+        blobs: HashMap<Arc<str>, Arc<[String]>>,
+    ) -> Self {
+        let mut app = Self::with_theme(theme);
+        app.local_root = Some(root);
+        app.keymap = Keymap::local();
+        app.runtime.loading.meta_ready();
+        app.set_files(files);
+        app.blobs = blobs;
+        app.runtime.effects.push(Effect::HighlightAll);
+        app
     }
 
     pub const fn theme(&self) -> Theme {
@@ -474,6 +493,10 @@ impl App {
 
     /// Starts the two independent initial reads exactly once.
     pub fn start(&mut self) {
+        if self.local_root.is_some() {
+            return;
+        }
+
         let Some(generation) = self.runtime.loading.start() else {
             return;
         };
@@ -953,6 +976,11 @@ impl App {
             return;
         }
 
+        if self.local_root.is_some() {
+            self.runtime.status = "file contents unavailable".into();
+            return;
+        }
+
         // The commit to read the file at comes with the metadata, which is a
         // separate fetch and may not have landed yet.
         let Some(commit) =
@@ -1159,6 +1187,12 @@ impl App {
     }
 
     pub fn apply(&mut self, action: &Action, layout: &Layout) {
+        if self.local_root.is_some() && !action.is_local() {
+            self.runtime.status =
+                "command unavailable for local changes".into();
+            return;
+        }
+
         // Only a second escape discards, so every other key stands the composer
         // back down.
         if !matches!(action, Action::CancelComment)
