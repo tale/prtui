@@ -22,7 +22,7 @@ prtui -R owner/repo
 ## Install
 
 Any of these work. All of them need the [GitHub CLI][gh] on your `PATH`, which
-is where `prtui` gets its credentials and works out which repo you are in.
+is where `prtui` gets its credentials. Repository discovery reads Git remotes directly.
 
 **Homebrew**
 
@@ -71,6 +71,24 @@ prtui 1234 -R github.example.com/team/service
 
 Each host needs its own `gh` login; `prtui` uses the token for the host it is
 reviewing and never sends one host's credential to another.
+
+Provider selection uses `--provider` first, then the saved host mapping, then
+known hosts and concurrent provider probes with a two-second timeout. GitHub
+is the fallback when detection is inconclusive and is currently the only
+implemented provider. An explicit override applies to the current run.
+
+Positive detections are saved in `$XDG_CONFIG_HOME/prtui/hosts.json`, or
+`~/.config/prtui/hosts.json` when `XDG_CONFIG_HOME` is unset. Inconclusive
+fallbacks are not saved. Edit or remove a host entry to correct or refresh it:
+
+```json
+{
+  "github.example.com": "github"
+}
+```
+
+Local discovery prefers `origin`, then other network remotes. Use `-R` to
+select a different repository.
 
 ```
 Options:

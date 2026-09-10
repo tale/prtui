@@ -40,11 +40,6 @@ pub trait Provider: Copy + Send + 'static {
         lines: Option<(u32, u32)>,
     ) -> String;
 
-    /// Detects the repository in the current working directory, if any.
-    fn current_repo_if_present(
-        self,
-    ) -> impl Future<Output = Result<Option<Repo>>> + Send;
-
     /// Lists open pull requests in one repository.
     fn repository_pull_requests(
         self,

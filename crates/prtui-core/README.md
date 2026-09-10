@@ -12,7 +12,8 @@ To add a provider:
    futures remain concrete, so generic callers use static dispatch without
    boxed futures or trait objects.
 5. Add one variant to `ProviderChoice` and one arm to the startup match in
-   `crates/prtui/src/main.rs`.
+   `crates/prtui/src/main.rs`, and register its host recognition and probe in
+   `crates/prtui/src/detection.rs`. Git remote discovery belongs to the app.
 
 Provider identifiers are opaque strings. Do not expose API-specific ID types,
 JSON values, URL shapes, or transport errors to `prtui-tui`.

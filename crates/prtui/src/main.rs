@@ -22,6 +22,7 @@ use termina::{Event, EventStream};
 use tokio::sync::mpsc;
 
 mod dashboard;
+mod detection;
 mod external;
 
 #[derive(Parser)]
@@ -39,8 +40,8 @@ struct Args {
     repo: Option<String>,
 
     /// Code-review host
-    #[arg(long, value_enum, default_value_t = ProviderChoice::Github)]
-    provider: ProviderChoice,
+    #[arg(long, value_enum)]
+    provider: Option<ProviderChoice>,
 
     /// Color theme; auto queries the terminal's actual background
     #[arg(long, value_enum, default_value_t = ThemeChoice::Auto)]
@@ -54,7 +55,7 @@ enum ThemeChoice {
     Light,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ProviderChoice {
     Github,
 }
@@ -278,18 +279,24 @@ impl ReviewExit {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    match args.provider {
-        ProviderChoice::Github => start(args, GitHub).await,
+    let (provider, slug) = detection::resolve(&args).await?;
+
+    match provider {
+        ProviderChoice::Github => start(args, GitHub, slug).await,
     }
 }
 
-async fn start<P: Provider>(args: Args, provider: P) -> Result<()> {
+async fn start<P: Provider>(
+    args: Args,
+    provider: P,
+    slug: Option<String>,
+) -> Result<()> {
     let follow_terminal = args.theme.follows_terminal();
 
-    let repo = match &args.repo {
-        Some(slug) => Some(provider.parse_repo(slug)?),
-        None => provider.current_repo_if_present().await?,
-    };
+    let repo = slug
+        .as_deref()
+        .map(|slug| provider.parse_repo(slug))
+        .transpose()?;
 
     let launch = match (args.number, repo) {
         (Some(number), repo) => Launch::Review {

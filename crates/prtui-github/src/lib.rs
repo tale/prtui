@@ -9,9 +9,9 @@ use prtui_core::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use tokio::process::Command;
 use ureq::http::Uri;
 
+mod detection;
 mod transport;
 mod url;
 mod wire;
@@ -316,16 +316,6 @@ fn parse_repo(slug: &str) -> Result<Repo> {
         namespace: owner.to_string(),
         name: name.to_string(),
     })
-}
-
-fn repo_from_url(url: &str) -> Result<Repo> {
-    let url = url.trim();
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-
-    parse_repo(rest.trim_end_matches(".git"))
 }
 
 fn enterprise_host(repo: &Repo) -> Option<&str> {
@@ -1369,21 +1359,6 @@ async fn fetch_outage(repo: &Repo) -> Option<String> {
     .ok()?
 }
 
-async fn gh_output(args: &[&str], failure: &str) -> Result<Vec<u8>> {
-    let output = Command::new("gh")
-        .args(args)
-        .output()
-        .await
-        .context("failed to spawn gh; is it installed and on PATH?")?;
-
-    if !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr);
-        bail!("{failure}: {}", error.trim());
-    }
-
-    Ok(output.stdout)
-}
-
 async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
     let token = write_token(&repo).await?;
     let url = graphql_url(&repo);
@@ -1514,39 +1489,6 @@ async fn user_pull_requests() -> Result<PullRequestList> {
     .context("user listing panicked")?
 }
 
-/// Returns the current GitHub repository when the process is inside a Git
-/// worktree.
-async fn current_repo_if_present() -> Result<Option<Repo>> {
-    let git = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .await
-        .context("failed to spawn git; is it installed and on PATH?")?;
-
-    if !git.status.success()
-        || String::from_utf8_lossy(&git.stdout).trim() != "true"
-    {
-        return Ok(None);
-    }
-
-    current_repo().await.map(Some)
-}
-
-/// Resolved from the local git remotes, which is the CLI's job rather than an
-/// API call.
-async fn current_repo() -> Result<Repo> {
-    // The web URL rather than `nameWithOwner`, which names the repository but
-    // not the host it lives on. Dropping the host sent an enterprise checkout
-    // to github.com.
-    let output = gh_output(
-        &["repo", "view", "--json", "url", "--jq", ".url"],
-        "gh repo view failed",
-    )
-    .await?;
-
-    repo_from_url(String::from_utf8_lossy(&output).trim())
-}
-
 impl Provider for GitHub {
     fn parse_repo(self, slug: &str) -> Result<Repo> {
         parse_repo(slug)
@@ -1583,10 +1525,6 @@ impl Provider for GitHub {
             Some((start, end)) if start == end => format!("{base}#L{start}"),
             Some((start, end)) => format!("{base}#L{start}-L{end}"),
         }
-    }
-
-    async fn current_repo_if_present(self) -> Result<Option<Repo>> {
-        current_repo_if_present().await
     }
 
     async fn repository_pull_requests(
@@ -1722,33 +1660,18 @@ mod tests {
         );
     }
 
-    /// `gh repo view` used to be asked for `nameWithOwner`, which named the
-    /// repository but not the host, so an enterprise checkout resolved to
-    /// github.com and took the github.com token with it.
     #[test]
-    fn a_web_url_keeps_the_host_it_names() {
-        let enterprise =
-            repo_from_url("https://github.example.com/team/service").unwrap();
+    fn explicit_hosts_select_the_correct_api() {
+        let enterprise = parse_repo("github.example.com/team/service").unwrap();
         assert_eq!(enterprise.host.as_deref(), Some("github.example.com"));
-        assert_eq!(enterprise_host(&enterprise), Some("github.example.com"));
         assert_eq!(
             rest_url(&enterprise, "/x"),
             "https://github.example.com/api/v3/x"
         );
 
-        // The public host is named the same way but is not an enterprise one,
-        // so it still resolves to the public API.
-        let public = repo_from_url("https://github.com/cli/cli").unwrap();
-        assert_eq!(public.namespace, "cli");
+        let public = parse_repo("github.com/cli/cli").unwrap();
         assert_eq!(enterprise_host(&public), None);
         assert_eq!(rest_url(&public, "/x"), "https://api.github.com/x");
-
-        assert_eq!(
-            repo_from_url("https://github.com/cli/cli.git")
-                .unwrap()
-                .name,
-            "cli"
-        );
     }
 
     /// The public token is not valid on another host, and handing it over would
