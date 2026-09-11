@@ -64,8 +64,29 @@ nix run github:tale/prtui -- 1234
 ```
 
 **Prebuilt binaries** for macOS and Linux, on arm64 and x86_64, are attached to
-every [release][releases] with SHA-256 checksums. Linux builds use glibc 2.35 so
-they require Ubuntu 22.04, Debian 12, RHEL 9, or newer.
+[releases][releases] with SHA-256 checksums. Choose a `linux-musl` archive for
+Linux; these binaries do not require a particular glibc version. The older
+`linux-gnu` archives require glibc 2.35 or newer.
+
+**Linux packages** are available as `.deb` (Debian/Ubuntu) and `.rpm`
+(Fedora/RHEL), with `amd64` for x86_64 and `arm64` for aarch64. Download the
+package and its matching `.sha256` file from the release, then install it:
+
+```sh
+# Debian / Ubuntu (replace VERSION and ARCH with the downloaded filename)
+sha256sum --check prtui-vVERSION-ARCH.deb.sha256
+sudo apt install ./prtui-vVERSION-ARCH.deb
+
+# Fedora / RHEL
+sha256sum --check prtui-vVERSION-ARCH.rpm.sha256
+sudo dnf install ./prtui-vVERSION-ARCH.rpm
+```
+
+Install and authenticate `gh` or `glab` separately as described below. These
+are optional package suggestions, so installing `prtui` does not select a
+provider for you. For other distributions, extract a `linux-musl` archive and
+install its `prtui` binary into a directory on your `PATH`, such as
+`~/.local/bin`.
 
 ## Authentication
 
