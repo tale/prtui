@@ -5,6 +5,9 @@ prtui = "cargo run --"
 "github:knope-dev/knope" = "knope/v0.23.0"
 lefthook = "latest"
 
+gh = "latest"
+glab = "latest"
+
 [hooks]
 postinstall = "lefthook install"
 
