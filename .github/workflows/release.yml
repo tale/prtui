@@ -165,5 +165,6 @@ jobs:
         run: |
           cargo publish --locked -p prtui-core
           cargo publish --locked -p prtui-github
+          cargo publish --locked -p prtui-gitlab
           cargo publish --locked -p prtui-tui
           cargo publish --locked -p prtui
