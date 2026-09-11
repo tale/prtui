@@ -211,27 +211,20 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
         run: gh workflow run update-prtui.yml --repo tale/homebrew-tap
 
-  # Trusted publishing: the token is minted per-run over OIDC and expires in
-  # 30 minutes, so no long-lived credential lives in the repository. crates.io
-  # matches the claim against the workflow filename, which is this file.
   crate:
     name: Publish to crates.io
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
     steps:
       - name: Checkout repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
         run: rustup show
-      - name: Mint a publish token
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
-        id: auth
       - name: Publish
         env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           cargo publish --locked -p prtui-core
           cargo publish --locked -p prtui-github
