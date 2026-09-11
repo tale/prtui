@@ -51,6 +51,12 @@ to be on your `PATH`. Local diffs need neither CLI.
 brew install tale/tap/prtui
 ```
 
+**[mise][mise]**
+
+```sh
+mise use -g github:tale/prtui@latest
+```
+
 **Cargo**
 
 ```sh
@@ -68,25 +74,28 @@ nix run github:tale/prtui -- 1234
 Linux; these binaries do not require a particular glibc version. The older
 `linux-gnu` archives require glibc 2.35 or newer.
 
-**Linux packages** are available as `.deb` (Debian/Ubuntu) and `.rpm`
-(Fedora/RHEL), with `amd64` for x86_64 and `arm64` for aarch64. Download the
-package and its matching `.sha256` file from the release, then install it:
+**[Install script](https://raw.githubusercontent.com/tale/prtui/main/install.sh)** for macOS and Linux:
 
 ```sh
-# Debian / Ubuntu (replace VERSION and ARCH with the downloaded filename)
-sha256sum --check prtui-vVERSION-ARCH.deb.sha256
-sudo apt install ./prtui-vVERSION-ARCH.deb
-
-# Fedora / RHEL
-sha256sum --check prtui-vVERSION-ARCH.rpm.sha256
-sudo dnf install ./prtui-vVERSION-ARCH.rpm
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/tale/prtui/main/install.sh)" --
 ```
 
-Install and authenticate `gh` or `glab` separately as described below. These
-are optional package suggestions, so installing `prtui` does not select a
-provider for you. For other distributions, extract a `linux-musl` archive and
-install its `prtui` binary into a directory on your `PATH`, such as
-`~/.local/bin`.
+The script downloads the latest release, verifies its SHA-256 checksum, and
+installs `prtui` into `~/.local/bin`. Add that directory to your `PATH` if needed.
+It requires `curl`, `tar`, and either `sha256sum` or `shasum`.
+
+To install the latest main build:
+
+```sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/tale/prtui/main/install.sh)" -- --head
+```
+
+Use `--version VERSION` to pin a release and `--install-dir DIR` to choose
+its destination. Main builds update the `head` prerelease; tagged releases
+remain the default.
+
+Install Git and authenticate `gh` or `glab` separately as described below.
+To uninstall, remove the installed `prtui` binary.
 
 ## Authentication
 

@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -11,26 +17,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # A tag that disagrees with the manifest ships a binary whose --version names
-  # a release nobody can find. Its own job so a mismatch fails once.
   verify:
-    name: Check the tag matches the manifest
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    name: Determine release version
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Compare
+      - name: Resolve version
+        id: version
         run: |
-          tagged=${GITHUB_REF_NAME#v}
           manifest=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          if [ "$manifest" != "$tagged" ]; then
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "tag=head" >> "$GITHUB_OUTPUT"
+            echo "version=$manifest-head.${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=${GITHUB_REF_NAME#v}
+          if [ "$manifest" != "$version" ]; then
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml $manifest" >&2
             exit 1
           fi
+          echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.target }}
     needs: verify
+    env:
+      PRTUI_TAG: ${{ needs.verify.outputs.tag }}
+      PRTUI_VERSION: ${{ needs.verify.outputs.version }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -46,12 +65,8 @@ jobs:
             runner: ubuntu-22.04
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-22.04-arm
-            package_arch: arm64
-            nfpm_arch: arm64
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-22.04
-            package_arch: amd64
-            nfpm_arch: x86_64
     steps:
       - name: Checkout repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,7 +80,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Install musl toolchain
-        if: matrix.package_arch
+        if: endsWith(matrix.target, '-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
@@ -75,52 +90,22 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C relocation-model=static
           CC_aarch64_unknown_linux_musl: musl-gcc
           CC_x86_64_unknown_linux_musl: musl-gcc
-        run: PRTUI_VERSION="${GITHUB_REF_NAME#v}" cargo build --release --locked -p prtui --target ${{ matrix.target }}
+        run: cargo build --release --locked -p prtui --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
         run: |
-          name="prtui-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="prtui-${PRTUI_TAG}-${{ matrix.target }}"
           mkdir "$name"
           cp target/${{ matrix.target }}/release/prtui README.md LICENSE "$name"/
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
 
-      - name: Install nFPM
-        if: matrix.package_arch
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          directory=$(mktemp -d)
-          archive="nfpm_2.47.0_Linux_${{ matrix.nfpm_arch }}.tar.gz"
-          gh release download v2.47.0 --repo goreleaser/nfpm \
-            --pattern "$archive" --pattern checksums.txt --dir "$directory"
-          cd "$directory"
-          awk -v archive="$archive" '$2 == archive' checksums.txt > selected.sha256
-          sha256sum --check selected.sha256
-          tar xzf "$archive" nfpm
-          echo "$directory" >> "$GITHUB_PATH"
-
-      - name: Package Linux installers
-        if: matrix.package_arch
-        env:
-          PRTUI_PACKAGE_ARCH: ${{ matrix.package_arch }}
-          PRTUI_BINARY: target/${{ matrix.target }}/release/prtui
-        run: |
-          export PRTUI_VERSION="${GITHUB_REF_NAME#v}"
-          mkdir -p target/package
-          cp "$PRTUI_BINARY" target/package/prtui
-          for format in deb rpm; do
-            package="prtui-${GITHUB_REF_NAME}-${{ matrix.package_arch }}.$format"
-            nfpm package --config packaging/nfpm.yaml --packager "$format" --target "$package"
-            sha256sum "$package" > "$package.sha256"
-          done
-
-      - name: Test Linux installations
-        if: matrix.package_arch
+      - name: Test portable Linux binaries
+        if: endsWith(matrix.target, '-musl')
         run: |
           binary="$PWD/target/${{ matrix.target }}/release/prtui"
-          expected="prtui ${GITHUB_REF_NAME#v}"
+          expected="prtui $PRTUI_VERSION"
           if readelf -l "$binary" | grep -q INTERP; then
             echo "Linux portable binary requires a dynamic loader" >&2
             exit 1
@@ -128,11 +113,6 @@ jobs:
           test "$("$binary" --version)" = "$expected"
           docker run --rm --network none -v "$binary:/usr/bin/prtui:ro" alpine:3.23 \
             sh -ec 'test "$(prtui --version)" = "$1"' sh "$expected"
-          sudo apt-get install -y ./prtui-"$GITHUB_REF_NAME"-${{ matrix.package_arch }}.deb
-          test "$(prtui --version)" = "$expected"
-          docker run --rm -v "$PWD:/packages:ro" fedora:43 sh -ec \
-            'dnf install -y /packages/"$1" && test "$(prtui --version)" = "$2" && ! command -v gh && ! command -v glab' \
-            sh "prtui-$GITHUB_REF_NAME-${{ matrix.package_arch }}.rpm" "$expected"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -141,15 +121,11 @@ jobs:
           path: |
             *.tar.gz
             *.tar.gz.sha256
-            *.deb
-            *.deb.sha256
-            *.rpm
-            *.rpm.sha256
           retention-days: 1
 
   release:
     name: Publish the GitHub release
-    needs: build
+    needs: [verify, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -166,6 +142,7 @@ jobs:
       # knope wrote this section from the changesets; lifting it verbatim is
       # what keeps the release notes and the file the same words.
       - name: Lift the release notes out of the changelog
+        if: github.ref_type == 'tag'
         run: |
           version="${GITHUB_REF_NAME#v}"
           awk -v heading="## $version " '
@@ -179,6 +156,7 @@ jobs:
           fi
 
       - name: Create the release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -188,10 +166,27 @@ jobs:
             --notes-file NOTES.md \
             artifacts/*
 
+      - name: Update head release
+        if: github.ref_type != 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          notes="Built from $GITHUB_SHA on main."
+          if ! gh release view head >/dev/null 2>&1; then
+            gh release create head --prerelease --latest=false \
+              --target "$GITHUB_SHA" --title HEAD --notes "$notes"
+          fi
+          gh release upload head artifacts/* --clobber
+          gh api --method PATCH "repos/$GH_REPO/git/refs/tags/head" \
+            -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          gh release edit head --prerelease --latest=false --notes "$notes"
+
   # The tap regenerates its formula from whatever the newest release published,
   # so this has to follow `release` rather than `build`: dispatching earlier
   # points the generator at assets that are not attached yet.
   tap:
+    if: github.ref_type == 'tag'
     name: Update the Homebrew tap
     needs: release
     runs-on: ubuntu-latest
@@ -212,6 +207,7 @@ jobs:
         run: gh workflow run update-prtui.yml --repo tale/homebrew-tap
 
   crate:
+    if: github.ref_type == 'tag'
     name: Publish to crates.io
     needs: build
     runs-on: ubuntu-latest
