@@ -1,13 +1,14 @@
 # prtui
 
-A modal terminal UI for reviewing GitHub pull requests for the people who are
+A modal terminal UI for reviewing GitHub pull requests and GitLab merge requests,
+for people who are
 most comfortable in the terminal with Vim motions and a command line.
 
 ![prtui reviewing a pull request](https://raw.githubusercontent.com/tale/prtui/main/docs/demo.gif)
 
 ## Usage
 
-Run `prtui` inside a GitHub repository to choose one of its open pull requests,
+Run `prtui` inside a GitHub or GitLab repository to choose one of its open pull requests,
 or outside a Git repository to choose from your open pull requests. The
 full-screen selector shows each pull request's current review decision, and
 `K` summarizes the one under the cursor without opening it. A number opens that
@@ -36,12 +37,13 @@ cancel out remain listed, with an explanation in the diff pane.
 Navigation, search, syntax highlighting, and context expansion are available;
 review comments and browser links are not.
 The view is a snapshot; rerun the command to pick up further edits. Local diffs
-require Git but no GitHub account or `gh` authentication.
+require Git but no account or provider CLI authentication.
 
 ## Install
 
-Any of these work. All of them need the [GitHub CLI][gh] on your `PATH`, which
-is where `prtui` gets its credentials. Repository discovery reads Git remotes directly.
+Install Git and `prtui`, then set up the CLI for the host you use: [GitHub
+CLI][gh] (`gh`) or [GitLab CLI][glab] (`glab`). Only that provider’s CLI needs
+to be on your `PATH`. Local diffs need neither CLI.
 
 **Homebrew**
 
@@ -65,9 +67,11 @@ nix run github:tale/prtui -- 1234
 every [release][releases] with SHA-256 checksums. Linux builds use glibc 2.35 so
 they require Ubuntu 22.04, Debian 12, RHEL 9, or newer.
 
-## Use
+## Authentication
 
-Authenticate once, then open a pull request by number:
+### GitHub
+
+Install `gh` (`brew install gh` on macOS), then authenticate:
 
 ```sh
 gh auth login
@@ -91,10 +95,43 @@ prtui 1234 -R github.example.com/team/service
 Each host needs its own `gh` login; `prtui` uses the token for the host it is
 reviewing and never sends one host's credential to another.
 
+### GitLab
+
+Install `glab` (`brew install glab` on macOS), then authenticate to the host
+that owns your repository:
+
+```sh
+glab auth login --hostname gitlab.com
+cd /path/to/checkout
+prtui 123
+```
+
+For self-hosted GitLab, include the hostname when logging in and selecting a
+repository. Nested groups are supported:
+
+```sh
+glab auth login --hostname gitlab.example.com
+prtui --provider gitlab -R gitlab.example.com/group/subgroup/project 123
+```
+
+Use a personal access token with the `api` scope when prompted for a token.
+The account also needs permission to access and review the project. Verify the
+login with `glab auth status --hostname gitlab.example.com`.
+
+Omit the number to choose an open merge request. Outside a checkout, list your
+GitLab merge requests with `prtui --provider gitlab`; for a self-hosted account,
+use `GITLAB_HOST=gitlab.example.com prtui --provider gitlab`.
+
+Each host needs its own login. `prtui` reads credentials from the selected
+provider’s CLI for that host. A permission error can mean the token lacks
+access to the project; check the CLI login and the repository passed to `-R`.
+
+### Repository selection
+
 Provider selection uses `--provider` first, then the saved host mapping, then
 known hosts and concurrent provider probes with a two-second timeout. GitHub
-is the fallback when detection is inconclusive and is currently the only
-implemented provider. An explicit override applies to the current run.
+is the fallback when detection is inconclusive. Use `--provider gitlab` if a
+self-hosted instance is not detected. An override applies to the current run.
 
 Positive detections are saved in `$XDG_CONFIG_HOME/prtui/hosts.json`, or
 `~/.config/prtui/hosts.json` when `XDG_CONFIG_HOME` is unset. Inconclusive
@@ -111,8 +148,8 @@ select a different repository.
 
 ```
 Options:
-  -R, --repo <[HOST/]OWNER/REPO>  Select another repository
-      --provider <github>         Code-review host [default: github]
+  -R, --repo <[HOST/]NAMESPACE/REPO>  Select another repository
+      --provider <github|gitlab>  Override provider detection
       --theme <auto|dark|light>   Color theme [default: auto]
   -h, --help                      Print help
   -V, --version                   Print version
@@ -148,7 +185,8 @@ colour, and the only one drawing a cursor bar: the other keeps the open file in
 bold and nothing else. `x` marks the open file as read — the same mark GitHub
 shows as viewed — and opens the next file you have not read, stepping over the
 ones you have. The file it left wears a tick in place of its icon. Pressing `x`
-again on a marked file clears the mark and stays there.
+again on a marked file clears the mark and stays there. GitLab does not persist
+viewed-file marks.
 
 Every jump between files treats the tree as a ring. Step off the last file and
 you are on the first, and the bar says it wrapped, so a review opened in the
@@ -159,7 +197,7 @@ or the file, and starts clean each time. `n`/`N` walk the hits and `:noh`
 clears them. Inside `/` or `:` the arrows step what is under it and
 `<C-p>`/`<C-n>` recall what you typed there before. `za` reveals the
 hidden lines under the cursor, `zj`/`zk` reveal downward or upward, and `zR`
-opens every gap in the file — the surrounding code is fetched from GitHub on
+opens every gap in the file — the surrounding code is fetched from the host on
 demand.
 
 **Prompts** — every prompt edits with **readline**, the same chords bash and
@@ -233,5 +271,6 @@ opens the pull request description ``, not `Add an overview overlay`.
 MIT. See `LICENSE`.
 
 [gh]: https://cli.github.com
+[glab]: https://gitlab.com/gitlab-org/cli
 [mise]: https://mise.jdx.dev
 [releases]: https://github.com/tale/prtui/releases
