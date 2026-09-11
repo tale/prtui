@@ -1,7 +1,7 @@
 {
   description = "A terminal UI for reviewing GitHub and GitLab changes";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/release-26.05";
 
   outputs = { self, nixpkgs }:
     let
