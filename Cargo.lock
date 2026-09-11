@@ -919,6 +919,7 @@ dependencies = [
  "devicons",
  "prtui-core",
  "prtui-github",
+ "prtui-gitlab",
  "prtui-tui",
  "ratatui",
  "serde_json",
@@ -940,6 +941,19 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "prtui-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
+name = "prtui-gitlab"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "prtui-core",
+ "ring",
  "serde",
  "serde_json",
  "tokio",

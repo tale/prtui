@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use prtui_core::Provider;
 use prtui_core::{PullRequestTarget, Repo};
 use prtui_github::GitHub;
+use prtui_gitlab::GitLab;
 use prtui_tui::app::App;
 use prtui_tui::app::action::Action;
 use prtui_tui::app::effect::{Effect, Message as AppMessage};
@@ -30,7 +31,7 @@ mod local;
 #[command(
     name = "prtui",
     version = env!("PRTUI_VERSION"),
-    about = "Review GitHub pull requests in the terminal"
+    about = "Review pull and merge requests in the terminal"
 )]
 struct Args {
     #[command(subcommand)]
@@ -39,8 +40,8 @@ struct Args {
     /// Pull request number
     number: Option<u32>,
 
-    /// Select another repository using the [HOST/]OWNER/REPO format
-    #[arg(short = 'R', long = "repo", value_name = "[HOST/]OWNER/REPO")]
+    /// Select another repository using the [HOST/]NAMESPACE/REPO format
+    #[arg(short = 'R', long = "repo", value_name = "[HOST/]NAMESPACE/REPO")]
     repo: Option<String>,
 
     /// Code-review host
@@ -68,6 +69,7 @@ enum ThemeChoice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ProviderChoice {
     Github,
+    Gitlab,
 }
 
 impl ThemeChoice {
@@ -305,6 +307,7 @@ async fn main() -> Result<()> {
 
     match provider {
         ProviderChoice::Github => start(args, GitHub, slug).await,
+        ProviderChoice::Gitlab => start(args, GitLab, slug).await,
     }
 }
 

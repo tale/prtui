@@ -3,6 +3,7 @@ members = [
     "crates/prtui",
     "crates/prtui-core",
     "crates/prtui-github",
+    "crates/prtui-gitlab",
     "crates/prtui-tui",
 ]
 resolver = "3"

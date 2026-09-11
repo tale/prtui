@@ -127,6 +127,12 @@ crates/
     lib.rs            GitHub client and API operations
     transport.rs      agent, token, HTTP, pagination, error detail
     wire.rs           deserialize structs + model conversion
+  prtui-gitlab/src/
+    lib.rs            GitLab client and API operations
+    transport.rs      agent, token, HTTP, pagination, error detail
+    wire.rs           deserialize structs + model conversion
+    ids.rs            opaque identifiers carrying the merge request
+    project.rs        how a host lets a project be addressed
   prtui-tui/src/
     app/              state machine and effects
     selector.rs       selector state, effects, and rendering

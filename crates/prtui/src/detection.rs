@@ -5,28 +5,32 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use prtui_github::GitHub;
+use prtui_gitlab::GitLab;
 use tokio::process::Command;
 
 use crate::{Args, ProviderChoice};
 
 impl ProviderChoice {
-    const ALL: &[Self] = &[Self::Github];
+    const ALL: &[Self] = &[Self::Github, Self::Gitlab];
 
     const fn name(self) -> &'static str {
         match self {
             Self::Github => "github",
+            Self::Gitlab => "gitlab",
         }
     }
 
     const fn recognizes_host(self, host: &str) -> bool {
         match self {
             Self::Github => GitHub.recognizes_host(host),
+            Self::Gitlab => GitLab.recognizes_host(host),
         }
     }
 
     async fn probe_host(self, host: &str) -> bool {
         match self {
             Self::Github => GitHub.probe_host(host, PROBE_TIMEOUT).await,
+            Self::Gitlab => GitLab.probe_host(host, PROBE_TIMEOUT).await,
         }
     }
 }
@@ -165,7 +169,9 @@ fn write_hosts(path: &Path, hosts: &BTreeMap<String, String>) -> Result<()> {
 
 fn slug_host(slug: &str) -> Option<&str> {
     let (first, rest) = slug.trim().split_once('/')?;
-    rest.contains('/').then_some(first)
+    let is_host = first.contains('.') || first.contains(':');
+
+    (rest.contains('/') && is_host).then_some(first)
 }
 
 async fn current_remote(directory: &Path) -> Result<Option<String>> {
