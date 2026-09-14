@@ -18,6 +18,8 @@
             PRTUI_VERSION = version;
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
+
+            nativeCheckInputs = [ pkgs.git ];
           };
         });
 
