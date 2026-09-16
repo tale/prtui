@@ -48,7 +48,6 @@ pub struct WireMergeRequest {
     pub sha: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    pub updated_at: String,
     #[serde(default)]
     pub diff_refs: Option<DiffRefs>,
 }
@@ -387,11 +386,6 @@ pub enum Pending {
 pub struct WireTreeEntry {
     pub id: String,
     pub path: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct WirePipeline {
-    pub id: u64,
 }
 
 #[derive(Debug, Deserialize)]

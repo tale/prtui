@@ -223,27 +223,6 @@ mod tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
-    fn merge_request() -> Value {
-        json!({
-            "iid": "42", "title": "Fix parser", "draft": false,
-            "author": { "username": "alice", "name": "Alice" },
-            "reviewers": { "nodes": [{ "username": "bob" }] },
-            "diffStatsSummary": { "additions": 123, "deletions": 45 },
-            "targetProject": { "fullPath": "group/sub/project" }
-        })
-    }
-
-    fn page(
-        nodes: &[Value],
-        has_next_page: bool,
-        end_cursor: Option<&str>,
-    ) -> Value {
-        json!({ "data": { "scope": { "mergeRequests": {
-            "nodes": nodes,
-            "pageInfo": { "hasNextPage": has_next_page, "endCursor": end_cursor }
-        }}}})
-    }
-
     fn server(
         responses: Vec<Value>,
     ) -> (String, std::thread::JoinHandle<Vec<Value>>) {
@@ -287,6 +266,27 @@ mod tests {
             requests
         });
         (url, handle)
+    }
+
+    fn merge_request() -> Value {
+        json!({
+            "iid": "42", "title": "Fix parser", "draft": false,
+            "author": { "username": "alice", "name": "Alice" },
+            "reviewers": { "nodes": [{ "username": "bob" }] },
+            "diffStatsSummary": { "additions": 123, "deletions": 45 },
+            "targetProject": { "fullPath": "group/sub/project" }
+        })
+    }
+
+    fn page(
+        nodes: &[Value],
+        has_next_page: bool,
+        end_cursor: Option<&str>,
+    ) -> Value {
+        json!({ "data": { "scope": { "mergeRequests": {
+            "nodes": nodes,
+            "pageInfo": { "hasNextPage": has_next_page, "endCursor": end_cursor }
+        }}}})
     }
 
     #[test]

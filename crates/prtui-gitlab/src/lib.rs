@@ -5,6 +5,7 @@
 mod detection;
 mod ids;
 mod listing;
+mod overview;
 mod project;
 mod transport;
 mod url;
@@ -14,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use prtui_core::{
     AddedThread, ChangedFile, Comment, Meta, NewThread, Parent, Provider,
     PullRequestList, PullRequestOverview, Repo, ReviewEvent, ReviewThread,
-    Summary, Threads,
+    Summary,
 };
 use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet};
@@ -25,8 +26,8 @@ use project::ProjectRef;
 use transport::Retry;
 use url::{escape_path, escape_segment};
 use wire::{
-    DiffRefs, WireApprovals, WireDiff, WireDiscussion, WireDraftNote, WireJob,
-    WireMergeRequest, WirePipeline, WireReviewer, WireTreeEntry,
+    DiffRefs, WireDiff, WireDiscussion, WireDraftNote, WireMergeRequest,
+    WireReviewer, WireTreeEntry,
 };
 
 const DEFAULT_HOST: &str = "gitlab.com";
@@ -221,72 +222,7 @@ async fn fetch_overview(
     repo: &Repo,
     number: u32,
 ) -> Result<PullRequestOverview> {
-    let path = format!("/merge_requests/{number}/discussions");
-    let (mr, files, checks, approvals, discussions, reviewers) = tokio::try_join!(
-        merge_request(repo, number),
-        fetch_diffs(repo, number),
-        fetch_checks(repo, number),
-        fetch_approvals(repo, number),
-        read_all::<WireDiscussion>(repo, &path, "discussions"),
-        fetch_reviewers(repo, number),
-    )?;
-
-    let files = wire::changed_files(&files);
-    let head = mr.diff_refs.as_ref().map(|refs| refs.head_sha.clone());
-    let (threads, conversation) =
-        wire::split_discussions(discussions, number, head.as_deref());
-    let unresolved =
-        threads.iter().filter(|thread| !thread.is_resolved).count() as u32;
-
-    let summary = Summary {
-        author: mr
-            .author
-            .as_ref()
-            .map(wire::WireUser::display)
-            .unwrap_or_default(),
-        base_ref: mr.target_branch.clone(),
-        head_ref: mr.source_branch.clone(),
-        additions: files.iter().map(|file| file.additions).sum(),
-        deletions: files.iter().map(|file| file.deletions).sum(),
-        changed_files: files.len() as u32,
-        updated_on: mr.updated_at.clone(),
-        comments: conversation.len() as u32,
-        checks,
-        reviewers: wire::reviewers(&reviewers, &approvals),
-        threads: Threads {
-            unresolved,
-            total: threads.len() as u32,
-            is_truncated: false,
-        },
-    };
-
-    Ok(PullRequestOverview {
-        summary,
-        body: mr.description.unwrap_or_default(),
-        discussion: conversation,
-    })
-}
-
-async fn fetch_checks(
-    repo: &Repo,
-    number: u32,
-) -> Result<Vec<prtui_core::Check>> {
-    let pipelines: Vec<WirePipeline> = read_all(
-        repo,
-        &format!("/merge_requests/{number}/pipelines"),
-        "pipelines",
-    )
-    .await?;
-
-    let Some(latest) = pipelines.into_iter().next() else {
-        return Ok(Vec::new());
-    };
-
-    let jobs: Vec<WireJob> =
-        read_all(repo, &format!("/pipelines/{}/jobs", latest.id), "jobs")
-            .await?;
-
-    Ok(jobs.into_iter().map(WireJob::into_check).collect())
+    overview::fetch(repo, number).await
 }
 
 async fn fetch_reviewers(
@@ -310,15 +246,6 @@ async fn current_user(repo: &Repo) -> Result<wire::WireUser> {
     )
     .await?;
     serde_json::from_slice(&bytes).context("failed to parse current user")
-}
-
-async fn fetch_approvals(repo: &Repo, number: u32) -> Result<WireApprovals> {
-    read(
-        repo,
-        &format!("/merge_requests/{number}/approvals"),
-        "approvals",
-    )
-    .await
 }
 
 async fn fetch_diffs(repo: &Repo, number: u32) -> Result<Vec<WireDiff>> {

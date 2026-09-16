@@ -45,6 +45,55 @@ async fn read_live_merge_request() -> Result<()> {
     }
     assert_eq!(overview.summary.changed_files as usize, files.len());
     assert_eq!(overview.body, meta.pr.body);
+    let changes = listed.changes.unwrap();
+    assert_eq!(overview.summary.additions, changes.additions);
+    assert_eq!(overview.summary.deletions, changes.deletions);
+    let published_threads: Vec<_> = meta
+        .threads
+        .iter()
+        .filter(|thread| {
+            thread.comments.iter().any(|comment| !comment.is_pending)
+        })
+        .collect();
+    assert_eq!(
+        overview.summary.threads.total as usize,
+        published_threads.len()
+    );
+    assert_eq!(
+        overview.summary.threads.unresolved as usize,
+        published_threads
+            .iter()
+            .filter(|thread| !thread.is_resolved)
+            .count()
+    );
+    let comments = |notes: &[prtui_core::Comment]| {
+        let mut notes: Vec<_> = notes
+            .iter()
+            .filter(|note| !note.is_pending)
+            .map(|note| {
+                (
+                    note.id.clone(),
+                    note.reply_target.clone(),
+                    note.author.clone(),
+                    note.body.clone(),
+                    note.created_at
+                        .trim_end_matches('Z')
+                        .split('.')
+                        .next()
+                        .unwrap()
+                        .to_owned(),
+                )
+            })
+            .collect();
+        notes.sort();
+        notes
+    };
+    assert_eq!(comments(&overview.discussion), comments(&meta.discussion));
+    assert_eq!(
+        overview.summary.comments as usize,
+        overview.discussion.len()
+    );
+
     println!(
         "MR !{number}: {} files, {} threads, {} conversation notes",
         files.len(),
