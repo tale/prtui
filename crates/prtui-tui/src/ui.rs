@@ -412,6 +412,18 @@ fn draw_diff(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
         return;
     };
 
+    if layout.rows.is_empty() {
+        let reason = if open.patch.is_patch_withheld() {
+            "diff unavailable"
+        } else if open.patch.status == "renamed" {
+            "renamed, contents unchanged"
+        } else {
+            "no textual changes"
+        };
+        draw_centered(frame, area, reason, theme.muted);
+        return;
+    }
+
     let width = area.width as usize;
     let focus = app.focus();
     let lines: Vec<Line<'_>> = layout

@@ -2899,6 +2899,35 @@ fn pending_threads_come_back_as_drafts() {
 }
 
 #[test]
+fn a_file_with_no_patch_says_why_instead_of_drawing_nothing() {
+    let file = |status: &str, additions, deletions| prtui_core::ChangedFile {
+        path: "moved.rs".into(),
+        status: status.into(),
+        additions,
+        deletions,
+        lines: Vec::new(),
+    };
+
+    for (file, reason) in [
+        (file("renamed", 0, 0), "renamed, contents unchanged"),
+        (file("modified", 0, 0), "no textual changes"),
+        (file("modified", 12, 3), "diff unavailable"),
+    ] {
+        let mut app = App::local(
+            prtui_tui::renderer::Theme::dark(),
+            "/repo".into(),
+            vec![file],
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        );
+        app.start();
+        let _ = app.take_effects();
+
+        assert!(draw(&app).contains(reason), "the diff pane says {reason:?}");
+    }
+}
+
+#[test]
 fn local_diff_renders_without_review_actions() {
     let files = vec![prtui_core::ChangedFile {
         path: "local.rs".into(),
