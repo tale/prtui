@@ -16,7 +16,7 @@ use crate::vim::Cursor;
 #[cfg(test)]
 use prtui_core::Repo;
 use prtui_core::{
-    PullRequestList, PullRequestListItem, PullRequestListScope,
+    Changes, PullRequestList, PullRequestListItem, PullRequestListScope,
     PullRequestOverview, PullRequestTarget, ReviewStatus,
 };
 use ratatui::Frame;
@@ -660,11 +660,13 @@ fn draw_table(
         Cell::from("PR"),
         Cell::from("AUTHOR"),
         Cell::from("TITLE"),
+        Cell::from("DIFF"),
     ]);
     widths.extend([
         Constraint::Length(8),
         Constraint::Length(16),
         Constraint::Fill(1),
+        Constraint::Length(13),
     ]);
 
     let header = Row::new(headers)
@@ -690,6 +692,7 @@ fn draw_table(
                 .style(Style::default().fg(theme.accent)),
             Cell::from(item.title.as_str())
                 .style(Style::default().fg(theme.code)),
+            changes_cell(item.changes, theme),
         ]);
 
         Some(Row::new(cells))
@@ -944,6 +947,24 @@ fn draw_centered(frame: &mut Frame, area: Rect, line: Line<'static>) {
     );
 }
 
+fn changes_cell(changes: Option<Changes>, theme: Theme) -> Cell<'static> {
+    let Some(changes) = changes else {
+        return Cell::from("");
+    };
+
+    Cell::from(Line::from(vec![
+        Span::styled(
+            format!("+{}", changes.additions),
+            Style::default().fg(theme.success),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("−{}", changes.deletions),
+            Style::default().fg(theme.danger),
+        ),
+    ]))
+}
+
 fn status_cell(status: &ReviewStatus, theme: Theme) -> Cell<'static> {
     let (label, color) = match status {
         ReviewStatus::Draft => ("DRAFT", theme.dim),
@@ -984,6 +1005,10 @@ mod tests {
             title: title.into(),
             author: "alice".into(),
             review_status,
+            changes: Some(model::Changes {
+                additions: 12,
+                deletions: 3,
+            }),
         }
     }
 
@@ -1078,6 +1103,17 @@ mod tests {
         assert!(rendered.contains("CHANGES REQUESTED"));
         assert!(rendered.contains("APPROVED"));
         assert!(rendered.contains("owner/repo"));
+    }
+
+    #[test]
+    fn the_listing_shows_churn_without_opening_the_overview() {
+        let rendered = render(list(
+            PullRequestListScope::Repository,
+            vec![pull(1, "Ready", ReviewStatus::Approved)],
+        ));
+
+        assert!(rendered.contains("DIFF"), "{rendered}");
+        assert!(rendered.contains("+12 \u{2212}3"), "{rendered}");
     }
 
     #[test]

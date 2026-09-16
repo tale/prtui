@@ -372,6 +372,17 @@ pub struct PullRequestListItem {
     pub author: String,
     /// Review state shown in the listing.
     pub review_status: ReviewStatus,
+    /// Line churn, absent when the provider's listing does not carry it.
+    pub changes: Option<Changes>,
+}
+
+/// Added and removed line counts for one pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Changes {
+    /// Number of added lines.
+    pub additions: u32,
+    /// Number of removed lines.
+    pub deletions: u32,
 }
 
 /// Scope represented by a pull request listing.

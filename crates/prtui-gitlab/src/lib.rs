@@ -293,6 +293,7 @@ fn list_item(repo: Arc<Repo>, mr: WireMergeRequest) -> PullRequestListItem {
             .map(wire::WireUser::display)
             .unwrap_or_default(),
         review_status,
+        changes: None,
     }
 }
 

@@ -2,8 +2,8 @@ use crate::url::escape_path;
 use anyhow::{Context, Result, bail};
 use prtui_core::Provider;
 use prtui_core::{
-    AddedThread, ChangedFile, Check, CheckState, Meta, NewThread, Parent,
-    PullRequestList, PullRequestListItem, PullRequestListScope,
+    AddedThread, ChangedFile, Changes, Check, CheckState, Meta, NewThread,
+    Parent, PullRequestList, PullRequestListItem, PullRequestListScope,
     PullRequestOverview, Repo, ReviewEvent, ReviewStatus, Reviewer, Summary,
     Threads, Verdict,
 };
@@ -226,7 +226,7 @@ query($owner:String!, $repo:String!) {
       orderBy:{field:UPDATED_AT,direction:DESC}
     ) {
       nodes {
-        number title isDraft reviewDecision updatedAt
+        number title isDraft reviewDecision updatedAt additions deletions
         author { login }
       }
     }
@@ -244,7 +244,7 @@ query($endCursor:String) {
       orderBy:{field:UPDATED_AT,direction:DESC}
     ) {
       nodes {
-        number title isDraft reviewDecision updatedAt
+        number title isDraft reviewDecision updatedAt additions deletions
         author { login }
         repository { nameWithOwner }
       }
@@ -360,6 +360,8 @@ struct WirePullRequest {
     author: Option<WireLogin>,
     is_draft: bool,
     updated_at: String,
+    additions: u32,
+    deletions: u32,
     #[serde(deserialize_with = "deserialize_cli_review_decision")]
     review_decision: Option<ReviewDecision>,
 }
@@ -769,6 +771,10 @@ impl WirePullRequest {
                 self.is_draft,
                 self.review_decision.as_ref(),
             ),
+            changes: Some(Changes {
+                additions: self.additions,
+                deletions: self.deletions,
+            }),
         }
     }
 }
@@ -1827,10 +1833,10 @@ mod tests {
     #[test]
     fn listings_sort_by_update_then_repository_and_number() {
         let pulls = serde_json::json!([
-            {"number":9,"title":"Approved","isDraft":false,"reviewDecision":"APPROVED","updatedAt":"2026-09-07T12:00:00Z","repository":{"nameWithOwner":"a/repo"}},
-            {"number":3,"title":"Review","isDraft":false,"reviewDecision":"REVIEW_REQUIRED","updatedAt":"2026-09-08T12:00:00Z","repository":{"nameWithOwner":"b/repo"}},
-            {"number":2,"title":"Draft","isDraft":true,"reviewDecision":null,"updatedAt":"2026-09-08T12:00:00Z","repository":{"nameWithOwner":"a/repo"}},
-            {"number":1,"title":"Changes","isDraft":false,"reviewDecision":"CHANGES_REQUESTED","updatedAt":"2026-09-08T12:00:00Z","repository":{"nameWithOwner":"b/repo"}}
+            {"number":9,"title":"Approved","isDraft":false,"reviewDecision":"APPROVED","updatedAt":"2026-09-07T12:00:00Z","additions":10,"deletions":2,"repository":{"nameWithOwner":"a/repo"}},
+            {"number":3,"title":"Review","isDraft":false,"reviewDecision":"REVIEW_REQUIRED","updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"repository":{"nameWithOwner":"b/repo"}},
+            {"number":2,"title":"Draft","isDraft":true,"reviewDecision":null,"updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"repository":{"nameWithOwner":"a/repo"}},
+            {"number":1,"title":"Changes","isDraft":false,"reviewDecision":"CHANGES_REQUESTED","updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"repository":{"nameWithOwner":"b/repo"}}
         ]);
         let local = parse_repository_pull_requests(
             parse_repo("owner/repo").unwrap(),
@@ -1867,11 +1873,11 @@ mod tests {
         let local = parse_repository_pull_requests(
             parse_repo("owner/repo").unwrap(),
             br#"[
-                {"number":12,"title":"Draft","author":{"login":"alice"},"isDraft":true,"updatedAt":"2026-09-08T12:00:00Z","reviewDecision":null},
-                {"number":13,"title":"Ready","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","reviewDecision":"APPROVED"},
-                {"number":14,"title":"Changes","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","reviewDecision":"CHANGES_REQUESTED"},
-                {"number":15,"title":"Review","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","reviewDecision":"REVIEW_REQUIRED"},
-                {"number":16,"title":"Unreviewed","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","reviewDecision":""}
+                {"number":12,"title":"Draft","author":{"login":"alice"},"isDraft":true,"updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"reviewDecision":null},
+                {"number":13,"title":"Ready","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"reviewDecision":"APPROVED"},
+                {"number":14,"title":"Changes","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"reviewDecision":"CHANGES_REQUESTED"},
+                {"number":15,"title":"Review","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"reviewDecision":"REVIEW_REQUIRED"},
+                {"number":16,"title":"Unreviewed","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"reviewDecision":""}
             ]"#,
         )
         .unwrap();
@@ -1913,7 +1919,7 @@ mod tests {
                                 "title": "Global change",
                                 "author": { "login": "bob" },
                                 "isDraft": false,
-                                "updatedAt":"2026-09-08T12:00:00Z","reviewDecision": "CHANGES_REQUESTED",
+                                "updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"reviewDecision": "CHANGES_REQUESTED",
                                 "repository": {
                                     "nameWithOwner": "other/repo"
                                 }
@@ -2128,14 +2134,14 @@ mod tests {
         let local = parse_repository_pull_requests(
             parse_repo("owner/repo").unwrap(),
             br#"[{"number":1,"title":"Unknown","isDraft":false,
-                "updatedAt":"2026-09-08T12:00:00Z","reviewDecision":"QUEUED"}]"#,
+                "updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"reviewDecision":"QUEUED"}]"#,
         );
         assert!(local.is_err());
 
         let global = parse_user_pull_requests(
             br#"[{"data":{"viewer":{"pullRequests":{"nodes":[{
                 "number":1,"title":"Unknown","isDraft":false,
-                "updatedAt":"2026-09-08T12:00:00Z","reviewDecision":"QUEUED",
+                "updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"reviewDecision":"QUEUED",
                 "repository":{"nameWithOwner":"owner/repo"}
             }],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}]"#,
         );
