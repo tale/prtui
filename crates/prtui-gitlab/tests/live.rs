@@ -21,24 +21,26 @@ async fn read_live_merge_request() -> Result<()> {
     let meta = GitLab.fetch_meta(&repo, number).await?;
     let overview = GitLab.fetch_overview(&repo, number).await?;
     let listing = GitLab.repository_pull_requests(repo.clone()).await?;
-    assert!(
-        listing
-            .items
-            .iter()
-            .any(|item| item.target.number == number)
-    );
+    let listed = listing
+        .items
+        .iter()
+        .find(|item| item.target.number == number)
+        .context("merge request is missing from the repository listing")?;
+    assert!(listed.changes.is_some());
     if std::env::var("GITLAB_HOST").as_deref()
         == Ok(prtui_gitlab::host_of(&repo))
     {
         let authored = GitLab.user_pull_requests().await?;
-        assert!(
-            authored
-                .items
-                .iter()
-                .any(|item| item.target.number == number
+        let authored_item = authored
+            .items
+            .iter()
+            .find(|item| {
+                item.target.number == number
                     && item.target.repo.namespace == repo.namespace
-                    && item.target.repo.name == repo.name)
-        );
+                    && item.target.repo.name == repo.name
+            })
+            .context("merge request is missing from the authored listing")?;
+        assert_eq!(authored_item.changes, listed.changes);
         println!("authored listing: {} merge requests", authored.items.len());
     }
     assert_eq!(overview.summary.changed_files as usize, files.len());

@@ -51,15 +51,6 @@ pub struct WireMergeRequest {
     pub updated_at: String,
     #[serde(default)]
     pub diff_refs: Option<DiffRefs>,
-    #[serde(default)]
-    pub reviewers: Vec<WireUser>,
-    #[serde(default)]
-    pub references: Option<WireReferences>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct WireReferences {
-    pub full: String,
 }
 
 impl WireMergeRequest {

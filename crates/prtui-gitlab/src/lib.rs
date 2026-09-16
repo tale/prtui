@@ -4,6 +4,7 @@
 
 mod detection;
 mod ids;
+mod listing;
 mod project;
 mod transport;
 mod url;
@@ -12,9 +13,8 @@ mod wire;
 use anyhow::{Context, Result, bail};
 use prtui_core::{
     AddedThread, ChangedFile, Comment, Meta, NewThread, Parent, Provider,
-    PullRequestList, PullRequestListItem, PullRequestListScope,
-    PullRequestOverview, PullRequestTarget, Repo, ReviewEvent, ReviewStatus,
-    ReviewThread, Summary, Threads,
+    PullRequestList, PullRequestOverview, Repo, ReviewEvent, ReviewThread,
+    Summary, Threads,
 };
 use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet};
@@ -211,90 +211,6 @@ enum Method {
 
 async fn merge_request(repo: &Repo, number: u32) -> Result<WireMergeRequest> {
     read(repo, &format!("/merge_requests/{number}"), "merge request").await
-}
-
-async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
-    let wire: Vec<WireMergeRequest> = read_all(
-        &repo,
-        "/merge_requests?state=opened&order_by=updated_at",
-        "merge requests",
-    )
-    .await?;
-
-    let repo = Arc::new(repo);
-    let items = wire
-        .into_iter()
-        .map(|mr| list_item(Arc::clone(&repo), mr))
-        .collect();
-
-    Ok(PullRequestList {
-        scope: PullRequestListScope::Repository,
-        items,
-    })
-}
-
-async fn user_pull_requests() -> Result<PullRequestList> {
-    let host = std::env::var("GITLAB_HOST")
-        .ok()
-        .filter(|host| !host.is_empty())
-        .unwrap_or_else(|| DEFAULT_HOST.to_owned());
-    let wire: Vec<WireMergeRequest> = read_all_url(
-        &host,
-        format!("https://{host}/api/v4/merge_requests?scope=created_by_me&state=opened&order_by=updated_at"),
-        "merge requests",
-    ).await?;
-
-    let items = wire
-        .into_iter()
-        .map(|mr| {
-            let path = mr
-                .references
-                .as_ref()
-                .and_then(|refs| refs.full.split_once('!'))
-                .map(|(path, _)| path)
-                .context("merge request is missing its project reference")?;
-            let (namespace, name) = path
-                .rsplit_once('/')
-                .context("merge request has an invalid project reference")?;
-            let repo = Repo {
-                host: Some(host.clone()),
-                namespace: namespace.to_owned(),
-                name: name.to_owned(),
-            };
-
-            Ok(list_item(Arc::new(repo), mr))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok(PullRequestList {
-        scope: PullRequestListScope::User,
-        items,
-    })
-}
-
-fn list_item(repo: Arc<Repo>, mr: WireMergeRequest) -> PullRequestListItem {
-    let review_status = if mr.draft {
-        ReviewStatus::Draft
-    } else if mr.reviewers.is_empty() {
-        ReviewStatus::NoDecision
-    } else {
-        ReviewStatus::ReviewRequired
-    };
-
-    PullRequestListItem {
-        target: PullRequestTarget {
-            repo,
-            number: mr.iid,
-        },
-        title: mr.title,
-        author: mr
-            .author
-            .as_ref()
-            .map(wire::WireUser::display)
-            .unwrap_or_default(),
-        review_status,
-        changes: None,
-    }
 }
 
 async fn fetch_summary(repo: &Repo, number: u32) -> Result<Summary> {
@@ -792,11 +708,11 @@ impl Provider for GitLab {
         self,
         repo: Repo,
     ) -> Result<PullRequestList> {
-        repository_pull_requests(repo).await
+        listing::repository_pull_requests(repo).await
     }
 
     async fn user_pull_requests(self) -> Result<PullRequestList> {
-        user_pull_requests().await
+        listing::user_pull_requests().await
     }
 
     async fn fetch_summary(self, repo: &Repo, number: u32) -> Result<Summary> {

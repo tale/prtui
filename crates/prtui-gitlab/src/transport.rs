@@ -283,6 +283,42 @@ pub fn post(
     })
 }
 
+pub fn graphql(
+    url: &str,
+    token: Option<&str>,
+    query: &str,
+    variables: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let body = serde_json::json!({ "query": query, "variables": variables });
+    let mut response = send(Retry::Transient, || {
+        let mut request =
+            agent().post(url).header("accept", "application/json");
+        if let Some(token) = token {
+            request =
+                request.header("authorization", &format!("Bearer {token}"));
+        }
+
+        request.send_json(&body)
+    })?;
+    check(&mut response, "GraphQL query")?;
+
+    let value: serde_json::Value = response
+        .body_mut()
+        .with_config()
+        .limit(API_LIMIT)
+        .read_json()
+        .context("failed to parse GitLab GraphQL response")?;
+
+    if let Some(errors) =
+        value.get("errors").and_then(serde_json::Value::as_array)
+        && !errors.is_empty()
+    {
+        bail!("GitLab GraphQL query failed: {errors:?}");
+    }
+
+    Ok(value)
+}
+
 pub fn put(
     url: &str,
     token: &str,

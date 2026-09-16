@@ -1,7 +1,8 @@
 # prtui-gitlab
 
 GitLab provider for prtui. Authentication uses the token configured by `glab`
-for the repository host.
+for the repository host. Merge request listings use GraphQL to include diff line
+counts; review operations use REST.
 
 ## Live tests
 
