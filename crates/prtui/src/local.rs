@@ -179,6 +179,7 @@ impl Snapshot {
                 );
             }
             snapshot.files.push(ChangedFile {
+                previous_path: None,
                 path,
                 status: status.into(),
                 additions: lines

@@ -165,6 +165,8 @@ pub struct ChangedFile {
     /// Shared: a file's path is its identity, and the threads, drafts and
     /// syntax colors filed against it all hold the same one.
     pub path: Arc<str>,
+    /// Original path when the file was renamed.
+    pub previous_path: Option<Arc<str>>,
     /// Provider-normalized change status, such as `modified` or `removed`.
     pub status: String,
     /// Number of added lines.

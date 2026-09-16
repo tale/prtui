@@ -105,6 +105,9 @@ impl WireDiff {
         };
 
         ChangedFile {
+            previous_path: self
+                .renamed_file
+                .then(|| Arc::from(self.old_path.as_str())),
             path: Arc::from(self.new_path.as_str()),
             status: self.status().to_owned(),
             additions: count(LineKind::Added),
@@ -645,6 +648,9 @@ mod tests {
 
     #[test]
     fn context_comments_preserve_both_paths_and_shifted_line_numbers() {
+        let file = renamed_diff().to_changed_file();
+        assert_eq!(file.path.as_ref(), "new.rs");
+        assert_eq!(file.previous_path.as_deref(), Some("old.rs"));
         let position = position(
             &refs(),
             &renamed_diff(),

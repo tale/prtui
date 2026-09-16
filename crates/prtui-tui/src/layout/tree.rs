@@ -347,6 +347,7 @@ mod tests {
 
     fn file(path: &str) -> ChangedFile {
         ChangedFile {
+            previous_path: None,
             path: Arc::from(path),
             status: "modified".into(),
             additions: 0,

@@ -2901,6 +2901,7 @@ fn pending_threads_come_back_as_drafts() {
 #[test]
 fn a_file_with_no_patch_says_why_instead_of_drawing_nothing() {
     let file = |status: &str, additions, deletions| prtui_core::ChangedFile {
+        previous_path: None,
         path: "moved.rs".into(),
         status: status.into(),
         additions,
@@ -2930,6 +2931,7 @@ fn a_file_with_no_patch_says_why_instead_of_drawing_nothing() {
 #[test]
 fn local_diff_renders_without_review_actions() {
     let files = vec![prtui_core::ChangedFile {
+        previous_path: None,
         path: "local.rs".into(),
         status: "modified".into(),
         additions: 1,
@@ -3030,6 +3032,7 @@ fn local_tree_shows_staging_and_explains_cancelled_changes() {
     .collect();
     let files = ["a.rs", "b.rs", "c.rs", "d.rs"]
         .map(|path| prtui_core::ChangedFile {
+            previous_path: None,
             path: path.into(),
             status: "modified".into(),
             additions: 0,
@@ -3096,5 +3099,34 @@ fn local_tree_shows_staging_and_explains_cancelled_changes() {
     for marker in ["S ", " U", "SU", " ?"] {
         assert!(reference.iter().any(|entry| matches!(entry,
             prtui_tui::app::keymap::Reference::Entry { keys, .. } if keys == marker)));
+    }
+}
+
+#[test]
+fn renamed_files_show_both_paths_without_losing_diff_counts() {
+    let app = App::local(
+        prtui_tui::renderer::Theme::dark(),
+        "/repo".into(),
+        vec![prtui_core::ChangedFile {
+            path: "src/after.rs".into(),
+            previous_path: Some("src/before.rs".into()),
+            status: "renamed".into(),
+            additions: 12,
+            deletions: 3,
+            lines: Vec::new(),
+        }],
+        std::collections::HashMap::new(),
+        std::collections::HashMap::new(),
+    );
+    for width in [60, 120] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+        terminal.draw(|frame| paint(frame, &app)).unwrap();
+        let rendered = terminal.backend().to_string();
+        let header = rendered.lines().find(|line| line.contains('→')).unwrap();
+        assert!(header.contains("+12"));
+        assert!(header.contains("-3"));
+        if width == 120 {
+            assert!(header.contains("src/before.rs → src/after.rs"));
+        }
     }
 }

@@ -252,7 +252,8 @@ next file with one once the open file runs out, and `R` resolves or reopens the
 one you are on.
 
 **Comments** — `c` comments on the line, on a visual span, or replies to the
-thread under the cursor. `v` selects lines first; `C` writes a note about the
+thread under the cursor. Use `}`/`{` to focus an unanswered thread before
+pressing `c`; on a source line, `c` starts a new comment. `v` selects lines first; `C` writes a note about the
 whole file. `e` reopens a draft, `d` discards it.
 
 **Links** — `y` copies a permalink to whatever the cursor is on: the line, the

@@ -1005,6 +1005,7 @@ mod tests {
 
     fn patch(lines: Vec<DiffLine>) -> ChangedFile {
         ChangedFile {
+            previous_path: None,
             path: Arc::from("a.rs"),
             status: "modified".into(),
             additions: 0,

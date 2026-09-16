@@ -16,6 +16,7 @@ use std::sync::Arc;
 #[derive(Debug, Deserialize)]
 struct File {
     filename: String,
+    previous_filename: Option<String>,
     status: String,
     additions: u32,
     deletions: u32,
@@ -28,6 +29,7 @@ impl From<File> for ChangedFile {
 
         Self {
             path: file.filename.into(),
+            previous_path: file.previous_filename.map(Into::into),
             status: file.status,
             additions: file.additions,
             deletions: file.deletions,
@@ -496,6 +498,18 @@ mod tests {
     }
 
     #[test]
+    fn renamed_files_keep_the_original_path() {
+        let parsed = file_page(br#"[
+            {"filename":"new.rs","previous_filename":"old.rs","status":"renamed","additions":0,"deletions":0},
+            {"filename":"other.rs","status":"modified","additions":1,"deletions":0,"patch":"@@ -0,0 +1 @@\n+new"}
+        ]"#).unwrap();
+        assert_eq!(parsed[0].path.as_ref(), "new.rs");
+        assert_eq!(parsed[0].previous_path.as_deref(), Some("old.rs"));
+        assert!(parsed[0].lines.is_empty());
+        assert!(parsed[1].previous_path.is_none());
+    }
+
+    #[test]
     fn a_line_thread_is_serialized_only_at_the_wire_boundary() {
         let variables = thread_variables(NewThread {
             parent: Parent::Review("PRR_1".into()),
@@ -600,6 +614,7 @@ index 6666666..0000000
     #[test]
     fn only_a_file_with_changes_and_no_lines_is_a_withheld_patch() {
         let file = |additions, deletions, lines: Vec<DiffLine>| ChangedFile {
+            previous_path: None,
             path: "src/state.zig".into(),
             status: "modified".into(),
             additions,

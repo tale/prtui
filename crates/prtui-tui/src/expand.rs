@@ -330,6 +330,7 @@ mod tests {
         };
 
         ChangedFile {
+            previous_path: None,
             path: "src/main.rs".into(),
             status: "modified".into(),
             additions: 1,

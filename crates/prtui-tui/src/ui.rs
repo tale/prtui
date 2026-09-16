@@ -377,14 +377,22 @@ fn draw_diff(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
                 )
             };
             let available = layout.diff_pane.width.saturating_sub(4) as usize;
-            format!(
-                " {}{} ",
-                truncate(
-                    &file.path,
-                    available.saturating_sub(text_width(&suffix))
-                ),
-                suffix
-            )
+            let width = available.saturating_sub(text_width(&suffix));
+            let path = match file.previous_path.as_deref() {
+                Some(previous) if width >= 7 => {
+                    let paths_width = width - 3;
+                    let new_width =
+                        text_width(&file.path).min(paths_width.div_ceil(2));
+                    let previous = truncate(previous, paths_width - new_width);
+                    let current = truncate(
+                        &file.path,
+                        paths_width - text_width(&previous),
+                    );
+                    format!("{previous} → {current}")
+                }
+                _ => truncate(&file.path, width),
+            };
+            format!(" {path}{suffix} ")
         },
     );
 
