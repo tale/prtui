@@ -11,7 +11,7 @@ main() {
     directory="$HOME/.local/bin"
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --head) version=head; shift ;;
+            --nightly|--head) version=nightly; shift ;;
             --version|--install-dir)
                 [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$1 requires a value"
                 case "$1" in
@@ -21,7 +21,7 @@ main() {
                 shift 2
                 ;;
             -h|--help)
-                printf 'Usage: install.sh [--head | --version VERSION] [--install-dir DIR]\n'
+                printf 'Usage: install.sh [--nightly | --version VERSION] [--install-dir DIR]\n'
                 return
                 ;;
             *) fail "unknown option: $1" ;;
@@ -55,7 +55,7 @@ main() {
         version=${latest##*/}
     fi
     case "$version" in
-        head) tag=head ;;
+        nightly) tag=nightly ;;
         *) tag="v${version#v}" ;;
     esac
     version=${tag#v}

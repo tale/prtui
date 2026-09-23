@@ -87,11 +87,11 @@ It requires `curl`, `tar`, and either `sha256sum` or `shasum`.
 To install the latest main build:
 
 ```sh
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/tale/prtui/main/install.sh)" -- --head
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/tale/prtui/main/install.sh)" -- --nightly
 ```
 
 Use `--version VERSION` to pin a release and `--install-dir DIR` to choose
-its destination. Main builds update the `head` prerelease; tagged releases
+its destination. Main builds update the `nightly` prerelease; tagged releases
 remain the default.
 
 Install Git and authenticate `gh` or `glab` separately as described below.

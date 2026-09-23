@@ -32,8 +32,8 @@ jobs:
         run: |
           manifest=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           if [ "$GITHUB_REF_TYPE" != tag ]; then
-            echo "tag=head" >> "$GITHUB_OUTPUT"
-            echo "version=$manifest-head.${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+            echo "tag=nightly" >> "$GITHUB_OUTPUT"
+            echo "version=$manifest-nightly.${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           version=${GITHUB_REF_NAME#v}
@@ -166,21 +166,21 @@ jobs:
             --notes-file NOTES.md \
             artifacts/*
 
-      - name: Update head release
+      - name: Update nightly release
         if: github.ref_type != 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           notes="Built from $GITHUB_SHA on main."
-          if ! gh release view head >/dev/null 2>&1; then
-            gh release create head --prerelease --latest=false \
-              --target "$GITHUB_SHA" --title HEAD --notes "$notes"
+          if ! gh release view nightly >/dev/null 2>&1; then
+            gh release create nightly --prerelease --latest=false \
+              --target "$GITHUB_SHA" --title Nightly --notes "$notes"
           fi
-          gh release upload head artifacts/* --clobber
-          gh api --method PATCH "repos/$GH_REPO/git/refs/tags/head" \
+          gh release upload nightly artifacts/* --clobber
+          gh api --method PATCH "repos/$GH_REPO/git/refs/tags/nightly" \
             -f sha="$GITHUB_SHA" -F force=true >/dev/null
-          gh release edit head --prerelease --latest=false --notes "$notes"
+          gh release edit nightly --prerelease --latest=false --notes "$notes"
 
   # The tap regenerates its formula from whatever the newest release published,
   # so this has to follow `release` rather than `build`: dispatching earlier
