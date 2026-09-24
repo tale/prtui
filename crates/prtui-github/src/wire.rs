@@ -193,6 +193,10 @@ struct WireChangedFile {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the GraphQL thread fields one to one"
+)]
 struct WireThread {
     id: String,
     path: String,
@@ -205,6 +209,7 @@ struct WireThread {
     is_resolved: bool,
     is_outdated: bool,
     viewer_can_resolve: bool,
+    viewer_can_unresolve: bool,
     comments: Nodes<WireComment>,
 }
 
@@ -294,7 +299,11 @@ impl From<WireThread> for ReviewThread {
             is_file_level: thread.subject_type == "FILE",
             is_resolved: thread.is_resolved,
             is_outdated: thread.is_outdated,
-            can_resolve: thread.viewer_can_resolve,
+            can_resolve: if thread.is_resolved {
+                thread.viewer_can_unresolve
+            } else {
+                thread.viewer_can_resolve
+            },
             comments: thread
                 .comments
                 .nodes
@@ -680,6 +689,7 @@ index 6666666..0000000
             "isResolved": false,
             "isOutdated": true,
             "viewerCanResolve": true,
+            "viewerCanUnresolve": false,
             "comments": { "nodes": [
                 { "id": "PRRC_1", "state": "SUBMITTED", "fullDatabaseId": "1234", "author": null, "body": "hi", "createdAt": "now" },
                 { "id": "PRRC_2", "state": "SUBMITTED", "fullDatabaseId": 5678, "author": { "login": "tale" }, "body": "ho", "createdAt": "now" },
@@ -712,6 +722,7 @@ index 6666666..0000000
             "isResolved": false,
             "isOutdated": false,
             "viewerCanResolve": false,
+            "viewerCanUnresolve": false,
             "comments": { "nodes": [
                 { "id": "PRRC_3", "state": "PENDING", "fullDatabaseId": null, "author": { "login": "tale" }, "body": "wip", "createdAt": "now" },
             ] },

@@ -43,7 +43,7 @@ query($owner:String!, $repo:String!, $number:Int!) {
       reviewThreads(first:100) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          id isResolved isOutdated viewerCanResolve path subjectType
+          id isResolved isOutdated viewerCanResolve viewerCanUnresolve path subjectType
           line originalLine diffSide startLine startDiffSide
           comments(first:100) {
             pageInfo { hasNextPage endCursor }
@@ -95,7 +95,7 @@ query($owner:String!, $repo:String!, $number:Int!, $after:String!) {
       reviewThreads(first:100, after:$after) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          id isResolved isOutdated viewerCanResolve path subjectType
+          id isResolved isOutdated viewerCanResolve viewerCanUnresolve path subjectType
           line originalLine diffSide startLine startDiffSide
           comments(first:100) {
             pageInfo { hasNextPage endCursor }

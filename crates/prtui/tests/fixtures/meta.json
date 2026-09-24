@@ -49,6 +49,7 @@
                 ]
               },
               "viewerCanResolve": true,
+              "viewerCanUnresolve": false,
               "subjectType": "LINE",
               "startLine": 130,
               "startDiffSide": null
@@ -80,6 +81,7 @@
                 ]
               },
               "viewerCanResolve": true,
+              "viewerCanUnresolve": false,
               "subjectType": "LINE",
               "startLine": 113,
               "startDiffSide": null
