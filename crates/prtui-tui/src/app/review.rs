@@ -94,6 +94,7 @@ pub enum Sent {
     },
     Blob {
         path: Arc<str>,
+        commit: Arc<str>,
         lines: Arc<[String]>,
     },
 }
@@ -304,7 +305,7 @@ impl App {
     /// The open file's threads, which is what the row list indexes into.
     pub fn file_threads(&self) -> &[ReviewThread] {
         self.current_file()
-            .and_then(|file| self.review.threads_by_path.get(&file.path))
+            .and_then(|file| self.shown_threads().get(&file.path))
             .map_or(&[], Vec::as_slice)
     }
 
@@ -587,7 +588,11 @@ impl App {
             Ok(Sent::Viewed { path, is_viewed }) => {
                 self.mark_viewed(path, is_viewed)
             }
-            Ok(Sent::Blob { path, lines }) => self.blob_loaded(&path, &lines),
+            Ok(Sent::Blob {
+                path,
+                commit,
+                lines,
+            }) => self.blob_loaded(&path, &commit, &lines),
             Err(failure) => {
                 let status = format!("error: {}", failure.message());
                 match failure {

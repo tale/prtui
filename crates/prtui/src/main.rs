@@ -152,6 +152,46 @@ fn spawn_summary_fetch<P: Provider>(
     });
 }
 
+fn spawn_commits_fetch<P: Provider>(
+    provider: P,
+    repo: Arc<Repo>,
+    number: u32,
+    generation: u64,
+    tx: mpsc::UnboundedSender<Message>,
+) {
+    tokio::spawn(async move {
+        let outcome = provider
+            .fetch_commits(&repo, number)
+            .await
+            .map(Box::new)
+            .map_err(|err| err.to_string());
+        let _ = tx.send(Message::App(AppMessage::Commits {
+            generation,
+            outcome,
+        }));
+    });
+}
+
+fn spawn_range_fetch<P: Provider>(
+    provider: P,
+    repo: Arc<Repo>,
+    base: Arc<str>,
+    head: Arc<str>,
+    generation: u64,
+    tx: mpsc::UnboundedSender<Message>,
+) {
+    tokio::spawn(async move {
+        let outcome = provider
+            .fetch_range(&repo, &base, &head)
+            .await
+            .map_err(|err| err.to_string());
+        let _ = tx.send(Message::App(AppMessage::Range {
+            generation,
+            outcome,
+        }));
+    });
+}
+
 fn spawn_files_fetch<P: Provider>(
     provider: P,
     repo: Arc<Repo>,
@@ -251,6 +291,7 @@ fn spawn_request<P: Provider>(
                 match provider.fetch_blob(&repo, &path, &commit).await {
                     Ok(text) => Ok(Sent::Blob {
                         path,
+                        commit,
                         lines: text.lines().map(str::to_string).collect(),
                     }),
                     Err(err) => Err(Failure::Blob(path, err.to_string())),
@@ -449,6 +490,25 @@ async fn event_loop<P: Provider>(
                     provider,
                     Arc::clone(&repo),
                     number,
+                    generation,
+                    tx.clone(),
+                ),
+                Effect::FetchCommits { generation } => spawn_commits_fetch(
+                    provider,
+                    Arc::clone(&repo),
+                    number,
+                    generation,
+                    tx.clone(),
+                ),
+                Effect::FetchRange {
+                    generation,
+                    base,
+                    head,
+                } => spawn_range_fetch(
+                    provider,
+                    Arc::clone(&repo),
+                    base,
+                    head,
                     generation,
                     tx.clone(),
                 ),

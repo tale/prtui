@@ -13,11 +13,14 @@ pub mod mode;
 mod navigation;
 mod prompt;
 pub mod review;
+mod scope;
 pub mod search;
 mod view;
 
+pub use scope::CommitsState;
 pub use view::View;
 
+use crate::commits::Pick;
 use crate::expand::{self, Gap, Place, Reveal};
 use crate::layout::{Content, Layout};
 use crate::overview::{self, FoldState};
@@ -315,6 +318,15 @@ struct ReviewState {
     discussion: Vec<Comment>,
     summary: SummaryState,
     summary_generation: u64,
+
+    commits: CommitsState,
+    commits_generation: u64,
+    /// What the diff is showing. Anything but the whole pull request comes
+    /// with a scope holding its files.
+    pick: Pick,
+    scope: Option<scope::Scope>,
+    requested: Option<scope::Requested>,
+    range_generation: u64,
 }
 
 #[derive(Default)]
@@ -342,6 +354,8 @@ struct NavigationState {
     overlay: Cursor,
     overlay_match: Option<usize>,
     overview_folds: FoldState,
+    /// The commit a range selection in the commit panel started on.
+    commit_anchor: Option<usize>,
 }
 
 impl Default for NavigationState {
@@ -362,6 +376,7 @@ impl Default for NavigationState {
             overlay: Cursor::default(),
             overlay_match: None,
             overview_folds: FoldState::default(),
+            commit_anchor: None,
         }
     }
 }
@@ -614,6 +629,14 @@ impl App {
                 };
                 true
             }
+            Message::Commits {
+                generation,
+                outcome,
+            } => self.receive_commits(generation, outcome),
+            Message::Range {
+                generation,
+                outcome,
+            } => self.receive_range(generation, outcome),
             Message::Request(outcome) => {
                 let sent = outcome.as_ref().ok();
                 let needs_refetch = sent.is_some_and(Sent::needs_refetch);
@@ -828,8 +851,7 @@ impl App {
     }
 
     pub fn current_file(&self) -> Option<&ChangedFile> {
-        self.review
-            .files
+        self.shown_files()
             .get(self.navigation.selected_file)
             .map(AsRef::as_ref)
     }
@@ -849,16 +871,15 @@ impl App {
     /// Conversations on a file that are still open, which is what the tree
     /// marks and what a folded directory has to answer for.
     pub fn unresolved_threads(&self, path: &str) -> usize {
-        self.review.threads_by_path.get(path).map_or(0, |threads| {
+        self.shown_threads().get(path).map_or(0, |threads| {
             threads.iter().filter(|thread| !thread.is_resolved).count()
         })
     }
 
     pub fn tree_row(&self, index: usize) -> Option<TreeRow<'_>> {
-        let file = self.review.files.get(index)?;
+        let file = self.shown_files().get(index)?;
         let threads = self
-            .review
-            .threads_by_path
+            .shown_threads()
             .get(&file.path)
             .map_or(&[][..], Vec::as_slice);
 
@@ -889,11 +910,14 @@ impl App {
         Some(OpenFile {
             patch,
             threads: self
-                .review
-                .threads_by_path
+                .shown_threads()
                 .get(&patch.path)
                 .map_or(&[], Vec::as_slice),
-            drafts: self.drafts_for(&patch.path),
+            drafts: if self.review.scope.is_some() {
+                Vec::new()
+            } else {
+                self.drafts_for(&patch.path)
+            },
             highlight: self.highlights.get(&patch.path),
         })
     }
@@ -990,9 +1014,7 @@ impl App {
 
         // The commit to read the file at comes with the metadata, which is a
         // separate fetch and may not have landed yet.
-        let Some(commit) =
-            self.review.pr.as_ref().map(|pr| pr.head_oid.clone())
-        else {
+        let Some(commit) = self.head_commit() else {
             self.runtime.status = "still loading the pull request".into();
             return;
         };
@@ -1041,7 +1063,7 @@ impl App {
     }
 
     fn code_link(&self) -> Option<Link> {
-        let commit = &self.review.pr.as_ref()?.head_oid;
+        let commit = self.head_commit()?;
         let file = self.current_file()?;
 
         // A file the change deletes is not at head to be linked to.
@@ -1055,7 +1077,7 @@ impl App {
         };
 
         Some(Link::Blob {
-            commit: Arc::clone(commit),
+            commit,
             path: Arc::clone(&file.path),
             lines,
         })
@@ -1102,9 +1124,16 @@ impl App {
     fn blob_loaded(
         &mut self,
         path: &Arc<str>,
+        commit: &Arc<str>,
         lines: &Arc<[String]>,
     ) -> String {
         self.fetching.remove(path);
+
+        // Read for a pick the reader has since moved off.
+        if self.head_commit().as_ref() != Some(commit) {
+            return String::new();
+        }
+
         self.blobs.insert(path.clone(), lines.clone());
 
         match self.deferred.take() {
@@ -1126,8 +1155,10 @@ impl App {
         wanted: Wanted,
         content: &[String],
     ) -> String {
-        let Some(index) =
-            self.review.files.iter().position(|file| file.path == *path)
+        let Some(index) = self
+            .shown_files()
+            .iter()
+            .position(|file| file.path == *path)
         else {
             return String::new();
         };
@@ -1135,7 +1166,7 @@ impl App {
         // The worker owns an Arc to this file while it colors it. Copy-on-write
         // preserves that snapshot when necessary, but never touches any other
         // file in the review.
-        let file = Arc::make_mut(&mut self.review.files[index]);
+        let file = Arc::make_mut(&mut self.review.shown_files_mut()[index]);
         let mut count = 0;
 
         // Each splice moves only what is below it, so the cursor follows one
@@ -1202,6 +1233,12 @@ impl App {
 
         // Only a second escape discards, so every other key stands the composer
         // back down.
+        if self.review.scope.is_some() && action.is_review_write() {
+            self.runtime.status =
+                "read-only here: pick all changes (L) to comment".into();
+            return;
+        }
+
         if !matches!(action, Action::CancelComment)
             && let Some(composer) = self.prompts.composer.as_mut()
         {
@@ -1213,7 +1250,16 @@ impl App {
             submission.is_discard_armed = false;
         }
 
+        let is_commits = self.navigation.mode == Mode::Commits;
         match *action {
+            Action::Activate if is_commits => self.activate_commit(layout),
+            Action::EnterVisual if is_commits => {
+                self.toggle_commit_span(layout);
+            }
+            Action::CloseOverlay if self.navigation.commit_anchor.is_some() => {
+                self.navigation.commit_anchor = None;
+            }
+            Action::OpenCommits => self.open_commits(layout),
             Action::Quit => self.runtime.should_quit = true,
             Action::TogglePane => self.toggle_pane(),
             Action::ToggleTree => {

@@ -2,9 +2,9 @@
 
 use anyhow::{Context, Result, bail};
 use prtui_core::{
-    Anchor, ChangedFile, Check, CheckState, Comment, LineKind, PullRequest,
-    ReviewEvent, ReviewThread, Reviewer, Side, Verdict, parse_hunk_header,
-    parse_patch,
+    Anchor, ChangedFile, Check, CheckState, Comment, Commit, CommitLog,
+    LineKind, PullRequest, ReviewEvent, ReviewThread, Reviewer, Side, Verdict,
+    parse_hunk_header, parse_patch,
 };
 use serde::Deserialize;
 use std::fmt::Write;
@@ -626,6 +626,73 @@ pub fn changed_files(diffs: &[WireDiff]) -> Vec<ChangedFile> {
     diffs.iter().map(WireDiff::to_changed_file).collect()
 }
 
+#[derive(Debug, Deserialize)]
+pub struct WireCompare {
+    pub diffs: Vec<WireDiff>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WireCommit {
+    pub id: String,
+    pub title: String,
+    pub author_name: String,
+    pub authored_date: String,
+    #[serde(default)]
+    pub parent_ids: Vec<String>,
+}
+
+impl From<WireCommit> for Commit {
+    fn from(commit: WireCommit) -> Self {
+        Self {
+            oid: commit.id.into(),
+            parent: commit.parent_ids.into_iter().next().map(Into::into),
+            title: commit.title,
+            author: commit.author_name,
+            authored_at: commit.authored_date,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WireVersion {
+    pub head_commit_sha: String,
+    pub created_at: String,
+}
+
+/// GitLab keeps no record of what a review was read against, so the head the
+/// viewer last spoke up on stands in for it: the newest version pushed before
+/// their newest note. An approval is a note of its own.
+pub fn commit_log(
+    commits: Vec<WireCommit>,
+    versions: &[WireVersion],
+    discussions: &[WireDiscussion],
+    viewer: &str,
+) -> CommitLog {
+    let spoke_at = discussions
+        .iter()
+        .flat_map(|discussion| &discussion.notes)
+        .filter(|note| note.author.username == viewer)
+        .filter(|note| {
+            !note.system || note.body.starts_with("approved this merge request")
+        })
+        .map(|note| note.created_at.as_str())
+        .max();
+
+    let last_reviewed = spoke_at.and_then(|spoke_at| {
+        versions
+            .iter()
+            .filter(|version| version.created_at.as_str() <= spoke_at)
+            .max_by(|a, b| a.created_at.cmp(&b.created_at))
+            .map(|version| Arc::from(version.head_commit_sha.as_str()))
+    });
+
+    // Newest first on the wire.
+    CommitLog {
+        commits: commits.into_iter().rev().map(Into::into).collect(),
+        last_reviewed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,5 +885,48 @@ mod tests {
                 Verdict::Approved
             ]
         );
+    }
+
+    #[test]
+    fn the_last_reviewed_commit_is_the_version_the_viewer_last_spoke_on() {
+        let note = |username: &str, created_at: &str, system: bool| {
+            serde_json::json!({
+                "id": 1,
+                "body": if system { "approved this merge request" } else { "looks good" },
+                "author": { "name": null, "username": username },
+                "created_at": created_at,
+                "system": system,
+            })
+        };
+        let discussions: Vec<WireDiscussion> =
+            serde_json::from_value(serde_json::json!([
+                { "id": "d1", "notes": [note("me", "2026-09-02T00:00:00.000Z", false)] },
+                { "id": "d2", "notes": [note("me", "2026-09-04T00:00:00.000Z", true)] },
+                { "id": "d3", "notes": [note("them", "2026-09-06T00:00:00.000Z", false)] },
+            ]))
+            .unwrap();
+        let version = |sha: &str, created_at: &str| WireVersion {
+            head_commit_sha: sha.into(),
+            created_at: created_at.into(),
+        };
+        let versions = [
+            version("v1", "2026-09-01T00:00:00.000Z"),
+            version("v2", "2026-09-03T00:00:00.000Z"),
+            version("v3", "2026-09-05T00:00:00.000Z"),
+        ];
+        let commits: Vec<WireCommit> =
+            serde_json::from_value(serde_json::json!([
+                { "id": "b", "title": "second", "author_name": "Tale",
+                  "authored_date": "2026-09-05T00:00:00.000Z", "parent_ids": ["a"] },
+                { "id": "a", "title": "first", "author_name": "Tale",
+                  "authored_date": "2026-09-01T00:00:00.000Z", "parent_ids": ["base"] },
+            ]))
+            .unwrap();
+
+        let log = commit_log(commits, &versions, &discussions, "me");
+
+        assert_eq!(log.last_reviewed.as_deref(), Some("v2"));
+        assert_eq!(&*log.commits[0].oid, "a");
+        assert_eq!(log.commits[1].parent.as_deref(), Some("a"));
     }
 }

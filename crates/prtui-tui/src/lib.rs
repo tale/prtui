@@ -1,6 +1,7 @@
 //! Provider-independent application state, layout, and terminal rendering.
 
 pub mod app;
+pub mod commits;
 pub mod expand;
 pub mod highlighter;
 pub mod layout;

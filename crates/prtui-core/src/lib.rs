@@ -312,6 +312,30 @@ pub struct Meta {
     pub viewed: HashSet<Arc<str>>,
 }
 
+/// One commit on a pull request's head branch.
+#[derive(Debug, Clone)]
+pub struct Commit {
+    /// Full commit identifier.
+    pub oid: Arc<str>,
+    /// First parent, which a diff of this commit alone is taken against.
+    pub parent: Option<Arc<str>>,
+    /// First line of the commit message.
+    pub title: String,
+    /// Display name of the author.
+    pub author: String,
+    /// Provider-formatted authoring time.
+    pub authored_at: String,
+}
+
+/// A pull request's commits, and where the viewer last left off reviewing.
+#[derive(Debug, Clone, Default)]
+pub struct CommitLog {
+    /// Commits oldest first.
+    pub commits: Vec<Commit>,
+    /// The head commit when the viewer last reviewed, when they have.
+    pub last_reviewed: Option<Arc<str>>,
+}
+
 /// `@@ -old,count +new,count @@` — captures the two start line numbers.
 pub fn parse_hunk_header(header: &str) -> Option<(u32, u32)> {
     let inner = header.strip_prefix("@@ ")?.split(" @@").next()?;

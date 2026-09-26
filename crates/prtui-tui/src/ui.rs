@@ -12,9 +12,11 @@ use crate::app::mode::Mode;
 use crate::app::review::ReviewEvent;
 use crate::app::search::Query;
 use crate::app::{Focus, OpenFile, Pane, Target, View as AppView};
+use crate::commits;
 use crate::expand::Gap;
 use crate::layout::rows::{self, BodyRow, GUTTER, Row, ThreadState};
 use crate::layout::{Content, Layout};
+use crate::overview;
 use crate::renderer::{Theme, markdown};
 use crate::text::measure::{clip_text_to_budget, text_width, truncate};
 use crate::text::wrap::{self, Fragment};
@@ -91,6 +93,7 @@ fn draw_overlay(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
         (Mode::Overview, false) => {
             " j/k move · gx browser · / find · esc close "
         }
+        (Mode::Commits, _) => " j/k move · v range · ↵ show · esc close ",
         _ => " j/k move · / find · esc close ",
     };
 
@@ -133,8 +136,8 @@ fn draw_overlay(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
             .take(height)
             .map(|(row, entry)| paint(row, help_line(entry, width, theme)))
             .collect(),
-        Content::Overview(rows) => rows
-            .lines
+        Content::Overview(overview::Rows { lines, .. })
+        | Content::Commits(commits::Rows { lines, .. }) => lines
             .iter()
             .enumerate()
             .skip(scroll)
@@ -264,14 +267,28 @@ fn draw_header(frame: &mut Frame, app: AppView<'_>, area: Rect) {
                 Span::styled(clipped, style)
             };
 
-            vec![
-                take(
-                    label.to_string(),
+            let mut spans = vec![take(
+                label.to_string(),
+                Style::default()
+                    .bg(color)
+                    .fg(theme.ink)
+                    .add_modifier(Modifier::BOLD),
+            )];
+
+            // Outranks the title: reading part of a change as if it were the
+            // whole of it is the mistake this is here to prevent.
+            if let Some(scope) = app.scope_label() {
+                spans.push(take(" ".to_owned(), Style::default()));
+                spans.push(take(
+                    format!(" {scope} "),
                     Style::default()
-                        .bg(color)
+                        .bg(theme.orange)
                         .fg(theme.ink)
                         .add_modifier(Modifier::BOLD),
-                ),
+                ));
+            }
+
+            spans.extend([
                 take(
                     format!(" #{} ", pr.number),
                     Style::default()
@@ -292,7 +309,8 @@ fn draw_header(frame: &mut Frame, app: AppView<'_>, area: Rect) {
                     format!("  @{}", pr.author),
                     Style::default().fg(theme.dim),
                 ),
-            ]
+            ]);
+            spans
         }
     };
 
@@ -1312,7 +1330,9 @@ pub fn mode_chip(mode: Mode, theme: Theme) -> Span<'static> {
         Mode::Filter => theme.purple,
         Mode::Search => theme.warning,
         Mode::CommandLine => theme.muted,
-        Mode::Help | Mode::Overview | Mode::Submit => theme.heading,
+        Mode::Help | Mode::Overview | Mode::Commits | Mode::Submit => {
+            theme.heading
+        }
     };
 
     Span::styled(
@@ -1365,6 +1385,7 @@ fn draw_bottom_bar(
     let pane = match (app.overlay_mode(), app.pane) {
         (Some(Mode::Overview), _) => " overview",
         (Some(Mode::Help), _) => " keys",
+        (Some(Mode::Commits), _) => " commits",
         (_, Pane::Files) => " files",
         (_, Pane::Diff) => " diff",
     };
@@ -1516,7 +1537,9 @@ fn draw_bottom_bar(
         (Mode::Search, _) => {
             &[("↑↓", "step"), ("↵", "accept"), ("esc", "cancel")]
         }
-        (Mode::Help | Mode::Overview, _) if app.search.is_some() => {
+        (Mode::Help | Mode::Overview | Mode::Commits, _)
+            if app.search.is_some() =>
+        {
             &[("n/N", "step"), ("/", "find"), ("esc", "close")]
         }
         (Mode::Overview, _) if is_on_overview_fold => &[
@@ -1533,6 +1556,12 @@ fn draw_bottom_bar(
             ("esc", "close"),
         ],
         (Mode::Help, _) => &[("j/k", "move"), ("/", "find"), ("esc", "close")],
+        (Mode::Commits, _) => &[
+            ("j/k", "move"),
+            ("v", "range"),
+            ("↵", "show"),
+            ("esc", "close"),
+        ],
         (Mode::CommandLine, _) => &[
             (":42", "line"),
             ("↑↓", "history"),

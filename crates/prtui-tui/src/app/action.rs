@@ -85,6 +85,8 @@ pub enum Action {
     OpenHelp,
     OpenOverview,
     CloseOverlay,
+    /// Open the panel that picks which commits the diff shows.
+    OpenCommits,
 
     /// Hand what the cursor is on to the browser, or put its link on the
     /// clipboard.
@@ -95,6 +97,22 @@ pub enum Action {
 }
 
 impl Action {
+    /// Whether the action writes against the pull request's own diff, which a
+    /// diff of some of its commits cannot be addressed in.
+    pub const fn is_review_write(&self) -> bool {
+        matches!(
+            self,
+            Self::NextComment(_)
+                | Self::PrevComment(_)
+                | Self::StartComment
+                | Self::StartFileComment
+                | Self::EditDraft
+                | Self::DeleteDraft
+                | Self::ToggleResolved
+                | Self::ToggleViewed
+        )
+    }
+
     pub const fn is_local(&self) -> bool {
         !matches!(
             self,
@@ -113,6 +131,7 @@ impl Action {
                 | Self::CancelSubmit
                 | Self::CycleEvent(_)
                 | Self::OpenOverview
+                | Self::OpenCommits
                 | Self::OpenInBrowser
                 | Self::YankLink
         )

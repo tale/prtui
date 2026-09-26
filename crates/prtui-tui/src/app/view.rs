@@ -4,8 +4,10 @@ use super::keymap::Keymap;
 use super::mode::{Mode, Selection};
 use super::review::Submission;
 use super::{
-    App, Card, Composer, Focus, OpenFile, Pane, SummaryState, TreeRow,
+    App, Card, CommitsState, Composer, Focus, OpenFile, Pane, SummaryState,
+    TreeRow,
 };
+use crate::commits::Pick;
 use crate::expand::Gap;
 use crate::layout::Layout;
 use crate::overview::FoldState;
@@ -55,8 +57,8 @@ impl<'a> View<'a> {
         Self {
             app,
             pr: app.review.pr.as_ref(),
-            files: &app.review.files,
-            threads_by_path: &app.review.threads_by_path,
+            files: app.shown_files(),
+            threads_by_path: app.shown_threads(),
             drafts: &app.review.drafts,
             mode: app.navigation.mode,
             selection: app.navigation.selection,
@@ -81,6 +83,23 @@ impl<'a> View<'a> {
             summary: &app.review.summary,
             overview_folds: &app.navigation.overview_folds,
         }
+    }
+
+    pub const fn commits(self) -> &'a CommitsState {
+        &self.app.review.commits
+    }
+
+    pub const fn pick(self) -> &'a Pick {
+        &self.app.review.pick
+    }
+
+    /// What the header names the diff by while it shows less than all of it.
+    pub fn scope_label(self) -> Option<&'a str> {
+        self.app.scope_label()
+    }
+
+    pub fn commit_span(self) -> Option<(usize, usize)> {
+        self.app.commit_span()
     }
 
     pub fn local_root(self) -> Option<&'a str> {

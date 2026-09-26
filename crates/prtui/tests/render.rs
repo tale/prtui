@@ -359,6 +359,10 @@ fn open_overview(app: &mut App) {
 /// The file at head, long enough for any gap in the fixture to open into it.
 /// The text is not the real file's, which nothing here depends on: a reveal is
 /// addressed by line number.
+fn head_oid(app: &App) -> Arc<str> {
+    app.view().pr.expect("metadata loaded").head_oid.clone()
+}
+
 fn head_of(app: &App) -> Arc<[String]> {
     let file = &app.view().files[app.view().selected_file];
     let longest = file
@@ -413,6 +417,7 @@ fn opening_a_gap_fetches_the_file_and_then_reveals_it() {
 
     app.finish(Ok(Sent::Blob {
         path: path.clone(),
+        commit: head_oid(&app),
         lines: head_of(&app),
     }));
 
@@ -457,6 +462,7 @@ fn a_reveal_keeps_the_header_it_opened_under_the_cursor() {
     app.take_requests();
     app.finish(Ok(Sent::Blob {
         path,
+        commit: head_oid(&app),
         lines: head_of(&app),
     }));
 
@@ -477,6 +483,7 @@ fn expanding_the_file_opens_every_gap_at_once() {
     app.take_requests();
     app.finish(Ok(Sent::Blob {
         path,
+        commit: head_oid(&app),
         lines: head_of(&app),
     }));
 
@@ -556,6 +563,7 @@ fn the_trailing_band_learns_the_length_of_the_file() {
     // Head holds 40 lines past the end of the patch.
     app.finish(Ok(Sent::Blob {
         path: path.clone(),
+        commit: head_oid(&app),
         lines: head_of(&app),
     }));
     assert_eq!(app.gaps().last().unwrap().len, Some(40));
@@ -564,7 +572,11 @@ fn the_trailing_band_learns_the_length_of_the_file() {
     // A file whose patch already reaches the end has no trailing run at all.
     let short: Arc<[String]> =
         (1..=133).map(|line| format!("head line {line}")).collect();
-    app.finish(Ok(Sent::Blob { path, lines: short }));
+    app.finish(Ok(Sent::Blob {
+        path,
+        commit: head_oid(&app),
+        lines: short,
+    }));
 
     let gaps = app.gaps();
     assert_eq!(gaps.len(), 1);
@@ -3129,4 +3141,52 @@ fn renamed_files_show_both_paths_without_losing_diff_counts() {
             assert!(header.contains("src/before.rs → src/after.rs"));
         }
     }
+}
+
+#[test]
+fn the_commit_panel_lists_picks_and_the_header_names_a_scoped_diff() {
+    let mut app = load();
+    let commit = |oid: &str, parent: &str, title: &str| prtui_core::Commit {
+        oid: oid.into(),
+        parent: Some(parent.into()),
+        title: title.into(),
+        author: "tale".into(),
+        authored_at: "2026-09-24T10:00:00Z".into(),
+    };
+
+    press(&mut app, "L");
+    let Some(Effect::FetchCommits { generation }) = app.take_effects().pop()
+    else {
+        panic!("opening the panel fetches the commits");
+    };
+    app.receive(AppMessage::Commits {
+        generation,
+        outcome: Ok(Box::new(prtui_core::CommitLog {
+            commits: vec![
+                commit("aaaaaaa1", "base0000", "add the parser"),
+                commit("bbbbbbb2", "aaaaaaa1", "address review"),
+            ],
+            last_reviewed: Some("aaaaaaa1".into()),
+        })),
+    });
+
+    let screen = draw(&app);
+    assert!(screen.contains("▎ all changes"));
+    assert!(screen.contains("since your last review  1 new commit"));
+    assert!(screen.contains("bbbbbbb address review"));
+
+    press(&mut app, "5j");
+    act(&mut app, &Action::Activate);
+    let Some(Effect::FetchRange { generation, .. }) = app.take_effects().pop()
+    else {
+        panic!("a pick asks for its files");
+    };
+    let files = parse_files(include_bytes!("fixtures/files.json")).unwrap();
+    app.receive(AppMessage::Range {
+        generation,
+        outcome: Ok(files.into_iter().take(1).collect()),
+    });
+
+    let header = draw(&app).lines().next().unwrap_or_default().to_owned();
+    assert!(header.contains(" bbbbbbb "), "{header}");
 }

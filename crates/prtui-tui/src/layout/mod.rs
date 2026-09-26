@@ -1,11 +1,12 @@
 pub mod rows;
 pub mod tree;
 
-use crate::app::SummaryState;
 use crate::app::View as AppView;
 use crate::app::keymap::Reference;
 use crate::app::mode::Mode;
 use crate::app::search::Query;
+use crate::app::{CommitsState, SummaryState};
+use crate::commits;
 use crate::expand::Gap;
 use crate::overview;
 use crate::ui::SPINNER;
@@ -179,6 +180,7 @@ pub struct Overlay {
 pub enum Content {
     Keys(Vec<Reference>),
     Overview(overview::Rows),
+    Commits(commits::Rows),
 }
 
 impl Content {
@@ -186,6 +188,7 @@ impl Content {
         match self {
             Self::Keys(lines) => lines.len(),
             Self::Overview(rows) => rows.len(),
+            Self::Commits(rows) => rows.len(),
         }
     }
 
@@ -205,6 +208,9 @@ impl Content {
                 })
             }
             Self::Overview(rows) => {
+                rows.lines.get(index).map(ToString::to_string)
+            }
+            Self::Commits(rows) => {
                 rows.lines.get(index).map(ToString::to_string)
             }
         }
@@ -259,13 +265,16 @@ fn build_overlay(app: AppView<'_>, body: Rect) -> Option<Overlay> {
     let area = panel_area(body);
     let inner = panel_inner(area);
 
-    let (title, content) = if mode == Mode::Help {
-        (" keys ", Content::Keys(app.keymap().reference()))
-    } else {
-        (
+    let (title, content) = match mode {
+        Mode::Help => (" keys ", Content::Keys(app.keymap().reference())),
+        Mode::Commits => (
+            " commits ",
+            Content::Commits(build_commits(app, inner.width)),
+        ),
+        _ => (
             " overview ",
             Content::Overview(build_overview(app, inner.width)),
-        )
+        ),
     };
 
     Some(Overlay {
@@ -306,6 +315,37 @@ fn build_overview(app: AppView<'_>, width: u16) -> overview::Rows {
             ])],
             folds: vec![None],
         },
+    }
+}
+
+fn build_commits(app: AppView<'_>, width: u16) -> commits::Rows {
+    let theme = app.theme();
+    let line = match app.commits() {
+        CommitsState::Ready(log) => {
+            return commits::build(
+                log,
+                app.pick(),
+                app.commit_span(),
+                width as usize,
+                theme,
+            );
+        }
+        CommitsState::Failed(error) => Line::styled(
+            format!("error: {error}"),
+            Style::default().fg(theme.danger),
+        ),
+        CommitsState::Absent | CommitsState::Loading => Line::from(vec![
+            Span::styled(
+                SPINNER[app.loading_frame % SPINNER.len()],
+                Style::default().fg(theme.accent),
+            ),
+            Span::styled("  loading commits", Style::default().fg(theme.dim)),
+        ]),
+    };
+
+    commits::Rows {
+        lines: vec![line],
+        entries: vec![None],
     }
 }
 

@@ -205,7 +205,11 @@ impl App {
                 };
                 edit(line);
             }
-            Mode::Normal | Mode::Visual | Mode::Help | Mode::Overview => {
+            Mode::Normal
+            | Mode::Visual
+            | Mode::Help
+            | Mode::Overview
+            | Mode::Commits => {
                 return false;
             }
         }
@@ -662,11 +666,10 @@ impl App {
 
     pub fn filtered_file_indices(&self) -> Vec<usize> {
         let Some(query) = self.tree_query() else {
-            return (0..self.review.files.len()).collect();
+            return (0..self.shown_files().len()).collect();
         };
 
-        self.review
-            .files
+        self.shown_files()
             .iter()
             .enumerate()
             .filter(|(_, file)| query.is_match(&file.path))

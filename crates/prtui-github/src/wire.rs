@@ -5,8 +5,9 @@
 
 use anyhow::{Context, Result};
 use prtui_core::{
-    AddedThread, ChangedFile, Comment, DiffLine, Meta, NewThread, Parent,
-    PullRequest, ReviewEvent, ReviewThread, Side, parse_patch,
+    AddedThread, ChangedFile, Comment, Commit, CommitLog, DiffLine, Meta,
+    NewThread, Parent, PullRequest, ReviewEvent, ReviewThread, Side,
+    parse_patch,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -367,6 +368,130 @@ pub fn meta_bytes(bytes: &[u8]) -> Result<Meta> {
     let response =
         serde_json::from_slice(bytes).context("unexpected graphql response")?;
     into_meta(response)
+}
+
+#[derive(Deserialize)]
+struct CommitsResponse {
+    data: CommitsData,
+}
+
+#[derive(Deserialize)]
+struct CommitsData {
+    viewer: Author,
+    repository: Option<CommitsRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitsRepository {
+    pull_request: Option<CommitsPullRequest>,
+}
+
+#[derive(Deserialize)]
+struct CommitsPullRequest {
+    commits: Nodes<WirePullRequestCommit>,
+    reviews: Nodes<WireSubmittedReview>,
+}
+
+#[derive(Deserialize)]
+struct WirePullRequestCommit {
+    commit: WireCommit,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireCommit {
+    oid: String,
+    message_headline: String,
+    authored_date: String,
+    author: Option<WireGitActor>,
+    parents: Nodes<WireOid>,
+}
+
+#[derive(Deserialize)]
+struct WireGitActor {
+    name: Option<String>,
+    user: Option<Author>,
+}
+
+#[derive(Deserialize)]
+struct WireOid {
+    oid: String,
+}
+
+#[derive(Deserialize)]
+struct WireSubmittedReview {
+    state: String,
+    author: Option<Author>,
+    commit: Option<WireOid>,
+}
+
+impl From<WireCommit> for Commit {
+    fn from(commit: WireCommit) -> Self {
+        let author = commit
+            .author
+            .and_then(|actor| actor.user.map(|user| user.login).or(actor.name));
+
+        Self {
+            oid: commit.oid.into(),
+            parent: commit
+                .parents
+                .nodes
+                .into_iter()
+                .next()
+                .map(|parent| parent.oid.into()),
+            title: commit.message_headline,
+            author: author.unwrap_or_default(),
+            authored_at: commit.authored_date,
+        }
+    }
+}
+
+/// The viewer's newest submitted review names the commit they last read. A
+/// pending one has not been read through yet.
+pub fn commit_log(value: Value) -> Result<CommitLog> {
+    let response: CommitsResponse =
+        serde_json::from_value(value).context("unexpected graphql response")?;
+    let viewer = response.data.viewer.login;
+    let pr = response
+        .data
+        .repository
+        .and_then(|repository| repository.pull_request)
+        .context("PR not found in graphql response")?;
+
+    let last_reviewed = pr
+        .reviews
+        .nodes
+        .into_iter()
+        .rev()
+        .filter(|review| review.state != "PENDING")
+        .filter(|review| {
+            review.author.as_ref().is_some_and(|a| a.login == viewer)
+        })
+        .find_map(|review| review.commit)
+        .map(|commit| commit.oid.into());
+
+    Ok(CommitLog {
+        commits: pr
+            .commits
+            .nodes
+            .into_iter()
+            .map(|node| node.commit.into())
+            .collect(),
+        last_reviewed,
+    })
+}
+
+#[derive(Deserialize)]
+struct Comparison {
+    #[serde(default)]
+    files: Vec<File>,
+}
+
+pub fn comparison(bytes: &[u8]) -> Result<Vec<ChangedFile>> {
+    let comparison: Comparison = serde_json::from_slice(bytes)
+        .context("unexpected /compare response shape")?;
+    Ok(convert_files(comparison.files))
 }
 
 #[derive(Deserialize)]
@@ -737,5 +862,43 @@ index 6666666..0000000
         assert!(parsed.threads[0].is_pending());
         assert!(parsed.threads[0].is_file_level);
         assert_eq!(&*parsed.threads[0].comments[0].id, "PRRC_3");
+    }
+
+    #[test]
+    fn the_last_reviewed_commit_is_the_viewers_newest_submitted_review() {
+        let commit = |oid: &str, parent: &str| {
+            json!({ "commit": {
+                "oid": oid,
+                "messageHeadline": format!("commit {oid}"),
+                "authoredDate": "2026-09-24T10:00:00Z",
+                "author": { "name": "Tale", "user": { "login": "tale" } },
+                "parents": { "nodes": [{ "oid": parent }] },
+            }})
+        };
+        let review = |state: &str, login: &str, oid: &str| {
+            json!({
+                "state": state,
+                "author": { "login": login },
+                "commit": { "oid": oid },
+            })
+        };
+        let value = json!({ "data": {
+            "viewer": { "login": "me" },
+            "repository": { "pullRequest": {
+                "commits": { "nodes": [commit("a", "base"), commit("b", "a")] },
+                "reviews": { "nodes": [
+                    review("COMMENTED", "me", "a"),
+                    review("APPROVED", "someone", "b"),
+                    review("PENDING", "me", "b"),
+                ]},
+            }},
+        }});
+
+        let log = commit_log(value).unwrap();
+
+        assert_eq!(log.last_reviewed.as_deref(), Some("a"));
+        assert_eq!(log.commits.len(), 2);
+        assert_eq!(log.commits[1].parent.as_deref(), Some("a"));
+        assert_eq!(log.commits[0].author, "tale");
     }
 }

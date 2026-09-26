@@ -623,6 +623,9 @@ fn drawn_lines(layout: &Layout) -> Vec<String> {
         Content::Overview(rows) => {
             rows.lines.iter().map(ToString::to_string).collect()
         }
+        Content::Commits(rows) => {
+            rows.lines.iter().map(ToString::to_string).collect()
+        }
     }
 }
 
@@ -1587,6 +1590,7 @@ fn ctrl_c_quits_from_every_mode() {
         Mode::CommandLine,
         Mode::Help,
         Mode::Overview,
+        Mode::Commits,
         Mode::Submit,
     ] {
         let mut app = load();
@@ -1605,6 +1609,7 @@ fn ctrl_c_quits_from_every_mode() {
             Mode::CommandLine => press(&mut app, ":"),
             Mode::Help => press(&mut app, "?"),
             Mode::Overview => press(&mut app, "K"),
+            Mode::Commits => press(&mut app, "L"),
             Mode::Submit => press(&mut app, "s"),
         }
         assert_eq!(app.view().mode, mode);
@@ -3418,4 +3423,151 @@ fn searching_a_file_keeps_the_tree_filtered() {
         "the filtered set survives"
     );
     assert!(app.view().search.is_some());
+}
+
+fn commit_log() -> prtui_core::CommitLog {
+    let commit = |oid: &str, parent: &str, title: &str| prtui_core::Commit {
+        oid: oid.into(),
+        parent: Some(parent.into()),
+        title: title.into(),
+        author: "tale".into(),
+        authored_at: "2026-09-24T10:00:00Z".into(),
+    };
+
+    prtui_core::CommitLog {
+        commits: vec![
+            commit("aaaaaaa1", "base0000", "first"),
+            commit("bbbbbbb2", "aaaaaaa1", "second"),
+            commit("ccccccc3", "bbbbbbb2", "third"),
+        ],
+        last_reviewed: Some("aaaaaaa1".into()),
+    }
+}
+
+fn open_commits(app: &mut App) {
+    press(app, "L");
+    let generation = app
+        .take_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::FetchCommits { generation } => Some(generation),
+            _ => None,
+        })
+        .expect("opening the panel fetches the commits");
+    app.receive(AppMessage::Commits {
+        generation,
+        outcome: Ok(Box::new(commit_log())),
+    });
+}
+
+fn requested_range(app: &mut App) -> (u64, String, String) {
+    app.take_effects()
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::FetchRange {
+                generation,
+                base,
+                head,
+            } => Some((generation, base.to_string(), head.to_string())),
+            _ => None,
+        })
+        .expect("a pick asks for its files")
+}
+
+fn one_file(path: &str) -> prtui_core::ChangedFile {
+    prtui_core::ChangedFile {
+        path: path.into(),
+        previous_path: None,
+        status: "modified".into(),
+        additions: 1,
+        deletions: 0,
+        lines: prtui_core::parse_patch("@@ -1,1 +1,2 @@\n one\n+two\n"),
+    }
+}
+
+#[test]
+fn a_picked_commit_replaces_the_diff_until_all_changes_is_picked() {
+    let mut app = load();
+    let files = app.view().files.len();
+    open_commits(&mut app);
+    assert_eq!(app.view().mode, Mode::Commits);
+
+    // All changes, since review, a blank, the heading, then the commits.
+    press(&mut app, "5j");
+    act(&mut app, &Action::Activate);
+    let (generation, base, head) = requested_range(&mut app);
+    assert_eq!((base.as_str(), head.as_str()), ("aaaaaaa1", "bbbbbbb2"));
+    assert_eq!(app.view().mode, Mode::Normal);
+
+    app.receive(AppMessage::Range {
+        generation,
+        outcome: Ok(vec![one_file("src/second.rs")]),
+    });
+    assert_eq!(app.view().files.len(), 1);
+    assert_eq!(app.view().scope_label(), Some("bbbbbbb"));
+    assert!(app.view().threads_by_path.is_empty());
+
+    park_on_code(&mut app);
+    press(&mut app, "c");
+    assert_eq!(app.view().mode, Mode::Normal);
+    assert!(app.view().status.contains("read-only"));
+
+    open_commits(&mut app);
+    press(&mut app, "gg");
+    act(&mut app, &Action::Activate);
+    assert_eq!(app.view().files.len(), files);
+    assert_eq!(app.view().scope_label(), None);
+    assert!(!app.view().threads_by_path.is_empty());
+}
+
+#[test]
+fn a_range_runs_from_the_parent_of_its_first_commit_to_its_last() {
+    let mut app = load();
+    open_commits(&mut app);
+
+    press(&mut app, "4jv2j");
+    act(&mut app, &Action::Activate);
+
+    let (_, base, head) = requested_range(&mut app);
+    assert_eq!((base.as_str(), head.as_str()), ("base0000", "ccccccc3"));
+}
+
+#[test]
+fn since_review_diffs_the_reviewed_commit_against_head() {
+    let mut app = load();
+    let head = app.view().pr.unwrap().head_oid.to_string();
+    open_commits(&mut app);
+
+    press(&mut app, "j");
+    act(&mut app, &Action::Activate);
+
+    let (_, base, to) = requested_range(&mut app);
+    assert_eq!((base.as_str(), to.as_str()), ("aaaaaaa1", head.as_str()));
+}
+
+#[test]
+fn a_superseded_pick_is_dropped_when_it_lands() {
+    let mut app = load();
+    let files = app.view().files.len();
+    open_commits(&mut app);
+    press(&mut app, "4j");
+    act(&mut app, &Action::Activate);
+    let (first, ..) = requested_range(&mut app);
+
+    open_commits(&mut app);
+    press(&mut app, "5j");
+    act(&mut app, &Action::Activate);
+    let (second, ..) = requested_range(&mut app);
+
+    assert!(!app.receive(AppMessage::Range {
+        generation: first,
+        outcome: Ok(vec![one_file("src/first.rs")]),
+    }));
+    assert_eq!(app.view().files.len(), files);
+
+    app.receive(AppMessage::Range {
+        generation: second,
+        outcome: Ok(vec![one_file("src/second.rs")]),
+    });
+    assert_eq!(&*app.view().files[0].path, "src/second.rs");
 }

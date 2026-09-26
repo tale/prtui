@@ -129,6 +129,12 @@ pub const COMMANDS: &[Command] = &[
         build: |_| Action::FocusDiff,
     },
     Command {
+        name: "commits",
+        group: "files",
+        summary: "pick the commits the diff shows",
+        build: |_| Action::OpenCommits,
+    },
+    Command {
         name: "toggle-viewed",
         group: "files",
         summary: "mark read and open the next unread",

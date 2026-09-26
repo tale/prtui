@@ -2,10 +2,10 @@ use crate::url::escape_path;
 use anyhow::{Context, Result, bail};
 use prtui_core::Provider;
 use prtui_core::{
-    AddedThread, ChangedFile, Changes, Check, CheckState, Meta, NewThread,
-    Parent, PullRequestList, PullRequestListItem, PullRequestListScope,
-    PullRequestOverview, Repo, ReviewEvent, ReviewStatus, Reviewer, Summary,
-    Threads, Verdict,
+    AddedThread, ChangedFile, Changes, Check, CheckState, CommitLog, Meta,
+    NewThread, Parent, PullRequestList, PullRequestListItem,
+    PullRequestListScope, PullRequestOverview, Repo, ReviewEvent, ReviewStatus,
+    Reviewer, Summary, Threads, Verdict,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -117,6 +117,50 @@ query($id:ID!, $after:String!) {
       comments(first:100, after:$after) {
         pageInfo { hasNextPage endCursor }
         nodes { id fullDatabaseId state author { login } body createdAt }
+      }
+    }
+  }
+}
+";
+
+/// Commits oldest first, and the viewer's reviews so the one they last
+/// submitted can be found. The last hundred reviews reach back far enough.
+const COMMITS_QUERY: &str = r"
+query($owner:String!, $repo:String!, $number:Int!) {
+  viewer { login }
+  repository(owner:$owner, name:$repo) {
+    pullRequest(number:$number) {
+      commits(first:100) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          commit {
+            oid messageHeadline authoredDate
+            author { name user { login } }
+            parents(first:1) { nodes { oid } }
+          }
+        }
+      }
+      reviews(last:100) {
+        nodes { state author { login } commit { oid } }
+      }
+    }
+  }
+}
+";
+
+const MORE_COMMITS_QUERY: &str = r"
+query($owner:String!, $repo:String!, $number:Int!, $after:String!) {
+  repository(owner:$owner, name:$repo) {
+    pullRequest(number:$number) {
+      commits(first:100, after:$after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          commit {
+            oid messageHeadline authoredDate
+            author { name user { login } }
+            parents(first:1) { nodes { oid } }
+          }
+        }
       }
     }
   }
@@ -862,7 +906,7 @@ pub fn parse_meta(bytes: &[u8]) -> Result<Meta> {
 /// with: those files stay as GitHub sent them rather than failing the load.
 async fn fill_withheld_patches(
     repo: &Repo,
-    number: u32,
+    path: &str,
     files: &mut [ChangedFile],
 ) -> Result<()> {
     if !files.iter().any(ChangedFile::is_patch_withheld) {
@@ -870,10 +914,7 @@ async fn fill_withheld_patches(
     }
 
     let token = token(repo.host.as_deref()).await;
-    let url = rest_url(
-        repo,
-        &format!("/repos/{}/{}/pulls/{number}", repo.namespace, repo.name),
-    );
+    let url = rest_url(repo, path);
 
     let diff = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut response = get(&url, DIFF_ACCEPT, token.as_deref())?;
@@ -944,7 +985,89 @@ async fn fetch_files(repo: &Repo, number: u32) -> Result<Vec<ChangedFile>> {
 
     // A pull request too large for the diff endpoint keeps the review it came
     // with: the files it withheld stay empty rather than failing the load.
-    let _ = fill_withheld_patches(repo, number, &mut files).await;
+    let path =
+        format!("/repos/{}/{}/pulls/{number}", repo.namespace, repo.name);
+    let _ = fill_withheld_patches(repo, &path, &mut files).await;
+
+    Ok(files)
+}
+
+async fn fetch_commits(repo: &Repo, number: u32) -> Result<CommitLog> {
+    let token = token(repo.host.as_deref()).await;
+    let url = graphql_url(repo);
+    let variables = serde_json::json!({
+        "owner": repo.namespace,
+        "repo": repo.name,
+        "number": number,
+    });
+
+    tokio::task::spawn_blocking(move || {
+        let mut value = graphql(
+            &url,
+            token.as_deref(),
+            COMMITS_QUERY,
+            &variables,
+            "fetching commits",
+            Retry::Transient,
+        )?;
+
+        let commits =
+            &mut value["data"]["repository"]["pullRequest"]["commits"];
+        if !commits.is_null() {
+            drain(commits, |after| {
+                let mut variables = variables.clone();
+                variables["after"] = after.into();
+                let mut answer = graphql(
+                    &url,
+                    token.as_deref(),
+                    MORE_COMMITS_QUERY,
+                    &variables,
+                    "fetching commits",
+                    Retry::Transient,
+                )?;
+
+                Ok(answer["data"]["repository"]["pullRequest"]["commits"]
+                    .take())
+            })?;
+        }
+
+        wire::commit_log(value)
+    })
+    .await
+    .context("commit fetch panicked")?
+}
+
+/// Three dots, the way a pull request itself is diffed. The file list rides
+/// on the first page alone, so one page of commits is all that is asked for.
+async fn fetch_range(
+    repo: &Repo,
+    base: &str,
+    head: &str,
+) -> Result<Vec<ChangedFile>> {
+    let token = token(repo.host.as_deref()).await;
+    let path = format!(
+        "/repos/{}/{}/compare/{base}...{head}",
+        repo.namespace, repo.name
+    );
+    let url = rest_url(repo, &format!("{path}?per_page=1"));
+
+    let mut files = tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut response = get(&url, JSON_ACCEPT, token.as_deref())?;
+        check(&mut response, "comparing commits")?;
+
+        let bytes = response
+            .body_mut()
+            .with_config()
+            .limit(API_LIMIT)
+            .read_to_vec()
+            .context("failed to read /compare response")?;
+
+        wire::comparison(&bytes)
+    })
+    .await
+    .context("comparison fetch panicked")??;
+
+    let _ = fill_withheld_patches(repo, &path, &mut files).await;
 
     Ok(files)
 }
@@ -1562,6 +1685,23 @@ impl Provider for GitHub {
         number: u32,
     ) -> Result<Vec<ChangedFile>> {
         fetch_files(repo, number).await
+    }
+
+    async fn fetch_commits(
+        self,
+        repo: &Repo,
+        number: u32,
+    ) -> Result<CommitLog> {
+        fetch_commits(repo, number).await
+    }
+
+    async fn fetch_range(
+        self,
+        repo: &Repo,
+        base: &str,
+        head: &str,
+    ) -> Result<Vec<ChangedFile>> {
+        fetch_range(repo, base, head).await
     }
 
     async fn fetch_meta(self, repo: &Repo, number: u32) -> Result<Meta> {

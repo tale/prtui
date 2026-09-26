@@ -177,11 +177,12 @@ impl App {
         index: usize,
         leave_transient_mode: bool,
     ) {
-        if self.review.files.is_empty() {
+        let count = self.shown_files().len();
+        if count == 0 {
             return;
         }
 
-        self.navigation.selected_file = index.min(self.review.files.len() - 1);
+        self.navigation.selected_file = index.min(count - 1);
         self.navigation.tree_directory = None;
         self.navigation.cursor = 0;
         self.set_focus(None);
@@ -518,12 +519,11 @@ impl App {
     /// resolved and outdated threads are skipped. Every draft is a stop: an
     /// unsent remark is the one thing still waiting on the reader.
     fn comment_stops(&self, index: usize) -> Vec<(usize, Card)> {
-        let Some(file) = self.review.files.get(index) else {
+        let Some(file) = self.shown_files().get(index) else {
             return Vec::new();
         };
         let threads = self
-            .review
-            .threads_by_path
+            .shown_threads()
             .get(&file.path)
             .map_or(&[][..], Vec::as_slice);
         let drafts = self.drafts_for(&file.path);

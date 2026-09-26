@@ -13,9 +13,9 @@ mod wire;
 
 use anyhow::{Context, Result, bail};
 use prtui_core::{
-    AddedThread, ChangedFile, Comment, Meta, NewThread, Parent, Provider,
-    PullRequestList, PullRequestOverview, Repo, ReviewEvent, ReviewThread,
-    Summary,
+    AddedThread, ChangedFile, Comment, CommitLog, Meta, NewThread, Parent,
+    Provider, PullRequestList, PullRequestOverview, Repo, ReviewEvent,
+    ReviewThread, Summary,
 };
 use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet};
@@ -26,8 +26,8 @@ use project::ProjectRef;
 use transport::Retry;
 use url::{escape_path, escape_segment};
 use wire::{
-    DiffRefs, WireDiff, WireDiscussion, WireDraftNote, WireMergeRequest,
-    WireReviewer, WireTreeEntry,
+    DiffRefs, WireCommit, WireCompare, WireDiff, WireDiscussion, WireDraftNote,
+    WireMergeRequest, WireReviewer, WireTreeEntry, WireVersion,
 };
 
 const DEFAULT_HOST: &str = "gitlab.com";
@@ -274,6 +274,44 @@ async fn fetch_files(repo: &Repo, number: u32) -> Result<Vec<ChangedFile>> {
     }
 
     Ok(files)
+}
+
+async fn fetch_commits(repo: &Repo, number: u32) -> Result<CommitLog> {
+    let commits_path = format!("/merge_requests/{number}/commits");
+    let versions_path = format!("/merge_requests/{number}/versions");
+    let discussions_path = format!("/merge_requests/{number}/discussions");
+    let (commits, versions, discussions, viewer) = tokio::try_join!(
+        read_all::<WireCommit>(repo, &commits_path, "commits"),
+        read_all::<WireVersion>(repo, &versions_path, "versions"),
+        read_all::<WireDiscussion>(repo, &discussions_path, "discussions"),
+        current_user(repo),
+    )?;
+
+    Ok(wire::commit_log(
+        commits,
+        &versions,
+        &discussions,
+        &viewer.username,
+    ))
+}
+
+async fn fetch_range(
+    repo: &Repo,
+    base: &str,
+    head: &str,
+) -> Result<Vec<ChangedFile>> {
+    let compare: WireCompare = read(
+        repo,
+        &format!(
+            "/repository/compare?from={}&to={}&straight=false",
+            escape_segment(base),
+            escape_segment(head)
+        ),
+        "comparison",
+    )
+    .await?;
+
+    Ok(wire::changed_files(&compare.diffs))
 }
 
 async fn fetch_meta(repo: &Repo, number: u32) -> Result<Meta> {
@@ -660,6 +698,23 @@ impl Provider for GitLab {
         number: u32,
     ) -> Result<Vec<ChangedFile>> {
         fetch_files(repo, number).await
+    }
+
+    async fn fetch_commits(
+        self,
+        repo: &Repo,
+        number: u32,
+    ) -> Result<CommitLog> {
+        fetch_commits(repo, number).await
+    }
+
+    async fn fetch_range(
+        self,
+        repo: &Repo,
+        base: &str,
+        head: &str,
+    ) -> Result<Vec<ChangedFile>> {
+        fetch_range(repo, base, head).await
     }
 
     async fn fetch_meta(self, repo: &Repo, number: u32) -> Result<Meta> {

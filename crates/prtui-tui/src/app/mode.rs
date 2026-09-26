@@ -19,6 +19,8 @@ pub enum Mode {
     /// Reading the pull request's description and its discussion, which scrolls
     /// the same way the reference does.
     Overview,
+    /// Picking the commits the diff shows.
+    Commits,
     /// Choosing a verdict and writing the summary that ships the review.
     Submit,
 }
@@ -36,6 +38,7 @@ impl Mode {
             'c' => Self::CommandLine,
             'h' => Self::Help,
             'o' => Self::Overview,
+            'l' => Self::Commits,
             'r' => Self::Submit,
             _ => return None,
         })
@@ -45,14 +48,18 @@ impl Mode {
     pub const fn takes_count(self) -> bool {
         matches!(
             self,
-            Self::Normal | Self::Visual | Self::Help | Self::Overview
+            Self::Normal
+                | Self::Visual
+                | Self::Help
+                | Self::Overview
+                | Self::Commits
         )
     }
 
-    /// Whether the mode is reading a panel floating over the panes. Both of
+    /// Whether the mode is reading a panel floating over the panes. All of
     /// them scroll one list and close, so the app moves them as one.
     pub const fn is_overlay(self) -> bool {
-        matches!(self, Self::Help | Self::Overview)
+        matches!(self, Self::Help | Self::Overview | Self::Commits)
     }
 
     /// Whether the mode is editing a line of text of its own.
@@ -77,6 +84,7 @@ impl Mode {
             Self::CommandLine => " COMMAND ",
             Self::Help => " HELP ",
             Self::Overview => " OVERVIEW ",
+            Self::Commits => " COMMITS ",
             Self::Submit => " SUBMIT ",
         }
     }
