@@ -1605,6 +1605,7 @@ fn draw_bottom_bar(
             ("j/k", "move"),
             ("↵", "open"),
             ("K", "description"),
+            ("L", "commits"),
             if app.file_filter.is_some() {
                 ("/", "edit filter")
             } else {
@@ -1657,6 +1658,7 @@ fn draw_bottom_bar(
             ("c", "comment"),
             ("/", "search"),
             ("}", "next comment"),
+            ("L", "commits"),
             ("q", exit_label),
         ],
     };
