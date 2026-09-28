@@ -36,6 +36,9 @@ query($owner:String!, $repo:String!, $number:Int!) {
         nodes { path viewerViewedState }
       }
       pendingReview: reviews(first:1, states:[PENDING]) { nodes { id } }
+      reviews(last:100, states:[APPROVED, CHANGES_REQUESTED, COMMENTED]) {
+        nodes { id state author { login } body submittedAt comments { totalCount } }
+      }
       discussion: comments(first:100) {
         pageInfo { hasNextPage endCursor }
         nodes { id fullDatabaseId author { login } body createdAt }
@@ -224,6 +227,9 @@ query($owner:String!, $repo:String!, $number:Int!, $includeProse:Boolean!) {
       discussion: comments(first:100) @include(if:$includeProse) {
         pageInfo { hasNextPage endCursor }
         nodes { id fullDatabaseId author { login } body createdAt }
+      }
+      reviews(last:100, states:[APPROVED, CHANGES_REQUESTED, COMMENTED]) @include(if:$includeProse) {
+        nodes { id state author { login } body submittedAt comments { totalCount } }
       }
       reviewRequests(first:100) {
         nodes {
@@ -483,6 +489,7 @@ struct WireOverviewRepository {
 struct WireOverview {
     body: String,
     discussion: WireNodes<wire::WireDiscussionComment>,
+    reviews: WireNodes<wire::WirePastReview>,
 }
 
 #[derive(Deserialize)]
@@ -761,6 +768,7 @@ fn parse_overview(val: &serde_json::Value) -> Result<PullRequestOverview> {
         summary,
         body: pr.body,
         discussion: pr.discussion.nodes.into_iter().map(Into::into).collect(),
+        reviews: wire::reviews(pr.reviews.nodes),
     })
 }
 
@@ -2224,6 +2232,14 @@ mod tests {
                     "body": "ship it",
                     "createdAt": "2026-09-03T20:04:55Z"
                 }] },
+                "reviews": { "nodes": [{
+                    "id": "PRR_1",
+                    "state": "APPROVED",
+                    "author": { "login": "bob" },
+                    "body": "",
+                    "submittedAt": "2026-09-03T21:00:00Z",
+                    "comments": { "totalCount": 2 }
+                }] },
                 "reviewRequests": { "nodes": [] },
                 "latestReviews": { "nodes": [] },
                 "reviewThreads": { "totalCount": 0, "nodes": [] },
@@ -2237,6 +2253,8 @@ mod tests {
         assert_eq!(overview.body, "Why this exists");
         assert_eq!(overview.discussion.len(), 1);
         assert_eq!(overview.discussion[0].author, "alice");
+        assert_eq!(overview.reviews[0].author, "bob");
+        assert_eq!(overview.reviews[0].comments, 2);
     }
 
     /// More threads than the one page counted makes the tally a floor, which

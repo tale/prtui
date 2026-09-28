@@ -69,7 +69,10 @@ pub enum Message {
     /// A completed pull request listing.
     Listed(Result<PullRequestList, String>),
     /// A completed overview for the named pull request.
-    Overview(Arc<PullRequestTarget>, Result<PullRequestOverview, String>),
+    Overview(
+        Arc<PullRequestTarget>,
+        Result<Box<PullRequestOverview>, String>,
+    ),
     /// An external action that failed.
     Failed(String),
 }
@@ -258,7 +261,7 @@ impl Selector {
     fn set_overview(
         &mut self,
         target: &PullRequestTarget,
-        overview: Result<PullRequestOverview, String>,
+        overview: Result<Box<PullRequestOverview>, String>,
     ) {
         let Some(panel) = self.panel.as_mut() else {
             return;
@@ -271,7 +274,7 @@ impl Selector {
         }
 
         panel.state = match overview {
-            Ok(overview) => PanelState::Ready(Box::new(overview)),
+            Ok(overview) => PanelState::Ready(overview),
             Err(err) => PanelState::Failed(format!("error: {err}")),
         };
     }
@@ -489,6 +492,7 @@ fn panel_rows(
             &value.summary,
             &value.body,
             &value.discussion,
+            &value.reviews,
             &panel.folds,
             width,
             theme,
@@ -1355,9 +1359,10 @@ mod tests {
                 created_at: "2026-09-03T10:00:00Z".into(),
                 is_pending: false,
             }],
+            reviews: Vec::new(),
         };
         selector.receive(
-            Message::Overview(target, Ok(overview)),
+            Message::Overview(target, Ok(Box::new(overview))),
             frame_metrics(selector),
         );
     }

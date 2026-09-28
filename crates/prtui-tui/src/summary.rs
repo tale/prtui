@@ -269,7 +269,7 @@ fn changes(summary: &Summary, theme: Theme) -> Vec<Span<'static>> {
     ]
 }
 
-const fn verdict_color(verdict: Verdict, theme: Theme) -> Color {
+pub(crate) const fn verdict_color(verdict: Verdict, theme: Theme) -> Color {
     match verdict {
         Verdict::Approved => theme.success,
         Verdict::ChangesRequested => theme.danger,
@@ -278,7 +278,7 @@ const fn verdict_color(verdict: Verdict, theme: Theme) -> Color {
     }
 }
 
-const fn verdict_glyph(verdict: Verdict) -> &'static str {
+pub(crate) const fn verdict_glyph(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::Approved => "✓",
         Verdict::ChangesRequested => "✗",

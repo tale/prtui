@@ -131,6 +131,7 @@ fn replace_threads(app: &mut App, mut threads: Vec<prtui_core::ReviewThread>) {
         pr,
         threads,
         discussion,
+        reviews: Vec::new(),
         pending_review: None,
         viewed,
     });

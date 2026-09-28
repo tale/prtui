@@ -3,8 +3,8 @@
 use anyhow::{Context, Result, bail};
 use prtui_core::{
     Anchor, ChangedFile, Check, CheckState, Comment, Commit, CommitLog,
-    LineKind, PullRequest, ReviewEvent, ReviewThread, Reviewer, Side, Verdict,
-    parse_hunk_header, parse_patch,
+    LineKind, PullRequest, Review, ReviewEvent, ReviewThread, Reviewer, Side,
+    Verdict, parse_hunk_header, parse_patch,
 };
 use serde::Deserialize;
 use std::fmt::Write;
@@ -248,6 +248,40 @@ impl WireNote {
             is_pending: false,
         }
     }
+}
+
+/// A verdict exists only as a system note; the summary written with it is an
+/// ordinary note that stays in the discussion.
+pub fn system_verdict(body: &str) -> Option<Verdict> {
+    if body.starts_with("approved this merge request") {
+        return Some(Verdict::Approved);
+    }
+    if body.starts_with("requested changes") {
+        return Some(Verdict::ChangesRequested);
+    }
+
+    None
+}
+
+pub fn reviews(discussions: &[WireDiscussion]) -> Vec<Review> {
+    let mut reviews: Vec<Review> = discussions
+        .iter()
+        .flat_map(|discussion| &discussion.notes)
+        .filter(|note| note.system)
+        .filter_map(|note| {
+            Some(Review {
+                id: note.id.to_string().into(),
+                author: note.author.display(),
+                verdict: system_verdict(&note.body)?,
+                body: String::new(),
+                submitted_at: note.created_at.clone(),
+                comments: 0,
+            })
+        })
+        .collect();
+
+    reviews.sort_by(|a, b| a.submitted_at.cmp(&b.submitted_at));
+    reviews
 }
 
 pub fn split_discussions(

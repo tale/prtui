@@ -305,11 +305,30 @@ pub struct Meta {
     /// The pull request's own comments: the ones written about the change as a
     /// whole rather than against a line of it.
     pub discussion: Vec<Comment>,
+    /// Reviews submitted so far, oldest first.
+    pub reviews: Vec<Review>,
     /// The review the viewer has open but not submitted, which every draft is
     /// filed against once the first one has opened it.
     pub pending_review: Option<Arc<str>>,
     /// Paths the viewer has already read through.
     pub viewed: HashSet<Arc<str>>,
+}
+
+/// A submitted review: its verdict and the summary written with it.
+#[derive(Debug, Clone)]
+pub struct Review {
+    /// Opaque provider identifier.
+    pub id: Arc<str>,
+    /// Display name of the reviewer.
+    pub author: String,
+    /// The verdict the review carried.
+    pub verdict: Verdict,
+    /// Markdown summary, empty when the reviewer wrote none.
+    pub body: String,
+    /// Provider-formatted submission time.
+    pub submitted_at: String,
+    /// Number of inline comments filed with the review.
+    pub comments: u32,
 }
 
 /// One commit on a pull request's head branch.
@@ -477,6 +496,8 @@ pub struct PullRequestOverview {
     pub body: String,
     /// Pull request discussion in provider order.
     pub discussion: Vec<Comment>,
+    /// Reviews submitted so far, oldest first.
+    pub reviews: Vec<Review>,
 }
 
 /// Pull request facts rendered at the top of an overview.

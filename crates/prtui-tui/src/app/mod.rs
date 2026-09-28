@@ -34,7 +34,8 @@ use keymap::{Keymap, Resolution};
 use link::{Errand, Link};
 use mode::{Mode, Selection};
 use prtui_core::{
-    ChangedFile, Comment, DiffLine, Meta, PullRequest, ReviewThread, Summary,
+    ChangedFile, Comment, DiffLine, Meta, PullRequest, Review, ReviewThread,
+    Summary,
 };
 use review::{Request, Sent, Submission};
 use search::Query;
@@ -316,6 +317,7 @@ struct ReviewState {
     next_draft_id: u64,
 
     discussion: Vec<Comment>,
+    reviews: Vec<Review>,
     summary: SummaryState,
     summary_generation: u64,
 
@@ -753,6 +755,7 @@ impl App {
         self.review.viewed = meta.viewed;
         self.review.pending_review = meta.pending_review;
         self.review.discussion = meta.discussion;
+        self.review.reviews = meta.reviews;
         self.review.pr = Some(meta.pr);
         self.reseed_drafts();
         self.create_drafts();
@@ -1399,6 +1402,7 @@ impl App {
             summary,
             body,
             &self.review.discussion,
+            &self.review.reviews,
             &self.navigation.overview_folds,
             width,
             self.theme,

@@ -291,6 +291,7 @@ fn build_overview(app: AppView<'_>, width: u16) -> overview::Rows {
             summary,
             app.pr.map_or("", |pr| pr.body.as_str()),
             app.discussion,
+            app.reviews(),
             app.overview_folds,
             width as usize,
             app.theme(),

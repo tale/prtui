@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, bail};
-use prtui_core::{Comment, PullRequestOverview, Repo, Summary, Threads};
+use prtui_core::{
+    Comment, PullRequestOverview, Repo, Review, Summary, Threads,
+};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -243,6 +245,7 @@ query($path: ID!, $id: CiPipelineID!, $first: Int!, $after: String) {{
             .map(|user| WireApproval { user })
             .collect(),
     };
+    let reviews = reviews(&notes);
     let (discussion, threads) = discussion(notes, number)?;
 
     Ok(PullRequestOverview {
@@ -265,6 +268,7 @@ query($path: ID!, $id: CiPipelineID!, $first: Int!, $after: String) {{
         },
         body: mr.description.unwrap_or_default(),
         discussion,
+        reviews,
     })
 }
 
@@ -317,6 +321,30 @@ fn local_id(id: &str) -> Result<&str> {
         .map(|(_, id)| id)
         .filter(|id| !id.is_empty() && !id.contains('/'))
         .context("invalid GitLab GraphQL ID")
+}
+
+fn reviews(notes: &[Note]) -> Vec<Review> {
+    let mut reviews: Vec<Review> = notes
+        .iter()
+        .filter(|note| note.system)
+        .filter_map(|note| {
+            Some(Review {
+                id: note.id.as_str().into(),
+                author: note
+                    .author
+                    .as_ref()
+                    .map(WireUser::display)
+                    .unwrap_or_default(),
+                verdict: wire::system_verdict(&note.body)?,
+                body: String::new(),
+                submitted_at: note.created_at.clone(),
+                comments: 0,
+            })
+        })
+        .collect();
+
+    reviews.sort_by(|a, b| a.submitted_at.cmp(&b.submitted_at));
+    reviews
 }
 
 fn discussion(
@@ -435,6 +463,34 @@ mod tests {
         assert_eq!(threads.total, 0);
         assert_eq!(comments.len(), 1);
         assert!(comments[0].author.is_empty());
+    }
+
+    #[test]
+    fn verdict_system_notes_become_reviews() {
+        let mut approved = note(1, "a", false);
+        approved.system = true;
+        approved.body = "approved this merge request".into();
+        approved.created_at = "2026-09-17T00:00:00Z".into();
+        let mut requested = note(2, "b", false);
+        requested.system = true;
+        requested.body = "requested changes".into();
+        let mut assigned = note(3, "c", false);
+        assigned.system = true;
+        assigned.body = "assigned to @alice".into();
+
+        let reviews =
+            reviews(&[approved, requested, assigned, note(4, "d", false)]);
+        let verdicts: Vec<_> =
+            reviews.iter().map(|review| review.verdict).collect();
+
+        assert_eq!(
+            verdicts,
+            [
+                prtui_core::Verdict::ChangesRequested,
+                prtui_core::Verdict::Approved
+            ]
+        );
+        assert_eq!(reviews[0].author, "Alice");
     }
 
     #[test]

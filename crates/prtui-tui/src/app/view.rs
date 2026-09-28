@@ -13,7 +13,7 @@ use crate::layout::Layout;
 use crate::overview::FoldState;
 use crate::renderer::Theme;
 use crate::vim::Cursor;
-use prtui_core::{ChangedFile, Comment, PullRequest, ReviewThread};
+use prtui_core::{ChangedFile, Comment, PullRequest, Review, ReviewThread};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -96,6 +96,10 @@ impl<'a> View<'a> {
     /// What the header names the diff by while it shows less than all of it.
     pub fn scope_label(self) -> Option<&'a str> {
         self.app.scope_label()
+    }
+
+    pub fn reviews(self) -> &'a [Review] {
+        &self.app.review.reviews
     }
 
     pub fn commit_span(self) -> Option<(usize, usize)> {

@@ -6,8 +6,8 @@
 use anyhow::{Context, Result};
 use prtui_core::{
     AddedThread, ChangedFile, Comment, Commit, CommitLog, DiffLine, Meta,
-    NewThread, Parent, PullRequest, ReviewEvent, ReviewThread, Side,
-    parse_patch,
+    NewThread, Parent, PullRequest, Review, ReviewEvent, ReviewThread, Side,
+    Verdict, parse_patch,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -177,6 +177,7 @@ struct WirePullRequest {
     pending_review: Nodes<WireReview>,
     review_threads: Nodes<WireThread>,
     discussion: Nodes<WireDiscussionComment>,
+    reviews: Nodes<WirePastReview>,
 }
 
 #[derive(Deserialize)]
@@ -251,6 +252,50 @@ pub struct WireDiscussionComment {
     author: Option<Author>,
     body: String,
     created_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WirePastReview {
+    id: String,
+    state: String,
+    author: Option<Author>,
+    body: String,
+    submitted_at: Option<String>,
+    comments: WireTotal,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireTotal {
+    total_count: u32,
+}
+
+/// Every reply to a thread files a bodiless `COMMENTED` review of its own, so
+/// those are dropped; the comments they carry already live in the diff.
+pub fn reviews(nodes: Vec<WirePastReview>) -> Vec<Review> {
+    nodes
+        .into_iter()
+        .filter_map(|review| {
+            let verdict = match review.state.as_str() {
+                "APPROVED" => Verdict::Approved,
+                "CHANGES_REQUESTED" => Verdict::ChangesRequested,
+                "COMMENTED" if !review.body.trim().is_empty() => {
+                    Verdict::Commented
+                }
+                _ => return None,
+            };
+
+            Some(Review {
+                id: review.id.into(),
+                author: Author::login(review.author),
+                verdict,
+                body: review.body,
+                submitted_at: review.submitted_at.unwrap_or_default(),
+                comments: review.comments.total_count,
+            })
+        })
+        .collect()
 }
 
 impl From<WireDiscussionComment> for Comment {
@@ -355,6 +400,7 @@ fn into_meta(response: Response) -> Result<Meta> {
             .map(Into::into)
             .collect(),
         discussion: pr.discussion.nodes.into_iter().map(Into::into).collect(),
+        reviews: reviews(pr.reviews.nodes),
     })
 }
 
@@ -628,6 +674,7 @@ mod tests {
             "pendingReview": { "nodes": [] },
             "reviewThreads": { "nodes": threads },
             "discussion": { "nodes": [] },
+            "reviews": { "nodes": [] },
         })
     }
 
@@ -831,6 +878,38 @@ index 6666666..0000000
         assert!(!thread.is_pending());
         assert_eq!(thread.reply_target().as_deref(), Some("1234"));
         assert_eq!(thread.comments[1].reply_target.as_deref(), Some("5678"));
+    }
+
+    #[test]
+    fn thread_replies_do_not_count_as_reviews() {
+        let review = |id: &str, state: &str, body: &str| {
+            json!({
+                "id": id, "state": state, "author": { "login": "alice" },
+                "body": body, "submittedAt": "2026-09-03T20:04:55Z",
+                "comments": { "totalCount": 1 },
+            })
+        };
+        let mut pr = pull_request(&json!([]));
+        pr["reviews"] = json!({ "nodes": [
+            review("PRR_1", "CHANGES_REQUESTED", ""),
+            review("PRR_2", "COMMENTED", ""),
+            review("PRR_3", "COMMENTED", "a few nits"),
+            review("PRR_4", "APPROVED", ""),
+        ] });
+
+        let parsed = meta(response(&pr)).unwrap();
+        let verdicts: Vec<_> =
+            parsed.reviews.iter().map(|review| review.verdict).collect();
+
+        assert_eq!(
+            verdicts,
+            [
+                Verdict::ChangesRequested,
+                Verdict::Commented,
+                Verdict::Approved
+            ]
+        );
+        assert_eq!(parsed.reviews[1].body, "a few nits");
     }
 
     #[test]

@@ -347,6 +347,7 @@ fn meta(
             .context("current user is required to identify draft authors")?
             .display()
     };
+    let reviews = wire::reviews(&discussions);
     let (mut threads, discussion): (Vec<ReviewThread>, Vec<Comment>) =
         wire::split_discussions(discussions, number, head.as_deref());
 
@@ -363,6 +364,7 @@ fn meta(
         pr: mr.into_pull_request(),
         threads,
         discussion,
+        reviews,
         // GitLab publishes drafts by merge request, without a review object.
         pending_review: has_drafts
             .then(|| Arc::from(number.to_string()) as Arc<str>),

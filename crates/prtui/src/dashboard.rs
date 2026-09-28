@@ -143,6 +143,7 @@ fn spawn_overview<P: Provider>(
         let overview = provider
             .fetch_overview(&target.repo, target.number)
             .await
+            .map(Box::new)
             .map_err(|err| err.to_string());
         let _ = tx.send(Message::Overview(target, overview));
     });

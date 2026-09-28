@@ -223,6 +223,7 @@ mod tests {
             },
             threads: Vec::new(),
             discussion: Vec::new(),
+            reviews: Vec::new(),
             pending_review: None,
             viewed: HashSet::new(),
         }

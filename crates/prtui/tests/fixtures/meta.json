@@ -95,21 +95,36 @@
                 "login": "steiza"
               },
               "state": "APPROVED",
-              "submittedAt": "2024-04-25T19:55:42Z"
+              "submittedAt": "2024-04-25T19:55:42Z",
+              "id": "PRR_1",
+              "body": "",
+              "comments": {
+                "totalCount": 0
+              }
             },
             {
               "author": {
                 "login": "williammartin"
               },
               "state": "COMMENTED",
-              "submittedAt": "2024-04-29T15:00:09Z"
+              "submittedAt": "2024-04-29T15:00:09Z",
+              "id": "PRR_2",
+              "body": "",
+              "comments": {
+                "totalCount": 0
+              }
             },
             {
               "author": {
                 "login": "williammartin"
               },
               "state": "APPROVED",
-              "submittedAt": "2024-04-29T16:07:45Z"
+              "submittedAt": "2024-04-29T16:07:45Z",
+              "id": "PRR_3",
+              "body": "",
+              "comments": {
+                "totalCount": 0
+              }
             }
           ]
         },
