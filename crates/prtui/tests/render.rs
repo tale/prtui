@@ -1497,16 +1497,16 @@ fn hiding_the_tree_forces_focus_to_the_diff() {
     assert!(app.view().is_files_visible);
     assert_eq!(app.view().pane, Pane::Files);
 
-    press(&mut app, "f");
+    act(&mut app, &Action::ToggleTree);
     assert!(!app.view().is_files_visible);
     assert_eq!(app.view().pane, Pane::Diff);
 
-    // Tab is also the recovery path: it reopens and focuses the tree.
-    act(&mut app, &Action::TogglePane);
+    // `h` is the recovery path: it reopens and focuses the tree.
+    press(&mut app, "h");
     assert!(app.view().is_files_visible);
     assert_eq!(app.view().pane, Pane::Files);
 
-    press(&mut app, "f");
+    act(&mut app, &Action::ToggleTree);
     assert!(!app.view().is_files_visible);
     assert_eq!(app.view().pane, Pane::Diff);
 }

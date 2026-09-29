@@ -1515,7 +1515,7 @@ fn draw_bottom_bar(
         }
         (Mode::Normal, _) if app.local_root().is_some() => &[
             ("j/k", "move"),
-            ("⇥", "pane"),
+            ("h/l", "pane"),
             ("[/]", "file"),
             ("/", "find"),
             ("E", "expand"),

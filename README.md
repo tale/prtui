@@ -209,9 +209,8 @@ motions as the rest of the app, and close with `esc`; `/` searches them here.
 and last line. A count works where you would expect: `10j`. Scrolling past
 either end of a file carries on into the next or previous one.
 
-**Files** — `]`/`[` step through files, `f` shows or hides the tree, `<Tab>`
-swaps the focused pane, `h`/`l` move between them, `<CR>` opens what the cursor
-is on. The pane holding the keys is the one wearing its title in the accent
+**Files** — `]`/`[` step through files, `h`/`l` move between the tree and the
+diff, `<CR>` opens what the cursor is on, and `:tree` shows or hides the tree. The pane holding the keys is the one wearing its title in the accent
 colour, and the only one drawing a cursor bar: the other keeps the open file in
 bold and nothing else. `x` marks the open file as read — the same mark GitHub
 shows as viewed — and opens the next file you have not read, stepping over the
