@@ -551,7 +551,7 @@ fn the_reference_lists_every_command_and_the_keys_bound_to_it() {
     // Reachable only by name, and listed anyway.
     assert_eq!(find("leave-card"), Some(""));
 
-    assert!(reference.contains(&Reference::Heading("hidden lines")));
+    assert!(reference.contains(&Reference::Heading("read")));
 }
 
 /// The one errand a key left behind, which is what the event loop would carry
