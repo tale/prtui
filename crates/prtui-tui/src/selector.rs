@@ -692,7 +692,7 @@ fn draw_table(
         cells.extend([
             Cell::from(format!("#{}", item.target.number))
                 .style(Style::default().fg(theme.warning)),
-            Cell::from(item.author.as_str())
+            Cell::from(format!("@{}", item.author))
                 .style(Style::default().fg(theme.accent)),
             Cell::from(item.title.as_str())
                 .style(Style::default().fg(theme.code)),

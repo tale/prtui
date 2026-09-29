@@ -1214,7 +1214,7 @@ fn multi_digit_thread_badge_keeps_diff_counts_visible() {
         .find(|line| line.contains("◆ 10"))
         .expect("the complete thread count should be visible");
     assert!(file_row.contains("+1"));
-    assert!(file_row.contains("-0"));
+    assert!(file_row.contains("−0"));
 }
 
 #[test]
@@ -1659,7 +1659,7 @@ fn the_overview_paints_the_description_over_the_panes() {
     let rendered = draw(&app);
     assert!(rendered.contains("OVERVIEW"), "{rendered}");
     assert!(rendered.contains("overview"), "{rendered}");
-    assert!(rendered.contains("@tale  main ← work"), "{rendered}");
+    assert!(rendered.contains("@tale  work → main"), "{rendered}");
     assert!(rendered.contains("Relates #8995"), "{rendered}");
     assert!(!rendered.contains("Held off on tests"), "{rendered}");
     assert!(rendered.contains("esc close"), "{rendered}");
@@ -3168,7 +3168,7 @@ fn renamed_files_show_both_paths_without_losing_diff_counts() {
         let rendered = terminal.backend().to_string();
         let header = rendered.lines().find(|line| line.contains('→')).unwrap();
         assert!(header.contains("+12"));
-        assert!(header.contains("-3"));
+        assert!(header.contains("−3"));
         if width == 120 {
             assert!(header.contains("src/before.rs → src/after.rs"));
         }

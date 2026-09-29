@@ -54,7 +54,7 @@ pub fn build(
             ),
             dim("  ", theme),
             Span::styled(
-                format!("{} ← {}", summary.base_ref, summary.head_ref),
+                format!("{} → {}", summary.head_ref, summary.base_ref),
                 Style::default().fg(theme.muted),
             ),
         ]),
@@ -231,7 +231,7 @@ fn threads(threads: &Threads, theme: Theme) -> Vec<Span<'static>> {
     let color = if threads.unresolved == 0 {
         theme.success
     } else {
-        theme.warning
+        theme.purple
     };
     // A truncated page counted a floor rather than the whole tally.
     let unresolved = if threads.is_truncated {

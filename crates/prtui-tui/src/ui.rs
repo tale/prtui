@@ -391,10 +391,10 @@ fn draw_diff(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
                 .tree_row(app.selected_file)
                 .map_or(0, |row| row.unresolved);
             let suffix = if comments == 0 {
-                format!("  +{} -{}", file.additions, file.deletions)
+                format!("  +{} −{}", file.additions, file.deletions)
             } else {
                 format!(
-                    "  ◆ {comments}  +{} -{}",
+                    "  ◆ {comments}  +{} −{}",
                     file.additions, file.deletions
                 )
             };

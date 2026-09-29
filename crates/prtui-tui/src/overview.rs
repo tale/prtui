@@ -168,14 +168,7 @@ fn comment_header(
 ) -> Line<'static> {
     let marker = if is_open { "▾ " } else { "▸ " };
     let date = comment.created_at.get(..10).unwrap_or(&comment.created_at);
-    let mut title = format!("@{}", comment.author);
-
-    if !date.is_empty() {
-        title.push_str(" · ");
-        title.push_str(date);
-    }
-
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             marker,
             Style::default()
@@ -183,12 +176,21 @@ fn comment_header(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            title,
+            format!("@{}", comment.author),
             Style::default()
                 .fg(theme.heading)
                 .add_modifier(Modifier::BOLD),
         ),
-    ])
+    ];
+
+    if !date.is_empty() {
+        spans.push(Span::styled(
+            format!(" · {date}"),
+            Style::default().fg(theme.dim),
+        ));
+    }
+
+    Line::from(spans)
 }
 
 fn review_header(

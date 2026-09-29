@@ -170,7 +170,7 @@ pub fn build(
 
     for (index, commit) in log.commits.iter().enumerate() {
         let date = commit.authored_at.get(..10).unwrap_or(&commit.authored_at);
-        let byline = format!("  {} · {date}", commit.author);
+        let byline = format!("  @{} · {date}", commit.author);
         let oid = format!("{} ", short(&commit.oid));
         let budget =
             width.saturating_sub(2 + text_width(&oid) + text_width(&byline));

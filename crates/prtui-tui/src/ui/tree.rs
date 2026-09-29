@@ -282,12 +282,12 @@ fn file_line<'a>(
     let counts = (width >= COUNTS_MIN_WIDTH).then(|| {
         (
             format!("+{}", file.additions),
-            format!("-{}", file.deletions),
+            format!("−{}", file.deletions),
         )
     });
     let counts_width = counts
         .as_ref()
-        .map_or(0, |(adds, dels)| adds.len() + dels.len() + 2);
+        .map_or(0, |(adds, dels)| text_width(adds) + text_width(dels) + 2);
     let indent = depth * tree::INDENT;
     let staging = local.map(|state| state.staging.marker());
     let staging_width = staging.map_or(0, |label| label.len() + 1);
