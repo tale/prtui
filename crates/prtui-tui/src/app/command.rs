@@ -233,7 +233,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "comment",
         group: "respond",
-        summary: "comment on the line, span, or thread",
+        summary: "comment, reply, or reopen a draft",
         build: |_| Action::StartComment,
     },
     Command {

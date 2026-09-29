@@ -2935,21 +2935,43 @@ fn e_reopens_the_draft_instead_of_stacking_another() {
     assert!(app.view().composer.is_none());
 }
 
-/// `c` composes, `e` revises. Commenting a drafted line again is a second
-/// comment, which GitHub allows and the old contextual `c` quietly prevented.
+/// `c` on a drafted line revises the draft; a selection is how a second one
+/// gets stacked on the same line.
 #[test]
-fn c_always_starts_a_new_comment() {
+fn c_on_a_drafted_line_reopens_the_draft() {
     let mut app = load();
     park_on_code(&mut app);
 
-    for body in ["one", "two"] {
-        press(&mut app, "c");
-        replace_prompt(&mut app, body);
-        act(&mut app, &Action::CommitComment);
-    }
+    press(&mut app, "c");
+    replace_prompt(&mut app, "one");
+    act(&mut app, &Action::CommitComment);
 
+    press(&mut app, "c");
+    assert_eq!(app.view().composer.unwrap().editor.text(), "one");
+    replace_prompt(&mut app, "revised");
+    act(&mut app, &Action::CommitComment);
+    settle(&mut app);
+    assert_eq!(app.view().drafts.len(), 1);
+    assert_eq!(app.view().drafts[0].body, "revised");
+
+    press(&mut app, "V");
+    press(&mut app, "c");
+    replace_prompt(&mut app, "two");
+    act(&mut app, &Action::CommitComment);
     assert_eq!(app.view().drafts.len(), 2);
-    assert_eq!(app.view().drafts[1].body, "two");
+}
+
+#[test]
+fn c_from_the_tree_writes_a_file_note() {
+    let mut app = load();
+    focus_pane(&mut app, Pane::Files);
+
+    press(&mut app, "c");
+    replace_prompt(&mut app, "whole file");
+    act(&mut app, &Action::CommitComment);
+
+    assert_eq!(app.view().drafts.len(), 1);
+    assert!(app.view().drafts[0].is_file_level());
 }
 
 #[test]

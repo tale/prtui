@@ -1613,7 +1613,7 @@ fn draw_bottom_bar(
                     "expand"
                 },
             ),
-            ("e", "edit"),
+            ("c", "edit"),
             ("d", "discard"),
             ("esc", "code"),
         ],

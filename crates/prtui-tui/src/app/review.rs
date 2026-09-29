@@ -143,17 +143,26 @@ impl Failure {
 }
 
 impl App {
-    /// A focused thread, or an open one under the cursor line, takes a reply;
-    /// anything else starts a fresh draft over the cursor line or the visual
-    /// selection. A focused draft of the reader's own is not one of those: `c`
-    /// composes and `e` revises, so a drafted line still takes a second comment.
+    /// Writes whatever the cursor asks for: a note on the file from the tree, a
+    /// reply to a focused or open thread, the reader's own draft reopened, or
+    /// else a fresh draft over the cursor line or the visual selection. A
+    /// second draft on a drafted line takes a selection.
     pub(super) fn start_comment(&mut self, layout: &Layout) {
-        if self.navigation.pane != Pane::Diff {
+        if self.navigation.pane == Pane::Files {
+            self.start_file_comment(layout);
             return;
         }
 
         if let Some(id) = self.thread_to_answer(layout) {
             self.start_reply(&id, layout);
+            return;
+        }
+
+        if self.navigation.selection.is_none()
+            && let Some(index) = self.editable_draft()
+        {
+            let id = self.review.drafts[index].id;
+            self.reopen_draft(id, layout);
             return;
         }
 
@@ -339,7 +348,7 @@ impl App {
             .position(|draft| draft.covers(path, self.navigation.cursor))
     }
 
-    /// The draft `e` and `d` act on: the focused one when a card holds the
+    /// The draft `c` and `d` act on: the focused one when a card holds the
     /// focus, which is the only way to reach a file note, and otherwise the one
     /// covering the cursor line.
     fn editable_draft(&self) -> Option<usize> {

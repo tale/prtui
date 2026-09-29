@@ -6,6 +6,10 @@ use termina::event::KeyEvent;
 
 const MAX_COUNT: usize = 999_999;
 
+/// Commands still bound but left out of the reference, since another key
+/// already reaches what they do from where the cursor is.
+const UNLISTED: &[&str] = &["edit-draft", "file-comment"];
+
 /// The built-in keymap.
 ///
 /// A row is the modes it is live in, the chord that fires it, and the command
@@ -233,6 +237,9 @@ impl Keymap {
 
         for command in command::COMMANDS {
             if self.is_local && !(command.build)(Count::default()).is_local() {
+                continue;
+            }
+            if UNLISTED.contains(&command.name) {
                 continue;
             }
 
