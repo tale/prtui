@@ -197,8 +197,8 @@ rest of the app: `j`/`k`, `<C-d>`/`<C-u>`, `gg`/`G`, and a count like `12G`.
 the narrowing, `esc` puts back the list and the row you opened it on. `K` opens
 an overview of the pull request under the cursor: its review and check summary,
 description, and one collapsed row per discussion comment. Move onto a fold
-and use `<CR>` or `za` to open it. `<CR>` anywhere else opens the review, and
-`gx` opens the pull request in a browser.
+and use `<CR>` to open it. `<CR>` anywhere else opens the review, and `gx`
+opens the pull request in a browser.
 
 **The pull request** — `K` opens the same overview over the panes, using the
 description and discussion already kept current by the review. `?` opens the
@@ -226,10 +226,9 @@ middle never hides what is above the cursor.
 **Reading** — `/` searches whatever you are reading: an open panel, the tree,
 or the file, and starts clean each time. `n`/`N` walk the hits and `:noh`
 clears them. Inside `/` or `:` the arrows step what is under it and
-`<C-p>`/`<C-n>` recall what you typed there before. `za` reveals the
-hidden lines under the cursor, `zj`/`zk` reveal downward or upward, and `zR`
-opens every gap in the file — the surrounding code is fetched from the host on
-demand.
+`<C-p>`/`<C-n>` recall what you typed there before. `<CR>` on a run of hidden
+lines reveals 20 more from each end, or all of a short run, and `E` opens every
+gap in the file — the surrounding code is fetched from the host on demand.
 
 **Prompts** — every prompt edits with **readline**, the same chords bash and
 zsh answer to. `/`, `:`, a comment, and the submit form are all lines of text in

@@ -171,6 +171,24 @@ pub fn gaps(file: &ChangedFile) -> Vec<Gap> {
     gaps
 }
 
+/// One press on a gap, the way github.com's arrows open it.
+///
+/// A gap with a hunk on each side grows from both, and one the two would meet
+/// across opens whole. The upward half goes first, since it splices below the
+/// header the downward half splices above.
+pub fn step(gap: &Gap, lines: u32) -> Vec<Reveal> {
+    match gap.place {
+        Place::Leading => vec![Reveal::Up(lines)],
+        Place::Trailing => vec![Reveal::Down(lines)],
+        Place::Between
+            if gap.len.is_some_and(|len| len <= lines.saturating_mul(2)) =>
+        {
+            vec![Reveal::All]
+        }
+        Place::Between => vec![Reveal::Up(lines), Reveal::Down(lines)],
+    }
+}
+
 /// Splices part of `gap` into the patch out of `content`, the file at head
 /// split into lines. Answers with nothing when the gap does not open that way,
 /// or holds no more lines to give.
@@ -418,6 +436,24 @@ mod tests {
         empty.lines.clear();
 
         assert!(gaps(&empty).is_empty());
+    }
+
+    #[test]
+    fn a_step_grows_a_gap_from_both_hunks_until_they_meet() {
+        let [leading, between, trailing] = gaps(&file())[..] else {
+            panic!("expected three gaps");
+        };
+
+        assert_eq!(step(&leading, 5), [Reveal::Up(5)]);
+        assert_eq!(step(&trailing, 5), [Reveal::Down(5)]);
+        assert_eq!(step(&between, 5), [Reveal::Up(5), Reveal::Down(5)]);
+        assert_eq!(step(&between, 9), [Reveal::All]);
+
+        let mut file = file();
+        for how in step(&between, 5) {
+            reveal(&mut file, &between, how, &head()).unwrap();
+        }
+        assert_eq!(gaps(&file)[1].len, Some(7));
     }
 
     #[test]

@@ -32,6 +32,7 @@ impl App {
         }
 
         let Some(card) = self.navigation.focused_card.as_ref() else {
+            self.expand_step();
             return;
         };
         self.navigation.thread_scroll = 0;

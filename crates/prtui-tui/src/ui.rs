@@ -1518,7 +1518,7 @@ fn draw_bottom_bar(
             ("⇥", "pane"),
             ("[/]", "file"),
             ("/", "find"),
-            ("zR", "expand"),
+            ("E", "expand"),
             ("q", exit_label),
         ],
         (Mode::Filter, _) => {
@@ -1534,7 +1534,7 @@ fn draw_bottom_bar(
         }
         (Mode::Overview, _) if is_on_overview_fold => &[
             ("j/k", "move"),
-            ("↵/za", "toggle"),
+            ("↵", "toggle"),
             ("gx", "browser"),
             ("/", "find"),
             ("esc", "close"),
@@ -1634,6 +1634,13 @@ fn draw_bottom_bar(
         (Mode::Normal, Pane::Diff) if app.search.is_some() => {
             &[("n/N", "step"), ("}", "next thread"), ("esc", "clear")]
         }
+        (Mode::Normal, Pane::Diff) if app.is_on_gap() => &[
+            ("j/k", "move"),
+            ("↵", "expand"),
+            ("E", "whole file"),
+            ("/", "find"),
+            ("q", exit_label),
+        ],
         (Mode::Normal, Pane::Diff) if !app.drafts.is_empty() => &[
             ("j/k", "move"),
             ("c", "comment"),
