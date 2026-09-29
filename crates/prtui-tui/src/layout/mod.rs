@@ -310,7 +310,7 @@ fn build_overview(app: AppView<'_>, width: u16) -> overview::Rows {
                     Style::default().fg(app.theme().accent),
                 ),
                 Span::styled(
-                    "  loading the overview",
+                    "  loading overview",
                     Style::default().fg(app.theme().dim),
                 ),
             ])],

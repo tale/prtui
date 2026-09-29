@@ -161,7 +161,7 @@ pub fn build(
     rows.lines.push(Line::default());
     rows.entries.push(None);
     rows.lines.push(Line::styled(
-        format!("commits ({})", log.commits.len()),
+        format!("commits · {}", log.commits.len()),
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),

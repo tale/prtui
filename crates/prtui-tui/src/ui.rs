@@ -385,7 +385,7 @@ fn draw_diff(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
     let is_focused = app.pane == Pane::Diff;
     let area = layout.diff;
     let title = app.current_file().map_or_else(
-        || " Diff ".to_string(),
+        || " diff ".to_string(),
         |file| {
             let comments = app
                 .tree_row(app.selected_file)
@@ -431,7 +431,7 @@ fn draw_diff(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
         draw_centered(
             frame,
             area,
-            "Staged and unstaged changes cancel out against HEAD",
+            "staged and unstaged changes cancel out against HEAD",
             theme.muted,
         );
         return;
@@ -793,7 +793,7 @@ fn draft_line(
     let prefix = if is_expanded {
         format!("{marker} ▾ ")
     } else {
-        format!("{marker} ")
+        format!("{marker} ▸ ")
     };
 
     let fixed = text_width(&prefix)
@@ -863,7 +863,7 @@ fn summary_line(
     let prefix = if is_expanded {
         format!("{} ▾ ", state.marker())
     } else {
-        format!("{} ", state.marker())
+        format!("{} ▸ ", state.marker())
     };
     let author = if is_expanded {
         String::new()
@@ -1454,7 +1454,7 @@ fn draw_bottom_bar(
     // so an open command line covers the query rather than sitting beside it.
     let prompt = app.command_line.map_or_else(
         || app.search.map(|editor| ('/', editor, theme.warning)),
-        |editor| Some((':', editor, theme.accent)),
+        |editor| Some((':', editor, theme.muted)),
     );
 
     let mut prompt_column = None;

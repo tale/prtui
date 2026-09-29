@@ -498,11 +498,7 @@ fn panel_rows(
             theme,
         ),
         PanelState::Loading => overview::Rows {
-            lines: vec![spinner_line(
-                loading_frame,
-                "loading the overview",
-                theme,
-            )],
+            lines: vec![spinner_line(loading_frame, "loading overview", theme)],
             folds: vec![None],
         },
         PanelState::Failed(failure) => overview::Rows {
@@ -580,9 +576,9 @@ pub fn draw(frame: &mut Frame, selector: &Selector, theme: Theme) {
 
     let title = match selector.listing.rows() {
         Some(pull_requests) => {
-            format!(" Open pull requests · {} ", pull_requests.len())
+            format!(" open pull requests · {} ", pull_requests.len())
         }
-        None => " Open pull requests ".to_string(),
+        None => " open pull requests ".to_string(),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -826,7 +822,11 @@ fn draw_status(
     if !selector.status.is_empty() {
         spans.push(Span::styled(
             format!("   {}", selector.status),
-            bar.fg(theme.dim),
+            bar.fg(if selector.status.starts_with("error:") {
+                theme.danger
+            } else {
+                theme.dim
+            }),
         ));
     }
 
@@ -1097,7 +1097,7 @@ mod tests {
         );
         let rendered = render(pull_requests);
 
-        assert!(rendered.contains("Open pull requests · 5"));
+        assert!(rendered.contains("open pull requests · 5"));
         assert!(rendered.contains("STATUS"));
         assert_eq!(rendered.matches("NEEDS REVIEW").count(), 2);
         assert!(rendered.contains("REPOSITORY"));
@@ -1136,8 +1136,8 @@ mod tests {
     fn the_dashboard_spins_until_the_listing_lands() {
         let rendered = render_selector(&Selector::new());
 
-        assert!(rendered.contains("Open pull requests"));
-        assert!(!rendered.contains("Open pull requests ·"));
+        assert!(rendered.contains("open pull requests"));
+        assert!(!rendered.contains("open pull requests ·"));
         assert!(rendered.contains("loading pull requests"));
         assert!(rendered.contains(SPINNER[0]));
     }
@@ -1295,7 +1295,7 @@ mod tests {
 
         assert_eq!(asked.number, 5);
         assert_eq!(selector.mode, Mode::Overview);
-        assert!(render_selector(&selector).contains("loading the overview"));
+        assert!(render_selector(&selector).contains("loading overview"));
 
         press(&mut selector, "K");
         assert!(selector.panel.is_none());

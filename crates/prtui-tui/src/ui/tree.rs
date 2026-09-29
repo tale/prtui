@@ -33,9 +33,9 @@ pub(super) fn draw(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
     // Every file being under one directory is the common case for a review, so
     // the tree names it once here rather than in every row.
     let title = match (app.files.len(), layout.files.root()) {
-        (0, _) => " Files ".to_string(),
-        (count, None) => format!(" Files · {count} "),
-        (count, Some(root)) => format!(" Files · {count} · {root} "),
+        (0, _) => " files ".to_string(),
+        (count, None) => format!(" files · {count} "),
+        (count, Some(root)) => format!(" files · {count} · {root} "),
     };
 
     frame.render_widget(
@@ -64,7 +64,7 @@ pub(super) fn draw(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(" /", Style::default().fg(theme.accent)),
+                Span::styled(" /", Style::default().fg(theme.purple)),
                 Span::styled(
                     measure::window(query, first_column, budget),
                     Style::default().fg(theme.heading),
@@ -202,16 +202,17 @@ fn directory_line(
         Style::default()
     };
 
-    // An open directory has its contents below it to say so. A folded one has
-    // to say it in the row, and how much it is keeping out of sight.
-    let fold = if row.is_collapsed {
-        format!(" ▸ {}", row.files)
+    // The fold glyph takes the icon column, the way the overview's folds lead
+    // their rows. A folded one also says how much it is keeping out of sight.
+    let (fold, hidden) = if row.is_collapsed {
+        ("▸ ", format!(" {}", row.files))
     } else {
-        String::new()
+        ("▾ ", String::new())
     };
     let indent = row.depth * tree::INDENT;
-    let budget =
-        width.saturating_sub(indent + text_width(&fold) + MARKER_WIDTH);
+    let budget = width.saturating_sub(
+        indent + MARKER_WIDTH + ICON_WIDTH + text_width(&hidden),
+    );
 
     // Folding a directory must not fold away the reason to open it, so a shut
     // one carries the mark its files would have carried. An open one leaves the
@@ -229,13 +230,14 @@ fn directory_line(
         base.fg(theme.muted).add_modifier(Modifier::BOLD),
         base.bg(theme.search),
     );
-    let mut spans = Vec::with_capacity(name.len() + 3);
+    let mut spans = Vec::with_capacity(name.len() + 4);
     spans.extend([
         Span::styled(format!("{marker} "), base.fg(marker_color)),
         Span::styled(" ".repeat(indent), base),
+        Span::styled(fold, base.fg(theme.dim)),
     ]);
     spans.extend(name);
-    spans.push(Span::styled(fold, base.fg(theme.dim)));
+    spans.push(Span::styled(hidden, base.fg(theme.dim)));
 
     Line::from(spans)
 }

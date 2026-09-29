@@ -999,7 +999,7 @@ fn multiple_threads_on_one_line_render_as_one_group() {
     for index in 1..=4 {
         assert!(
             rendered.contains(&format!(
-                "◆ @williammartin  Discussion number {index}"
+                "◆ ▸ @williammartin  Discussion number {index}"
             )),
             "thread {index} should have its own card"
         );
@@ -1038,7 +1038,7 @@ fn resolved_threads_render_as_compact_rows() {
         .unwrap();
     let rendered = terminal.backend().to_string();
 
-    assert!(rendered.contains("◇ @williammartin"));
+    assert!(rendered.contains("◇ ▸ @williammartin"));
     assert!(rendered.contains("Could I interest you in the following tests:"));
     assert!(rendered.contains("resolved"));
 }
@@ -1116,7 +1116,7 @@ fn outdated_threads_render_compactly_after_the_diff() {
         .unwrap();
     let rendered = terminal.backend().to_string();
 
-    assert!(rendered.contains("◇ @williammartin"));
+    assert!(rendered.contains("◇ ▸ @williammartin"));
     assert!(rendered.contains("Discussion from an earlier diff."));
     assert!(rendered.contains("outdated"));
 }
@@ -2135,7 +2135,7 @@ fn the_shared_directory_names_the_pane_rather_than_a_row() {
     let rendered = draw(&app);
 
     assert!(
-        rendered.contains("Files · 4 · pkg/"),
+        rendered.contains("files · 4 · pkg/"),
         "the pane is titled with what every file shares:\n{rendered}"
     );
     assert_eq!(
@@ -2175,7 +2175,7 @@ fn a_folded_directory_hides_its_files_and_says_how_many() {
         "the files are folded away:\n{rendered}"
     );
     assert!(
-        rendered.contains("▸ 2"),
+        rendered.contains("▸ cmd/attestation/verify/ 2"),
         "and the heading says how many:\n{rendered}"
     );
 
@@ -3114,7 +3114,7 @@ fn local_tree_shows_staging_and_explains_cancelled_changes() {
         .map(ratatui::buffer::Cell::symbol)
         .collect();
     assert!(
-        screen.contains("Staged and unstaged changes cancel out against HEAD")
+        screen.contains("staged and unstaged changes cancel out against HEAD")
     );
     for (index, label) in
         ["staged + unstaged", "staged", "unstaged", "untracked"]
