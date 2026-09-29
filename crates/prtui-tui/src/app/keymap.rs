@@ -95,8 +95,8 @@ const DEFAULT: &[(&str, &str, &str)] = &[
     ("s", "<Esc>", "cancel-search"),
     ("c", "<Esc>", "cancel-command-line"),
     ("r", "<Esc>", "cancel-submit"),
-    ("nvifscrhol", "<C-c>", "quit"),
     ("nv", "q", "quit"),
+    ("nvifscrhol", "<C-c>", "quit"),
     ("hol", "j", "move-down"),
     ("hol", "k", "move-up"),
     ("hol", "<Down>", "move-down"),
@@ -125,7 +125,7 @@ const DEFAULT: &[(&str, &str, &str)] = &[
 pub enum Reference {
     Heading(&'static str),
     Entry {
-        /// The chords bound to the command, or empty when only `:` reaches it.
+        /// The chord normal mode binds the command to.
         keys: String,
         name: &'static str,
         summary: &'static str,
@@ -221,12 +221,12 @@ impl Keymap {
         keymap
     }
 
-    /// The key reference: the command table, annotated with the chords bound
-    /// to each command.
+    /// The key reference: each command normal mode binds, under the first
+    /// chord that binds it.
     ///
     /// Reading it off the bindings rather than off a second list is what stops
-    /// the two disagreeing. A command with no chord still appears, since `:` is
-    /// how it is reached.
+    /// the two disagreeing. Prompt and panel keys are left to their own status
+    /// bar, and the rest is still reachable by name from `:`.
     pub fn reference(&self) -> Vec<Reference> {
         let mut lines = Vec::new();
         let mut group = "";
@@ -236,27 +236,20 @@ impl Keymap {
                 continue;
             }
 
+            let Some(binding) = self
+                .live(Mode::Normal)
+                .find(|binding| binding.command.name == command.name)
+            else {
+                continue;
+            };
+
             if command.group != group {
                 group = command.group;
                 lines.push(Reference::Heading(group));
             }
 
-            // One command answers to the same chord in several modes, and
-            // reading `j` three times says nothing the first one did not.
-            let mut keys: Vec<String> = Vec::new();
-            for binding in self
-                .bindings
-                .iter()
-                .filter(|binding| binding.command.name == command.name)
-            {
-                let chord = keys::render(&binding.chord);
-                if !keys.contains(&chord) {
-                    keys.push(chord);
-                }
-            }
-
             lines.push(Reference::Entry {
-                keys: keys.join("  "),
+                keys: keys::render(&binding.chord),
                 name: command.name,
                 summary: command.summary,
             });

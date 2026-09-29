@@ -519,10 +519,10 @@ fn the_command_line_remembers_what_was_run() {
     assert_eq!(app.view().command_line.unwrap().text(), "");
 }
 
-/// The reference is a view of the command table, so a command that no key
-/// carries still has to be listed under the name `:` reaches it by.
+/// The reference lists what normal mode binds, once each, and leaves prompt
+/// keys and name-only commands to their status bar and `:`.
 #[test]
-fn the_reference_lists_every_command_and_the_keys_bound_to_it() {
+fn the_reference_lists_each_normal_mode_command_under_one_chord() {
     use prtui_tui::app::keymap::Reference;
 
     let app = load();
@@ -543,15 +543,16 @@ fn the_reference_lists_every_command_and_the_keys_bound_to_it() {
             .map(|(_, keys)| *keys)
     };
 
-    // The same command reached from more than one mode lists each chord once.
-    assert_eq!(find("move-down"), Some("j  <Down>"));
-    assert_eq!(find("history-prev"), Some("<Up>  <C-p>"));
+    assert_eq!(find("move-down"), Some("j"));
+    assert_eq!(find("quit"), Some("q"));
     assert_eq!(find("expand-file"), Some("zR"));
     assert_eq!(find("help"), Some("?"));
-    // Reachable only by name, and listed anyway.
-    assert_eq!(find("leave-card"), Some(""));
+    assert_eq!(find("history-prev"), None);
+    assert_eq!(find("commit-comment"), None);
+    assert_eq!(find("leave-card"), None);
 
-    assert!(reference.contains(&Reference::Heading("read")));
+    assert!(reference.contains(&Reference::Heading("respond")));
+    assert!(!reference.contains(&Reference::Heading("prompt")));
 }
 
 /// The one errand a key left behind, which is what the event loop would carry
