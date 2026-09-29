@@ -186,6 +186,11 @@ pub(crate) fn cursor_line(
         line.spans.push(Span::raw(" ".repeat(pad)));
     }
 
+    // A selected row keeps its selection under the cursor, as the diff does.
+    if line.style.bg.is_some() {
+        return line;
+    }
+
     line.style(Style::default().bg(theme.cursor))
 }
 
@@ -525,10 +530,10 @@ fn code_line<'a>(
 
     if line.kind == LineKind::Hunk {
         let text = format!("{:<width$}", line.text, width = width);
-        let bg = if is_selected {
-            theme.selection
-        } else {
-            theme.hunk
+        let bg = match (is_selected, is_cursor) {
+            (true, _) => theme.selection,
+            (false, true) => theme.cursor,
+            _ => theme.hunk,
         };
 
         return Line::from(Span::styled(

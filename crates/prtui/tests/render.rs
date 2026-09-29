@@ -3191,3 +3191,68 @@ fn the_commit_panel_lists_picks_and_the_header_names_a_scoped_diff() {
     let header = draw(&app).lines().next().unwrap_or_default().to_owned();
     assert!(header.contains(" bbbbbbb "), "{header}");
 }
+
+fn row_background(app: &App, x: u16, y: u16) -> Option<ratatui::style::Color> {
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| paint(frame, app)).unwrap();
+
+    terminal.backend().buffer().cell((x, y)).unwrap().style().bg
+}
+
+#[test]
+fn the_cursor_shows_on_a_hunk_header() {
+    use prtui_tui::renderer::Theme;
+
+    let mut app = load();
+    focus_pane(&mut app, Pane::Diff);
+    assert_eq!(
+        app.view().files[app.view().selected_file].lines[0].kind,
+        LineKind::Hunk
+    );
+
+    let layout = layout_of(&app);
+    let row = layout.diff.y + layout.rows.code_row(0) as u16;
+
+    assert_eq!(
+        row_background(&app, layout.diff.x, row),
+        Some(Theme::dark().cursor)
+    );
+}
+
+#[test]
+fn a_selected_commit_keeps_its_highlight_under_the_cursor() {
+    use prtui_tui::renderer::Theme;
+
+    let mut app = load();
+    press(&mut app, "L");
+    let Some(Effect::FetchCommits { generation }) = app.take_effects().pop()
+    else {
+        panic!("opening the panel fetches the commits");
+    };
+    let commit = |oid: &str, parent: &str| prtui_core::Commit {
+        oid: oid.into(),
+        parent: Some(parent.into()),
+        title: format!("commit {oid}"),
+        author: "tale".into(),
+        authored_at: "2026-09-24T10:00:00Z".into(),
+    };
+    app.receive(AppMessage::Commits {
+        generation,
+        outcome: Ok(Box::new(prtui_core::CommitLog {
+            commits: vec![
+                commit("aaaaaaa1", "base0000"),
+                commit("bbbbbbb2", "aaaaaaa1"),
+            ],
+            last_reviewed: Some("aaaaaaa1".into()),
+        })),
+    });
+
+    // All changes, since review, a blank, the heading, then the commits.
+    press(&mut app, "4jvj");
+    let inner = layout_of(&app).overlay.expect("the panel is open").inner;
+
+    assert_eq!(
+        row_background(&app, inner.x, inner.y + 5),
+        Some(Theme::dark().selection)
+    );
+}
