@@ -206,7 +206,8 @@ key reference. Both panels have a highlighted row cursor, take the same
 motions as the rest of the app, and close with `esc`; `/` searches them here.
 
 **Motion** — `j`/`k` a row, `<C-d>`/`<C-u>` half a screen, `gg`/`G` the first
-and last line. A count works where you would expect: `10j`.
+and last line. A count works where you would expect: `10j`. Scrolling past
+either end of a file carries on into the next or previous one.
 
 **Files** — `]`/`[` step through files, `f` shows or hides the tree, `<Tab>`
 swaps the focused pane, `h`/`l` move between them, `<CR>` opens what the cursor

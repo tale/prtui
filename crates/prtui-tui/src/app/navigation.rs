@@ -250,13 +250,29 @@ impl App {
             };
         } else {
             match motion {
-                Motion::Down(n) => self.move_diff_stops(1, n, layout),
-                Motion::Up(n) => self.move_diff_stops(-1, n, layout),
+                Motion::Down(n) => {
+                    if !self.move_diff_stops(1, n, layout) {
+                        self.roll_file(1, layout);
+                        return;
+                    }
+                }
+                Motion::Up(n) => {
+                    if !self.move_diff_stops(-1, n, layout) {
+                        self.roll_file(-1, layout);
+                        return;
+                    }
+                }
                 Motion::HalfPageDown => {
-                    self.move_diff_stops(1, viewport / 2, layout);
+                    if !self.move_diff_stops(1, viewport / 2, layout) {
+                        self.roll_file(1, layout);
+                        return;
+                    }
                 }
                 Motion::HalfPageUp => {
-                    self.move_diff_stops(-1, viewport / 2, layout);
+                    if !self.move_diff_stops(-1, viewport / 2, layout) {
+                        self.roll_file(-1, layout);
+                        return;
+                    }
                 }
                 Motion::Top => {
                     self.navigation.cursor = 0;
@@ -368,19 +384,56 @@ impl App {
         }
     }
 
+    /// Whether the cursor moved at all.
     fn move_diff_stops(
         &mut self,
         direction: isize,
         count: usize,
         layout: &Layout,
-    ) {
+    ) -> bool {
         let max_steps = layout.rows.len();
+        let mut has_moved = false;
 
         for _ in 0..count.min(max_steps) {
             if !self.move_diff_stop(direction, layout) {
                 break;
             }
+            has_moved = true;
         }
+
+        has_moved
+    }
+
+    /// Scrolling off either end of the file carries on into its neighbour in
+    /// the tree: the top of the next one, or the foot of the previous one.
+    /// Unlike `]`, the ends of the tree are walls rather than a ring.
+    fn roll_file(&mut self, direction: isize, layout: &Layout) {
+        let files: Vec<usize> = layout.files.files().collect();
+        let Some(position) = files
+            .iter()
+            .position(|&index| index == self.navigation.selected_file)
+        else {
+            return;
+        };
+        let Some(&target) = position
+            .checked_add_signed(direction)
+            .and_then(|target| files.get(target))
+        else {
+            return;
+        };
+
+        self.select_file(target);
+        self.runtime.status.clear();
+
+        if direction > 0 {
+            return;
+        }
+
+        let rows = layout.rebuild_rows(self.view());
+        self.navigation.cursor = self.diff_len().saturating_sub(1);
+        let last = rows.stops_at(self.navigation.cursor).last();
+        self.set_focus(last.map(|stop| stop.card.clone()));
+        self.keep_in_view(&rows, layout.diff_viewport());
     }
 
     fn move_diff_stop(&mut self, direction: isize, layout: &Layout) -> bool {
