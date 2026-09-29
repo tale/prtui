@@ -729,11 +729,6 @@ fn draw_panel(
 
     let outer = panel_area(area);
     let rows = panel_rows(panel, metrics.width, theme, selector.loading_frame);
-    let actions = if rows.fold_at(panel.cursor.index).is_some() {
-        " ↵/za toggle · gx browser · esc close "
-    } else {
-        " ↵ review · gx browser · esc close "
-    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -748,11 +743,7 @@ fn draw_panel(
             Style::default()
                 .fg(theme.heading)
                 .add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(
-            Line::styled(actions, Style::default().fg(theme.dim))
-                .right_aligned(),
-        );
+        ));
     // A row of padding inside each border, so the panel reads as a panel
     // rather than as a second pane.
     let inner = panel_inner(outer);

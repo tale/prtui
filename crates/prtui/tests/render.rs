@@ -1722,6 +1722,29 @@ fn the_bar_offers_a_way_out_and_a_way_in() {
     assert!(returning.contains("q back"), "{returning}");
 }
 
+#[test]
+fn a_pending_draft_keeps_the_way_around_the_diff_in_the_bar() {
+    let mut app = load();
+    write_draft(&mut app, "nit");
+    act(&mut app, &Action::LeaveThread);
+    assert!(app.view().focused_card.is_none());
+
+    let bar = draw(&app).lines().last().unwrap_or_default().to_owned();
+
+    assert!(bar.contains("j/k move"), "{bar}");
+    assert!(bar.contains("s submit"), "{bar}");
+}
+
+#[test]
+fn a_panel_names_its_keys_once() {
+    let mut app = load();
+    press(&mut app, "?");
+
+    let rendered = draw(&app);
+
+    assert_eq!(rendered.matches("esc close").count(), 1, "{rendered}");
+}
+
 /// A panel that vanishes when you press `/` cannot be searched, whatever the
 /// match count says.
 #[test]

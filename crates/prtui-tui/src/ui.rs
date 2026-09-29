@@ -82,26 +82,8 @@ fn draw_overlay(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
         return;
     };
     let theme = app.theme();
-    let is_on_fold = matches!(
-        &overlay.content,
-        Content::Overview(rows) if rows.fold_at(app.overlay.index).is_some()
-    );
-    let actions = match (app.mode, is_on_fold) {
-        (Mode::Overview, true) => {
-            " j/k move · ↵/za toggle · gx browser · / find · esc close "
-        }
-        (Mode::Overview, false) => {
-            " j/k move · gx browser · / find · esc close "
-        }
-        (Mode::Commits, _) => " j/k move · v range · ↵ show · esc close ",
-        _ => " j/k move · / find · esc close ",
-    };
 
-    let block = docked_block(overlay.title.to_owned(), theme.accent)
-        .title_bottom(
-            Line::styled(actions, Style::default().fg(theme.dim))
-                .right_aligned(),
-        );
+    let block = docked_block(overlay.title.to_owned(), theme.accent);
     frame.render_widget(Clear, overlay.area);
     frame.render_widget(block, overlay.area);
 
@@ -1528,12 +1510,16 @@ fn draw_bottom_bar(
 
     let exit_label = exit_hint.label();
     let keys: &[(&str, &str)] = match (app.mode, app.pane) {
-        (Mode::Normal | Mode::Visual, _) if app.local_root().is_some() => &[
+        (Mode::Visual, _) if app.local_root().is_some() => {
+            &[("j/k", "extend"), ("esc", "cancel")]
+        }
+        (Mode::Normal, _) if app.local_root().is_some() => &[
             ("j/k", "move"),
             ("⇥", "pane"),
             ("[/]", "file"),
             ("/", "find"),
             ("zR", "expand"),
+            ("q", exit_label),
         ],
         (Mode::Filter, _) => {
             &[("↑↓", "move"), ("↵", "apply"), ("esc", "cancel")]
@@ -1649,11 +1635,13 @@ fn draw_bottom_bar(
             &[("n/N", "step"), ("}", "next thread"), ("esc", "clear")]
         }
         (Mode::Normal, Pane::Diff) if !app.drafts.is_empty() => &[
+            ("j/k", "move"),
             ("c", "comment"),
-            ("C", "file note"),
-            ("e", "edit"),
-            ("d", "discard"),
             ("s", "submit"),
+            ("/", "find"),
+            ("}", "next thread"),
+            ("L", "commits"),
+            ("q", exit_label),
         ],
         (Mode::Normal, Pane::Diff) => &[
             ("j/k", "move"),
