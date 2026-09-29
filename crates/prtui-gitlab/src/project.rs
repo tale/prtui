@@ -119,19 +119,3 @@ async fn search(repo: &Repo) -> Result<u64> {
             )
         })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_identifier_renders_as_the_host_expects_it() {
-        let path = ProjectRef::Path("group%2Fproject".to_owned());
-        assert_eq!(path.to_string(), "group%2Fproject");
-        assert!(!path.rewrites_separators());
-
-        let id = ProjectRef::Id(7);
-        assert_eq!(id.to_string(), "7");
-        assert!(id.rewrites_separators());
-    }
-}

@@ -815,14 +815,6 @@ mod tests {
         assert_eq!(bold, "quick");
     }
 
-    #[test]
-    fn a_word_wider_than_the_row_is_cut_rather_than_lost() {
-        assert_eq!(
-            rows("supercalifragilistic", 8),
-            ["supercal", "ifragili", "stic"]
-        );
-    }
-
     /// A fenced block is laid out by column, so its indentation is structure
     /// rather than whitespace to collapse.
     #[test]

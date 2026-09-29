@@ -87,6 +87,6 @@ mod tests {
     #[test]
     fn an_unrepresentable_line_is_refused() {
         let huge = "9".repeat(40);
-        assert!(run(&huge).is_err());
+        assert_eq!(run(&huge), Err(format!("line out of range: {huge}")));
     }
 }

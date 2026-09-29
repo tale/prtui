@@ -80,10 +80,6 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    pub const fn at(index: usize) -> Self {
-        Self { index, scroll: 0 }
-    }
-
     pub fn apply(&mut self, motion: Motion, len: usize, viewport: usize) {
         self.jump(step(motion, self.index, len, viewport), len, viewport);
     }

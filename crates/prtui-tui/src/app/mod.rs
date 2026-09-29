@@ -544,25 +544,6 @@ impl App {
         std::mem::take(&mut self.runtime.effects)
     }
 
-    fn take_selected<T>(
-        &mut self,
-        mut select: impl FnMut(Effect) -> Result<T, Effect>,
-    ) -> Vec<T> {
-        let held = std::mem::take(&mut self.runtime.effects);
-        let mut retained = Vec::with_capacity(held.len());
-        let mut selected = Vec::with_capacity(held.len());
-
-        for effect in held {
-            match select(effect) {
-                Ok(value) => selected.push(value),
-                Err(effect) => retained.push(effect),
-            }
-        }
-
-        self.runtime.effects = retained;
-        selected
-    }
-
     fn record_initial_failure(&mut self, failure: String) {
         if self.runtime.loading.fail(failure) {
             self.runtime.effects.push(Effect::ProbeOutage);
@@ -1044,22 +1025,6 @@ impl App {
             self.send(Request::Blob { path, commit });
             self.runtime.status = "loading the file…".into();
         }
-    }
-
-    /// Drained by the event loop, which owns the syntax pass. A patch that has
-    /// grown has to be colored again: the colors are held one list per line.
-    pub fn take_recolor(&mut self) -> Vec<Arc<str>> {
-        self.take_selected(|effect| match effect {
-            Effect::Highlight(path) => Ok(path),
-            effect => Err(effect),
-        })
-    }
-
-    pub fn take_errands(&mut self) -> Vec<Errand> {
-        self.take_selected(|effect| match effect {
-            Effect::Errand(errand) => Ok(errand),
-            effect => Err(effect),
-        })
     }
 
     /// What the cursor is on, addressed on the web.

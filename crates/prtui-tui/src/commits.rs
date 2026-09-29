@@ -49,10 +49,6 @@ impl Rows {
     pub fn entry_at(&self, row: usize) -> Option<Entry> {
         self.entries.get(row).copied().flatten()
     }
-
-    pub fn row_of(&self, entry: Entry) -> Option<usize> {
-        self.entries.iter().position(|held| *held == Some(entry))
-    }
 }
 
 pub fn short(oid: &str) -> &str {
@@ -232,13 +228,16 @@ mod tests {
         let reviewed =
             build(&log(&["a", "b"], Some("a")), &Pick::All, None, 80, theme);
 
-        assert_eq!(fresh.row_of(Entry::SinceReview), None);
-        assert_eq!(reviewed.row_of(Entry::SinceReview), Some(1));
-        assert_eq!(
-            reviewed.row_of(Entry::Commit(0)),
-            Some(first_commit_row(&log(&["a"], Some("a"))))
+        assert!(
+            (0..fresh.len())
+                .all(|row| fresh.entry_at(row) != Some(Entry::SinceReview))
         );
-        assert_eq!(fresh.row_of(Entry::Commit(0)), Some(3));
+        assert_eq!(reviewed.entry_at(1), Some(Entry::SinceReview));
+        assert_eq!(
+            reviewed.entry_at(first_commit_row(&log(&["a"], Some("a")))),
+            Some(Entry::Commit(0))
+        );
+        assert_eq!(fresh.entry_at(3), Some(Entry::Commit(0)));
         assert_eq!(reviewed.entry_at(3), None);
     }
 

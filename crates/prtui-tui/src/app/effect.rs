@@ -250,20 +250,6 @@ mod tests {
     }
 
     #[test]
-    fn an_old_generation_cannot_finish_the_current_fetch() {
-        let mut fetch = MetaFetch::default();
-        let first = fetch.request().unwrap();
-        fetch.invalidate();
-        let second = match fetch.complete(first) {
-            MetaCompletion::Retry(generation) => generation,
-            other => panic!("expected a retry, got {other:?}"),
-        };
-
-        assert_eq!(fetch.complete(first), MetaCompletion::Ignore);
-        assert_eq!(fetch.complete(second), MetaCompletion::Accept);
-    }
-
-    #[test]
     fn starting_the_app_queues_each_initial_read_once() {
         let mut app = App::new();
 
@@ -332,6 +318,16 @@ mod tests {
             outcome: Ok(Box::new(meta("stale"))),
         }));
         assert_eq!(app.take_effects(), [Effect::FetchMeta { generation: 2 }]);
+
+        app.receive(Message::Meta {
+            generation: 2,
+            outcome: Ok(Box::new(meta("fresh"))),
+        });
+        app.receive(Message::Request(Ok(Sent::Viewed {
+            path: "src/main.rs".into(),
+            is_viewed: true,
+        })));
+        assert!(app.take_effects().is_empty());
     }
 
     #[test]

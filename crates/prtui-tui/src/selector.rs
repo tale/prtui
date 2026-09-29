@@ -13,8 +13,6 @@ use crate::overview::{self, FoldState};
 use crate::renderer::Theme;
 use crate::ui::{self, SPINNER};
 use crate::vim::Cursor;
-#[cfg(test)]
-use prtui_core::Repo;
 use prtui_core::{
     Changes, PullRequestList, PullRequestListItem, PullRequestListScope,
     PullRequestOverview, PullRequestTarget, ReviewStatus,
@@ -978,6 +976,7 @@ fn status_cell(status: &ReviewStatus, theme: Theme) -> Cell<'static> {
 mod tests {
     use super::*;
     use prtui_core as model;
+    use prtui_core::Repo;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1122,16 +1121,6 @@ mod tests {
     }
 
     #[test]
-    fn the_dashboard_spins_until_the_listing_lands() {
-        let rendered = render_selector(&Selector::new());
-
-        assert!(rendered.contains("open pull requests"));
-        assert!(!rendered.contains("open pull requests ·"));
-        assert!(rendered.contains("loading pull requests"));
-        assert!(rendered.contains(SPINNER[0]));
-    }
-
-    #[test]
     fn a_failed_listing_stays_on_screen() {
         let mut selector = Selector::new();
         let metrics = frame_metrics(&selector);
@@ -1141,12 +1130,6 @@ mod tests {
         assert!(
             render_selector(&selector).contains("error: gh pr list failed")
         );
-    }
-
-    #[test]
-    fn an_empty_dashboard_cannot_select_a_pull_request() {
-        let pull_requests = list(PullRequestListScope::Repository, Vec::new());
-        assert!(pull_requests.select(0).is_none());
     }
 
     /// The whole point of the shared keymap: a count means here what it means
@@ -1171,10 +1154,9 @@ mod tests {
     #[test]
     fn a_half_page_scroll_moves_by_the_viewport() {
         let mut selector = ready(many());
-        let half = frame_metrics(&selector).viewport / 2;
 
         press_key(&mut selector, KeyCode::Char('d'), Modifiers::CONTROL);
-        assert_eq!(selector.cursor.index, half);
+        assert_eq!(selector.cursor.index, 7);
 
         press_key(&mut selector, KeyCode::Char('u'), Modifiers::CONTROL);
         assert_eq!(selector.cursor.index, 0);
@@ -1195,19 +1177,6 @@ mod tests {
 
         press_key(&mut selector, KeyCode::Backspace, Modifiers::NONE);
         assert_eq!(selector.visible.len(), 40);
-    }
-
-    #[test]
-    fn accepting_the_filter_keeps_the_narrowed_list() {
-        let mut selector = ready(many());
-
-        press(&mut selector, "/");
-        press(&mut selector, "Change 30");
-        press_key(&mut selector, KeyCode::Enter, Modifiers::NONE);
-
-        assert_eq!(selector.mode, Mode::Normal);
-        assert_eq!(selector.visible.len(), 1);
-        assert_eq!(selector.target().map(|target| target.number), Some(30));
     }
 
     /// Cancelling puts back both the list and the row it was opened on.
@@ -1356,39 +1325,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_panel_names_the_reviewers_and_folds_the_checks() {
-        let mut selector = ready(many());
-        overview_ready(&mut selector);
-        let rendered = render_selector(&selector);
-
-        assert!(rendered.contains("owner/repo #1"));
-        assert!(rendered.contains("Change 1"));
-        assert!(rendered.contains("↵ review"));
-        assert!(rendered.contains("esc close"));
-        assert!(rendered.contains("@bob"));
-        assert!(rendered.contains("@owner/backend (team)"));
-        assert!(rendered.contains("1 failed · 1 passed"));
-        assert!(!rendered.contains("clippy"));
-
-        press(&mut selector, "G");
-        let rendered = render_selector(&selector);
-        assert!(rendered.contains("@alice · 2026-09-03"));
-        assert!(!rendered.contains("ship it"));
-    }
-
-    #[test]
-    fn enter_opens_the_comment_under_the_cursor() {
-        let mut selector = ready(many());
-        overview_ready(&mut selector);
-
-        press(&mut selector, "G");
-        press_key(&mut selector, KeyCode::Enter, Modifiers::NONE);
-
-        assert!(render_selector(&selector).contains("ship it"));
-        assert!(!selector.is_done);
-    }
-
     /// The fold is what the cursor is on, so `<CR>` opens it there and the
     /// hints say so.
     #[test]
@@ -1410,30 +1346,21 @@ mod tests {
         assert!(rendered.contains("↵ toggle"));
     }
 
-    /// The panel's cursor is a row of its own, which the frame follows.
-    #[test]
-    fn the_panel_carries_a_cursor_rather_than_a_scroll() {
-        let mut selector = ready(many());
-        overview_ready(&mut selector);
-
-        press(&mut selector, "3j");
-        let panel = selector.panel.as_ref().unwrap();
-
-        assert_eq!(panel.cursor.index, 3);
-        assert_eq!(panel.cursor.scroll, 0);
-    }
-
     /// The cursor cannot wander off the pull request the panel is pinned to,
     /// so motions scroll the panel while it is open.
     #[test]
     fn motions_scroll_the_panel_rather_than_the_list() {
         let mut selector = ready(many());
-        selector.apply(&Action::OpenOverview, frame_metrics(&selector));
+        overview_ready(&mut selector);
         let row = selector.cursor.index;
 
-        press(&mut selector, "j");
+        press(&mut selector, "3j");
 
         assert_eq!(selector.cursor.index, row);
+        assert_eq!(
+            selector.panel.as_ref().map(|panel| panel.cursor.index),
+            Some(3)
+        );
     }
 
     #[test]

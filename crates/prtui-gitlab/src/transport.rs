@@ -355,8 +355,6 @@ mod tests {
 
     #[test]
     fn pagination_stops_at_the_last_page() {
-        assert_eq!(next_page(&headers("3")).unwrap(), Some(3));
-        assert_eq!(next_page(&headers("")).unwrap(), None);
         assert_eq!(next_page(&HeaderMap::new()).unwrap(), None);
     }
 

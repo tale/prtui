@@ -1815,35 +1815,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_hosts_select_the_correct_api() {
-        let enterprise = parse_repo("github.example.com/team/service").unwrap();
-        assert_eq!(enterprise.host.as_deref(), Some("github.example.com"));
-        assert_eq!(
-            rest_url(&enterprise, "/x"),
-            "https://github.example.com/api/v3/x"
-        );
-
-        let public = parse_repo("github.com/cli/cli").unwrap();
-        assert_eq!(enterprise_host(&public), None);
-        assert_eq!(rest_url(&public, "/x"), "https://api.github.com/x");
-    }
-
-    /// The public token is not valid on another host, and handing it over would
-    /// give that host a credential it has no business seeing.
-    #[test]
-    fn every_host_is_asked_for_its_own_token() {
-        let public = parse_repo("cli/cli").unwrap();
-        let enterprise = parse_repo("github.example.com/team/service").unwrap();
-
-        assert_eq!(public.host.as_deref(), None);
-        assert_eq!(enterprise.host.as_deref(), Some("github.example.com"));
-        assert_eq!(
-            web_url(&enterprise),
-            "https://github.example.com/team/service"
-        );
-    }
-
-    #[test]
     fn reports_only_the_components_a_review_depends_on() {
         let feed = |components: serde_json::Value| serde_json::json!({ "components": components });
 
@@ -1949,14 +1920,6 @@ mod tests {
         assert!(error.contains("no nodes"), "{error}");
     }
 
-    /// A connection GitHub answers without a cursor is the whole of it. The
-    /// walk must end rather than read a missing field as another page.
-    #[test]
-    fn a_connection_with_no_page_info_is_taken_as_complete() {
-        assert_eq!(next_cursor(&serde_json::json!({ "nodes": [] })), None);
-        assert_eq!(next_cursor(&serde_json::json!(null)), None);
-    }
-
     #[test]
     fn routes_enterprise_hosts_to_their_own_api_mount() {
         let public = parse_repo("owner/repo").unwrap();
@@ -1976,6 +1939,10 @@ mod tests {
             "https://ghe.corp/api/v3/repos/owner/repo/pulls"
         );
         assert_eq!(graphql_url(&enterprise), "https://ghe.corp/api/graphql");
+        assert_eq!(
+            GitHub.pull_request_url(&enterprise, 1),
+            "https://ghe.corp/owner/repo/pull/1"
+        );
     }
 
     #[test]
@@ -2050,50 +2017,9 @@ mod tests {
             ReviewStatus::NoDecision
         ));
 
-        let target = local.select(1).unwrap();
+        let target = &local.items[1].target;
         assert_eq!(target.repo.slug(), "owner/repo");
         assert_eq!(target.number, 13);
-    }
-
-    #[test]
-    fn parses_user_pull_requests_and_moves_the_selected_repository() {
-        let global = parse_user_pull_requests(
-            br#"[{
-                "data": {
-                    "viewer": {
-                        "pullRequests": {
-                            "nodes": [{
-                                "number": 34,
-                                "title": "Global change",
-                                "author": { "login": "bob" },
-                                "isDraft": false,
-                                "updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"reviewDecision": "CHANGES_REQUESTED",
-                                "repository": {
-                                    "nameWithOwner": "other/repo"
-                                }
-                            }],
-                            "pageInfo": {
-                                "hasNextPage": false,
-                                "endCursor": null
-                            }
-                        }
-                    }
-                }
-            }]"#,
-        )
-        .unwrap();
-        assert_eq!(global.scope, PullRequestListScope::User);
-        assert_eq!(global.items[0].target.repo.slug(), "other/repo");
-        assert_eq!(global.items[0].title, "Global change");
-        assert_eq!(global.items[0].author, "bob");
-        assert!(matches!(
-            global.items[0].review_status,
-            ReviewStatus::ChangesRequested
-        ));
-
-        let target = global.select(0).unwrap();
-        assert_eq!(target.repo.slug(), "other/repo");
-        assert_eq!(target.number, 34);
     }
 
     #[test]

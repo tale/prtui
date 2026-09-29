@@ -576,15 +576,6 @@ impl App {
         self.runtime.in_flight += 1;
     }
 
-    /// Compatibility view for model-level tests that inspect only requests.
-    /// Runtime code drains [`Self::take_effects`] instead.
-    pub fn take_requests(&mut self) -> Vec<Request> {
-        self.take_selected(|effect| match effect {
-            Effect::Request(request) => Ok(request),
-            effect => Err(effect),
-        })
-    }
-
     /// Reports one request's outcome. Drafts survive a failed submission so the
     /// review can be sent again rather than retyped.
     pub fn finish(&mut self, outcome: Result<Sent, Failure>) {

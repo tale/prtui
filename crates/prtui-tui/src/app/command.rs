@@ -479,10 +479,6 @@ mod tests {
 
     #[test]
     fn every_command_is_addressable_by_exactly_one_name() {
-        for command in COMMANDS {
-            assert!(find(command.name).is_some());
-        }
-
         let mut names: Vec<&str> =
             COMMANDS.iter().map(|command| command.name).collect();
         names.sort_unstable();

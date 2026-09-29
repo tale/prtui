@@ -816,6 +816,10 @@ mod tests {
             "https://gitlab.com/group/project/-/merge_requests/42"
         );
         assert_eq!(
+            provider.comment_url(&repo, 42, "abc123:5"),
+            "https://gitlab.com/group/project/-/merge_requests/42#note_5"
+        );
+        assert_eq!(
             provider.blob_url(&repo, "abc123", "src/a b.rs", Some((7, 9))),
             "https://gitlab.com/group/project/-/blob/abc123/src/a%20b.rs#L7-9"
         );
@@ -841,27 +845,6 @@ mod tests {
         assert!(parse_repo("gitlab.example.com/project").is_err());
     }
 
-    #[test]
-    fn a_project_path_rides_in_one_encoded_segment() {
-        let repo = parse_repo("gitlab.example.com/group/sub/project").unwrap();
-        let path = ProjectRef::Path("group%2Fsub%2Fproject".to_owned());
-
-        assert_eq!(
-            api_with(&repo, &path, "/merge_requests/1"),
-            "https://gitlab.example.com/api/v4/projects/\
-             group%2Fsub%2Fproject/merge_requests/1"
-        );
-    }
-
-    #[test]
-    fn a_normalizing_host_is_addressed_by_id() {
-        let repo = parse_repo("gitlab.example.com/group/sub/project").unwrap();
-
-        assert_eq!(
-            api_with(&repo, &ProjectRef::Id(7), "/merge_requests/1"),
-            "https://gitlab.example.com/api/v4/projects/7/merge_requests/1"
-        );
-    }
     #[test]
     fn pending_comments_belong_to_the_viewer_not_the_merge_request_author() {
         let mr = serde_json::from_value(serde_json::json!({

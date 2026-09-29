@@ -129,32 +129,23 @@ mod tests {
         let draft = CommentRef::Draft { mr: 7, draft: 3 };
         assert_eq!(draft.to_string(), "7:d3");
         assert_eq!(CommentRef::parse("7:d3").unwrap(), draft);
-    }
 
-    #[test]
-    fn a_thread_keeps_its_hex_discussion_id() {
         let thread = ThreadRef {
             mr: 1,
             discussion: "fc9615a242ccf8160400c6bc0dbee26eb15f1302".to_owned(),
         };
-
         assert_eq!(
             thread.to_string(),
             "1:fc9615a242ccf8160400c6bc0dbee26eb15f1302"
         );
         assert_eq!(ThreadRef::parse(&thread.to_string()).unwrap(), thread);
-    }
 
-    #[test]
-    fn a_reply_splits_off_only_the_trailing_note() {
         let reply = ReplyRef {
             discussion: "abc123".to_owned(),
             note: 5,
         };
-
         assert_eq!(reply.to_string(), "abc123:5");
         assert_eq!(ReplyRef::parse("abc123:5").unwrap(), reply);
-        assert_eq!(ReplyRef::note_anchor("abc123:5"), "5");
     }
 
     #[test]

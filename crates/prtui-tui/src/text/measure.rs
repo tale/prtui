@@ -110,46 +110,6 @@ pub fn truncate(text: &str, budget: usize) -> String {
     format!("{head}…")
 }
 
-/// Splits `a/b/c.rs` into a dimmed `a/b/` and a bright `c.rs`, dropping leading
-/// directories when the whole path will not fit.
-///
-/// The name is what identifies a file and the directory just above it is what
-/// tells two files of the same name apart, so the cut comes off the front and
-/// lands on a separator. Cutting mid-segment instead used to leave `…fy/` in
-/// front of the name, which names no directory that exists.
-pub fn split_path(path: &str, budget: usize) -> (String, String) {
-    let name = path.rsplit('/').next().unwrap_or(path).to_string();
-
-    if name.chars().count() >= budget {
-        let tail: String = name
-            .chars()
-            .skip(name.chars().count() + 1 - budget)
-            .collect();
-        return (String::new(), format!("…{tail}"));
-    }
-
-    let directory_budget = budget - name.chars().count();
-    let directory = path.strip_suffix(&name).unwrap_or("");
-
-    if directory.chars().count() <= directory_budget {
-        return (directory.to_string(), name);
-    }
-
-    // Whole segments off the end, longest first, with one column held back for
-    // the ellipsis. The last separator always yields `…/`, which still says the
-    // file is nested when nothing else fits.
-    let kept_budget = directory_budget.saturating_sub(1);
-    let kept = directory
-        .match_indices('/')
-        .map(|(at, _)| &directory[at..])
-        .find(|tail| tail.chars().count() <= kept_budget);
-
-    match kept {
-        Some(tail) => (format!("…{tail}"), name),
-        None => (String::new(), name),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,28 +145,5 @@ mod tests {
     fn truncate_marks_where_it_cut() {
         assert_eq!(truncate("abcdef", 6), "abcdef");
         assert_eq!(truncate("abcdef", 4), "abc…");
-    }
-
-    #[test]
-    fn split_path_elides_the_directory_before_the_name() {
-        assert_eq!(
-            split_path("src/app/mod.rs", 20),
-            ("src/app/".into(), "mod.rs".into())
-        );
-        // The nearest directory is what disambiguates, so it survives whole.
-        assert_eq!(
-            split_path("pkg/cmd/attestation/verify/verify.go", 18),
-            ("…/verify/".into(), "verify.go".into())
-        );
-        // No segment fits, so the path says only that it is nested.
-        assert_eq!(
-            split_path("src/app/mod.rs", 10),
-            ("…/".into(), "mod.rs".into())
-        );
-        // Too narrow for the name itself: only its tail survives.
-        assert_eq!(
-            split_path("src/app/mod.rs", 4),
-            (String::new(), "….rs".into())
-        );
     }
 }

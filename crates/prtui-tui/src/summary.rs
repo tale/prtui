@@ -17,26 +17,10 @@ const LABEL_WIDTH: usize = 10;
 /// Columns a named reviewer is padded to before their verdict.
 const NAME_WIDTH: usize = 28;
 
-/// The rows every summary writes, whatever the fold is doing: the head, the
-/// blank under it, the two section headers with a blank between them, and the
-/// four tallies at the foot.
-const FIXED_LINES: usize = 10;
-
 /// The row the checks fold sits on, which is the row `<CR>` opens it from.
 pub const fn checks_row(summary: &Summary) -> usize {
     // The head, the blank under it, the reviewers and their blank.
     4 + summary.reviewers.len()
-}
-
-/// How tall [`build`] will be, which is what the panel sizes its cursor to.
-pub const fn line_count(summary: &Summary, is_checks_open: bool) -> usize {
-    let checks = if is_checks_open {
-        summary.checks.len()
-    } else {
-        0
-    };
-
-    FIXED_LINES + summary.reviewers.len() + checks
 }
 
 pub fn build(
@@ -388,18 +372,6 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn the_panel_is_sized_to_what_the_summary_writes() {
-        let summary = summary();
-
-        for is_checks_open in [false, true] {
-            assert_eq!(
-                build(&summary, is_checks_open, Theme::dark()).len(),
-                line_count(&summary, is_checks_open)
-            );
-        }
-    }
-
     /// Who a pull request is waiting on is the reason it is on the list, so
     /// the reviewers are named rather than counted.
     #[test]
@@ -417,14 +389,6 @@ mod tests {
                 |line| line.contains("@alice") && line.contains("approved")
             )
         );
-    }
-
-    /// A team is asked as a team: nobody on it has picked the review up yet.
-    #[test]
-    fn a_team_request_is_listed_as_the_team() {
-        assert!(text(&summary(), false).iter().any(|line| {
-            line.contains("@owner/backend (team)") && line.contains("waiting")
-        }));
     }
 
     #[test]

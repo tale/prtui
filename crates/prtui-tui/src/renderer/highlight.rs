@@ -482,13 +482,13 @@ mod tests {
 
     #[test]
     fn byte_ranges_stay_on_utf8_boundaries() {
+        let (old, new) = emphasis_ranges("a → b", "a ← b");
+        assert_eq!(old, vec![2..5]);
+        assert_eq!(new, vec![2..5]);
+
         let (old, new) = emphasis_ranges("let café = 1", "let tea = 1");
-        for range in old {
-            assert!("let café = 1".get(range).is_some());
-        }
-        for range in new {
-            assert!("let tea = 1".get(range).is_some());
-        }
+        assert_eq!(old, vec![4..9]);
+        assert_eq!(new, vec![4..7]);
     }
 
     /// A space matches across almost any pair of lines. Dropping it from the
@@ -572,22 +572,5 @@ mod tests {
             highlight_file("generated.js", &lines, ThemeMode::Dark);
         assert_eq!(highlighted[0].len(), 1);
         assert_eq!(highlighted[0][0].range, 0..MAX_HIGHLIGHT_BYTES + 1);
-    }
-
-    #[test]
-    fn github_defaults_are_used_for_both_modes() {
-        assert_eq!(
-            assets().dark.settings.foreground,
-            Some(syntax_color(0xe6edf3))
-        );
-        assert_eq!(
-            assets().light.settings.foreground,
-            Some(syntax_color(0x1f2328))
-        );
-        assert_eq!(assets().dark.name.as_deref(), Some("GitHub Dark Default"));
-        assert_eq!(
-            assets().light.name.as_deref(),
-            Some("GitHub Light Default")
-        );
     }
 }

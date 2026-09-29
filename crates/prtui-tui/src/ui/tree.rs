@@ -23,6 +23,8 @@ const MARKER_WIDTH: usize = 2;
 /// `every_tree_icon_is_one_column` holds to.
 const ICON_WIDTH: usize = 2;
 
+const VIEWED_ICON: char = '✓';
+
 pub(super) fn draw(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
     let Some(pane) = layout.files_pane else {
         return;
@@ -318,7 +320,7 @@ fn file_line<'a>(
     // loses the color it earned for being added or removed: what it was is no
     // longer the thing to look at, and the icon column is already there.
     let (glyph, glyph_color) = if is_viewed {
-        ('✓', theme.success)
+        (VIEWED_ICON, theme.success)
     } else {
         file_icon(&file.path, theme)
     };
@@ -358,4 +360,64 @@ fn file_line<'a>(
     }
 
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unicode_width::UnicodeWidthChar;
+
+    /// The tree budgets two columns for an icon and the space after it. A
+    /// glyph two columns wide would push everything after it past the pane's
+    /// edge.
+    #[test]
+    fn every_tree_icon_is_one_column() {
+        let samples = [
+            "a.rs",
+            "a.go",
+            "a.ts",
+            "a.tsx",
+            "a.py",
+            "a.md",
+            "a.json",
+            "a.yaml",
+            "a.toml",
+            "a.css",
+            "a.html",
+            "a.sh",
+            "a.c",
+            "a.cpp",
+            "a.java",
+            "a.rb",
+            "a.php",
+            "a.swift",
+            "a.kt",
+            "a.lua",
+            "a.sql",
+            "a.png",
+            "a.svg",
+            "Dockerfile",
+            "Makefile",
+            "Cargo.lock",
+            "LICENSE",
+            "unknown.qqq",
+            ".gitignore",
+        ];
+
+        for theme in [Theme::dark(), Theme::light()] {
+            let glyphs = samples
+                .iter()
+                .map(|path| (*path, file_icon(path, theme).0))
+                .chain([("viewed", VIEWED_ICON)]);
+
+            for (path, glyph) in glyphs {
+                assert_eq!(
+                    glyph.width(),
+                    Some(ICON_WIDTH - 1),
+                    "{path} drew U+{:04X}",
+                    glyph as u32
+                );
+            }
+        }
+    }
 }

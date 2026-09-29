@@ -110,13 +110,6 @@ impl Draft {
         *self.path == *path
             && self.rows().is_some_and(|rows| rows.contains(&row))
     }
-
-    pub fn overlaps(&self, path: &str, rows: &RangeInclusive<usize>) -> bool {
-        *self.path == *path
-            && self.rows().is_some_and(|own| {
-                own.start() <= rows.end() && rows.start() <= own.end()
-            })
-    }
 }
 
 /// Resolves a span of diff rows to the anchor GitHub understands.

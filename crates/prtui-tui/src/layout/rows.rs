@@ -139,7 +139,6 @@ enum Class {
 /// What laying a file out needs from app state.
 #[derive(Clone, Copy)]
 pub struct View<'a> {
-    pub focused: Option<&'a Card>,
     pub expanded: Option<&'a Card>,
     /// How far into the expanded conversation the reader has scrolled.
     pub scroll: usize,
@@ -1079,7 +1078,6 @@ mod tests {
                 &file,
                 std::slice::from_ref(&review),
                 View {
-                    focused: Some(&card),
                     expanded: Some(&card),
                     scroll,
                     width: 80,
@@ -1210,7 +1208,6 @@ mod tests {
             &file,
             &threads,
             View {
-                focused: None,
                 expanded: None,
                 scroll: 0,
                 width: 80,

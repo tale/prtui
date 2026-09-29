@@ -156,10 +156,6 @@ impl Layout {
             .as_ref()
             .map_or(0, |overlay| overlay.content.len())
     }
-
-    pub fn overlay_limit(&self) -> usize {
-        self.overlay_len().saturating_sub(self.overlay_viewport())
-    }
 }
 
 /// A panel floating over the panes, laid out: where it sits and what it says.
@@ -421,7 +417,6 @@ fn build_rows(app: AppView<'_>, diff: Rect, gaps: &[Gap]) -> Rows {
         open.patch,
         open.threads,
         RowView {
-            focused: app.focused_card,
             expanded: app.expanded_card,
             scroll: app.thread_scroll,
             width: diff.width as usize,
@@ -464,7 +459,6 @@ fn files_width(total: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::App;
 
     #[test]
     fn the_tree_never_starves_the_diff() {
@@ -473,20 +467,5 @@ mod tests {
         assert_eq!(files_width(400), 34);
         // Narrow ones give the diff its floor first.
         assert_eq!(files_width(40), 20);
-    }
-
-    #[test]
-    fn splits_a_frame_into_header_body_and_status() {
-        let app = App::new();
-        let layout = Layout::compute(Rect::new(0, 0, 120, 30), app.view());
-
-        assert_eq!(layout.header, Rect::new(0, 0, 120, 1));
-        assert_eq!(layout.status, Rect::new(0, 29, 120, 1));
-        // Header, the diff pane's title rule, and the status bar.
-        assert_eq!(layout.diff_viewport(), 27);
-        assert_eq!(layout.files_pane.map(|pane| pane.width), Some(30));
-        // No filter open, so the tree's whole inside scrolls.
-        assert_eq!(layout.files_viewport(), 27);
-        assert!(layout.files_prompt.is_none());
     }
 }

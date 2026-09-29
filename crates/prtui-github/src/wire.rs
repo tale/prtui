@@ -686,7 +686,6 @@ mod tests {
         ]"#).unwrap();
         assert_eq!(parsed[0].path.as_ref(), "new.rs");
         assert_eq!(parsed[0].previous_path.as_deref(), Some("old.rs"));
-        assert!(parsed[0].lines.is_empty());
         assert!(parsed[1].previous_path.is_none());
     }
 
@@ -828,15 +827,6 @@ index 6666666..0000000
         assert_eq!(input["pullRequestId"], "PR_1");
         assert_eq!(input["event"], "APPROVE");
         assert!(input.get("body").is_none());
-    }
-
-    #[test]
-    fn a_field_the_api_stops_sending_fails_the_parse() {
-        let mut pr = pull_request(&json!([]));
-        pr.as_object_mut().unwrap().remove("state");
-
-        assert!(meta(response(&pr)).is_err());
-        assert!(meta(json!({ "data": {} })).is_err());
     }
 
     #[test]

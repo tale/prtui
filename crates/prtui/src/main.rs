@@ -703,18 +703,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pull_request_number_is_optional() {
-        assert_eq!(Args::try_parse_from(["prtui"]).unwrap().number, None);
-        assert_eq!(
-            Args::try_parse_from(["prtui", "42"]).unwrap().number,
-            Some(42)
-        );
-    }
+    fn the_command_line_opens_a_pull_request_or_the_local_diff() {
+        let bare = Args::try_parse_from(["prtui"]).unwrap();
+        assert_eq!(bare.number, None);
+        assert!(bare.command.is_none());
+        assert!(bare.theme.follows_terminal());
 
-    #[test]
-    fn auto_is_the_only_live_theme_choice() {
-        assert!(ThemeChoice::Auto.follows_terminal());
-        assert!(!ThemeChoice::Dark.follows_terminal());
-        assert!(!ThemeChoice::Light.follows_terminal());
+        let pull =
+            Args::try_parse_from(["prtui", "123", "-R", "owner/repo"]).unwrap();
+        assert_eq!(pull.number, Some(123));
+        assert_eq!(pull.repo.as_deref(), Some("owner/repo"));
+
+        let diff =
+            Args::try_parse_from(["prtui", "diff", "--theme", "dark"]).unwrap();
+        assert!(matches!(diff.command, Some(Command::Diff)));
+        assert!(!diff.theme.follows_terminal());
     }
 }

@@ -26,6 +26,4 @@ termina = { version = "0.3.3", features = ["event-stream"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
 
 [dev-dependencies]
-devicons = "0.6.13"
 ratatui = { version = "0.30.2", default-features = false, features = ["layout-cache", "termina"] }
-unicode-width = "0.2.2"

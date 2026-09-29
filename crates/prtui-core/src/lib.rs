@@ -462,15 +462,6 @@ impl PullRequestList {
     pub fn get(&self, index: usize) -> Option<&PullRequestListItem> {
         self.items.get(index)
     }
-
-    /// Consumes the listing and returns the selected target.
-    pub fn select(mut self, index: usize) -> Option<PullRequestTarget> {
-        if index >= self.items.len() {
-            return None;
-        }
-
-        Some(self.items.swap_remove(index).target)
-    }
 }
 
 /// Provider-normalized review state for a pull request row.
@@ -650,4 +641,47 @@ pub fn parse_patch(patch: &str) -> Vec<DiffLine> {
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use LineKind::{Added, Context, Hunk, Removed};
+
+    #[test]
+    fn each_hunk_restarts_numbering_and_each_side_advances_alone() {
+        let patch = "\
+@@ -3,4 +3,4 @@ fn main
+ keep
+-old a
++new a
++new b
+ keep
+-old b
+@@ -20,2 +21,3 @@
+ tail
++added
+ end";
+        let lines: Vec<_> = parse_patch(patch)
+            .iter()
+            .map(|line| (line.kind, line.old_line, line.new_line))
+            .collect();
+
+        assert_eq!(
+            lines,
+            [
+                (Hunk, None, None),
+                (Context, Some(3), Some(3)),
+                (Removed, Some(4), None),
+                (Added, None, Some(4)),
+                (Added, None, Some(5)),
+                (Context, Some(5), Some(6)),
+                (Removed, Some(6), None),
+                (Hunk, None, None),
+                (Context, Some(20), Some(21)),
+                (Added, None, Some(22)),
+                (Context, Some(21), Some(23)),
+            ]
+        );
+    }
 }

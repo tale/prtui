@@ -71,14 +71,6 @@ pub struct Tree {
 }
 
 impl Tree {
-    pub const fn empty() -> Self {
-        Self {
-            all: Vec::new(),
-            start: 0,
-            root: None,
-        }
-    }
-
     /// Lays `visible` out as a tree.
     ///
     /// `collapsed` names directories the reader has folded away. A filter
@@ -171,10 +163,6 @@ impl Tree {
             .min(self.all.len().saturating_sub(height));
     }
 
-    pub fn rows(&self) -> &[Row] {
-        &self.all
-    }
-
     pub const fn len(&self) -> usize {
         self.all.len()
     }
@@ -192,10 +180,6 @@ impl Tree {
         let end = self.start.saturating_add(height).min(self.all.len());
 
         &self.all[self.start.min(end)..end]
-    }
-
-    pub const fn start(&self) -> usize {
-        self.start
     }
 
     /// Where a file sits in the row list, when it is not folded away.
@@ -376,7 +360,7 @@ mod tests {
 
     fn build(paths: &[&str], collapsed: &[&str]) -> Vec<String> {
         tree_of(paths, collapsed)
-            .rows()
+            .window(usize::MAX)
             .iter()
             .map(|row| match row {
                 Row::Directory { label, depth, .. } => {

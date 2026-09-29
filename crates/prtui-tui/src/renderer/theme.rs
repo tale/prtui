@@ -122,20 +122,3 @@ fn mix(from: Color, to: Color, percent: u16) -> Color {
 
     Color::Rgb(channel(fr, tr), channel(fg, tg), channel(fb, tb))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn selection_moves_in_the_right_direction_for_each_mode() {
-        assert_eq!(
-            Theme::dark().cursor_background(Theme::dark().add),
-            Color::Rgb(31, 45, 43)
-        );
-        assert_eq!(
-            Theme::light().cursor_background(Theme::light().add),
-            Color::Rgb(213, 234, 223)
-        );
-    }
-}

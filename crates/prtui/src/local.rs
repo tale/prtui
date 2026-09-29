@@ -405,21 +405,4 @@ mod tests {
         assert_eq!(snapshot.files.len(), 1);
         assert_eq!(snapshot.states["file"].staging, Staging::Mixed);
     }
-
-    #[test]
-    fn parses_diff_and_existing_pr_invocations() {
-        use clap::Parser;
-        assert!(matches!(
-            crate::Args::try_parse_from(["prtui", "diff", "--theme", "dark"])
-                .unwrap()
-                .command,
-            Some(crate::Command::Diff)
-        ));
-        assert_eq!(
-            crate::Args::try_parse_from(["prtui", "123", "-R", "owner/repo"])
-                .unwrap()
-                .number,
-            Some(123)
-        );
-    }
 }

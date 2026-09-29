@@ -400,13 +400,13 @@ mod tests {
         select("GITHUB.COM", None, Some(&path)).await.unwrap();
         let mut hosts = read_hosts(Some(&path)).unwrap();
         assert_eq!(hosts.get("github.com").map(String::as_str), Some("github"));
-        hosts.insert("unreachable.invalid".into(), "github".into());
+        hosts.insert("unreachable.invalid".into(), "gitlab".into());
         write_hosts(&path, &hosts).unwrap();
         assert_eq!(
             select("unreachable.invalid", None, Some(&path))
                 .await
                 .unwrap(),
-            ProviderChoice::Github
+            ProviderChoice::Gitlab
         );
         std::fs::remove_dir_all(directory).unwrap();
     }

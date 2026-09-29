@@ -669,15 +669,6 @@ impl App {
         self.navigation.focused_card = focused;
     }
 
-    /// The focused thread, when the focus is on one rather than on a draft.
-    pub fn focused_thread(&self) -> Option<&str> {
-        self.navigation
-            .focused_card
-            .as_ref()?
-            .thread()
-            .map(|id| &**id)
-    }
-
     /// The focused draft, by the index the drafts are held at.
     pub fn focused_draft(&self) -> Option<usize> {
         self.draft_by_id(self.navigation.focused_card.as_ref()?.draft()?)
