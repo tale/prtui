@@ -12,6 +12,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("w", "submit"),
     ("write", "submit"),
     ("h", "help"),
+    ("tree", "toggle-tree"),
     ("o", "open"),
     ("y", "yank"),
     ("noh", "clear-find"),
@@ -73,6 +74,7 @@ mod tests {
         assert_eq!(run("w"), Ok(Some(Action::StartSubmit)));
         assert_eq!(run("submit"), Ok(Some(Action::StartSubmit)));
         assert_eq!(run("next-comment"), Ok(Some(Action::NextComment(1))));
+        assert_eq!(run("tree"), Ok(Some(Action::ToggleTree)));
     }
 
     #[test]

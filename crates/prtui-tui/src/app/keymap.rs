@@ -8,7 +8,7 @@ const MAX_COUNT: usize = 999_999;
 
 /// Commands still bound but left out of the reference, since another key
 /// already reaches what they do from where the cursor is.
-const UNLISTED: &[&str] = &["edit-draft", "file-comment"];
+const UNLISTED: &[&str] = &["edit-draft", "file-comment", "toggle-pane"];
 
 /// The built-in keymap.
 ///
@@ -32,7 +32,6 @@ const DEFAULT: &[(&str, &str, &str)] = &[
     ("n", "}", "next-comment"),
     ("n", "{", "prev-comment"),
     ("nv", "<Tab>", "toggle-pane"),
-    ("nv", "f", "toggle-tree"),
     ("n", "h", "focus-files"),
     ("n", "l", "focus-diff"),
     ("n", "<Left>", "focus-files"),
