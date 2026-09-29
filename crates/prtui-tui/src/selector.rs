@@ -879,7 +879,7 @@ fn key_hints(
     metrics: Metrics,
 ) -> &'static [(&'static str, &'static str)] {
     if selector.mode == Mode::Filter {
-        return &[("↑↓", "select"), ("↵", "apply"), ("esc", "cancel")];
+        return &[("↑↓", "move"), ("↵", "apply"), ("esc", "cancel")];
     }
 
     if selector.panel.is_some() {
@@ -903,7 +903,7 @@ fn key_hints(
     if !selector.filter.is_empty() {
         return &[
             ("j/k", "move"),
-            ("K", "summary"),
+            ("K", "overview"),
             ("↵", "review"),
             ("gx", "browser"),
             ("esc", "clear"),
@@ -912,7 +912,7 @@ fn key_hints(
 
     &[
         ("j/k", "move"),
-        ("K", "summary"),
+        ("K", "overview"),
         ("↵", "review"),
         ("gx", "browser"),
         ("/", "filter"),
@@ -1269,7 +1269,7 @@ mod tests {
 
         assert!(rendered.contains("NORMAL"));
         assert!(rendered.contains("3/40"));
-        assert!(rendered.contains("K summary"));
+        assert!(rendered.contains("K overview"));
 
         press(&mut selector, "/");
         press(&mut selector, "Change 2");

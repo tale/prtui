@@ -429,7 +429,7 @@ impl App {
                 self.select_file(index);
                 "marking viewed…".into()
             }
-            None => "marking viewed… nothing left unread".into(),
+            None => "marking viewed… nothing left unviewed".into(),
         };
     }
 

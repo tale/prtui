@@ -225,7 +225,7 @@ fn check_tally(summary: &Summary, theme: Theme) -> Vec<Span<'static>> {
 
 fn threads(threads: &Threads, theme: Theme) -> Vec<Span<'static>> {
     if threads.total == 0 {
-        return vec![dim("no conversations", theme)];
+        return vec![dim("no threads", theme)];
     }
 
     let color = if threads.unresolved == 0 {
@@ -468,7 +468,7 @@ mod tests {
 
         assert!(lines.iter().any(|line| line.contains("no checks")));
         assert!(lines.iter().any(|line| line.contains("nobody has looked")));
-        assert!(lines.iter().any(|line| line.contains("no conversations")));
+        assert!(lines.iter().any(|line| line.contains("no threads")));
     }
 
     /// More threads than the page counted makes the tally a floor.

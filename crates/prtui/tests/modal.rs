@@ -2842,7 +2842,7 @@ fn marking_the_only_unread_file_stays_on_it_and_says_so() {
 
     assert_eq!(app.take_requests().len(), 1);
     assert_eq!(app.view().selected_file, last);
-    assert_eq!(app.view().status, "marking viewed… nothing left unread");
+    assert_eq!(app.view().status, "marking viewed… nothing left unviewed");
 }
 
 /// Takes the review's own marks over, the way a confirmation from GitHub

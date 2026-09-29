@@ -137,7 +137,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "toggle-viewed",
         group: "files",
-        summary: "mark read and open the next unread",
+        summary: "mark viewed, open the next unviewed",
         build: |_| Action::ToggleViewed,
     },
     Command {
@@ -148,26 +148,26 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "next-comment",
-        group: "conversations",
-        summary: "the next unanswered conversation",
+        group: "threads",
+        summary: "the next open thread",
         build: |count| Action::NextComment(count.times()),
     },
     Command {
         name: "prev-comment",
-        group: "conversations",
+        group: "threads",
         summary: "the previous one",
         build: |count| Action::PrevComment(count.times()),
     },
     Command {
         name: "leave-card",
-        group: "conversations",
+        group: "threads",
         summary: "give the focus back to the code",
         build: |_| Action::LeaveThread,
     },
     Command {
         name: "toggle-resolved",
-        group: "conversations",
-        summary: "resolve or reopen the conversation",
+        group: "threads",
+        summary: "resolve or reopen the thread",
         build: |_| Action::ToggleResolved,
     },
     Command {
@@ -233,7 +233,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "expand-all",
         group: "hidden lines",
-        summary: "reveal the run under the cursor",
+        summary: "reveal the run, or toggle the fold",
         build: |_| Action::Expand(Reveal::All),
     },
     Command {

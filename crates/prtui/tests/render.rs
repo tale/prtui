@@ -1715,7 +1715,7 @@ fn the_bar_offers_a_way_out_and_a_way_in() {
     let rendered = draw(&app);
 
     assert!(rendered.contains("q quit"), "{rendered}");
-    assert!(rendered.contains("K description"), "{rendered}");
+    assert!(rendered.contains("K overview"), "{rendered}");
     assert!(rendered.contains("? keys"), "{rendered}");
 
     let returning = draw_with_exit(&app, ui::ExitHint::Back);

@@ -1530,13 +1530,13 @@ fn draw_bottom_bar(
     let keys: &[(&str, &str)] = match (app.mode, app.pane) {
         (Mode::Normal | Mode::Visual, _) if app.local_root().is_some() => &[
             ("j/k", "move"),
-            ("tab", "pane"),
+            ("⇥", "pane"),
             ("[/]", "file"),
             ("/", "find"),
             ("zR", "expand"),
         ],
         (Mode::Filter, _) => {
-            &[("↑↓", "select"), ("↵", "apply"), ("esc", "cancel")]
+            &[("↑↓", "move"), ("↵", "apply"), ("esc", "cancel")]
         }
         (Mode::Search, _) => {
             &[("↑↓", "step"), ("↵", "accept"), ("esc", "cancel")]
@@ -1608,7 +1608,7 @@ fn draw_bottom_bar(
         (Mode::Normal, Pane::Files) => &[
             ("j/k", "move"),
             ("↵", "open"),
-            ("K", "description"),
+            ("K", "overview"),
             ("L", "commits"),
             if app.file_filter.is_some() {
                 ("/", "edit filter")
@@ -1645,11 +1645,9 @@ fn draw_bottom_bar(
             ("R", "resolve"),
             ("esc", "code"),
         ],
-        (Mode::Normal, Pane::Diff) if app.search.is_some() => &[
-            ("n/N", "next match"),
-            ("}", "next comment"),
-            ("esc", "clear"),
-        ],
+        (Mode::Normal, Pane::Diff) if app.search.is_some() => {
+            &[("n/N", "step"), ("}", "next thread"), ("esc", "clear")]
+        }
         (Mode::Normal, Pane::Diff) if !app.drafts.is_empty() => &[
             ("c", "comment"),
             ("C", "file note"),
@@ -1660,8 +1658,8 @@ fn draw_bottom_bar(
         (Mode::Normal, Pane::Diff) => &[
             ("j/k", "move"),
             ("c", "comment"),
-            ("/", "search"),
-            ("}", "next comment"),
+            ("/", "find"),
+            ("}", "next thread"),
             ("L", "commits"),
             ("q", exit_label),
         ],
