@@ -22,6 +22,7 @@ pub use view::View;
 
 use crate::commits::Pick;
 use crate::expand::{self, Gap, Place, Reveal};
+use crate::layout::rows::ThreadState;
 use crate::layout::{Content, Layout};
 use crate::overview::{self, FoldState};
 use crate::renderer::{Segment, Theme, ThemeMode};
@@ -871,14 +872,6 @@ impl App {
         self.navigation.tree_directory.as_deref()
     }
 
-    /// Conversations on a file that are still open, which is what the tree
-    /// marks and what a folded directory has to answer for.
-    pub fn unresolved_threads(&self, path: &str) -> usize {
-        self.shown_threads().get(path).map_or(0, |threads| {
-            threads.iter().filter(|thread| !thread.is_resolved).count()
-        })
-    }
-
     pub fn tree_row(&self, index: usize) -> Option<TreeRow<'_>> {
         let file = self.shown_files().get(index)?;
         let threads = self
@@ -892,7 +885,10 @@ impl App {
             is_viewed: self.review.viewed.contains(&file.path),
             local: self.local_files.get(&file.path).copied(),
             threads: threads.len(),
-            unresolved: threads.iter().filter(|t| !t.is_resolved).count(),
+            unresolved: threads
+                .iter()
+                .filter(|thread| !ThreadState::of(thread).is_settled())
+                .count(),
         })
     }
 

@@ -150,10 +150,6 @@ impl<'a> View<'a> {
         self.app.files_placeholder()
     }
 
-    pub fn unresolved_threads(self, path: &str) -> usize {
-        self.app.unresolved_threads(path)
-    }
-
     pub fn tree_row(self, index: usize) -> Option<TreeRow<'a>> {
         self.app.tree_row(index)
     }

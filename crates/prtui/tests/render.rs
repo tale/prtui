@@ -1920,6 +1920,37 @@ fn the_file_tree_marks_files_whose_threads_are_all_resolved() {
     assert!(marked[0].contains("verify.go"), "{:?}", marked[0]);
 }
 
+#[test]
+fn outdated_threads_count_as_settled() {
+    let mut app = load();
+    let mut thread = fixture_threads().remove(1);
+    thread.path = app.view().files[0].path.clone();
+    thread.is_outdated = true;
+    replace_threads(&mut app, vec![thread]);
+    set_tree_visible(&mut app, true);
+
+    let rendered = draw(&app);
+
+    assert!(rendered.contains('◇'), "{rendered}");
+    assert!(!rendered.contains('◆'), "{rendered}");
+}
+
+#[test]
+fn a_folded_directory_without_threads_carries_no_mark() {
+    let mut app = load();
+    replace_threads(&mut app, Vec::new());
+    set_tree_visible(&mut app, true);
+    focus_pane(&mut app, Pane::Files);
+    select_file(&mut app, 0);
+    act(&mut app, &Action::Move(Motion::Up(1)));
+    act(&mut app, &Action::Activate);
+    assert!(app.view().collapsed().len() == 1, "the heading folded");
+
+    let rendered = draw(&app);
+
+    assert!(!rendered.contains('◇'), "{rendered}");
+}
+
 /// The tree filter and the diff search share a matcher, so the tree can show
 /// Two panes and one set of keys: whichever pane holds them draws the cursor
 /// bar and wears the accent title, so which one is live is never a guess.

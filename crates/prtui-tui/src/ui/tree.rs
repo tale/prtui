@@ -98,6 +98,7 @@ pub(super) fn draw(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
                 label,
                 depth,
                 files,
+                threads,
                 unresolved,
                 is_collapsed,
                 ..
@@ -106,6 +107,7 @@ pub(super) fn draw(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
                     label,
                     depth: *depth,
                     files: *files,
+                    threads: *threads,
                     unresolved: *unresolved,
                     is_collapsed: *is_collapsed,
                     is_selected: is_focused && cursor == Some(&**path),
@@ -178,6 +180,7 @@ struct DirectoryRow<'a> {
     label: &'a str,
     depth: usize,
     files: usize,
+    threads: usize,
     unresolved: usize,
     is_collapsed: bool,
     is_selected: bool,
@@ -213,11 +216,12 @@ fn directory_line(
     // Folding a directory must not fold away the reason to open it, so a shut
     // one carries the mark its files would have carried. An open one leaves the
     // column to them.
-    let (marker, marker_color) = match (row.is_collapsed, row.unresolved) {
-        (true, 0) => ("◇", theme.muted),
-        (true, _) => ("◆", theme.purple),
-        (false, _) => (" ", theme.dim),
-    };
+    let (marker, marker_color) =
+        match (row.is_collapsed, row.unresolved, row.threads) {
+            (false, _, _) | (true, 0, 0) => (" ", theme.dim),
+            (true, 0, _) => ("◇", theme.muted),
+            (true, _, _) => ("◆", theme.purple),
+        };
 
     let name = matched_spans(
         truncate(row.label, budget),

@@ -389,17 +389,17 @@ fn dock(diff: Rect, app: AppView<'_>) -> (Rect, Option<Rect>, Option<Rect>) {
 
 /// The file tree, scrolled to wherever the cursor is resting.
 fn build_tree(app: AppView<'_>, height: usize) -> Tree {
-    let unresolved: Vec<usize> = app
-        .files
-        .iter()
-        .map(|file| app.unresolved_threads(&file.path))
-        .collect();
+    let (threads, unresolved): (Vec<usize>, Vec<usize>) = (0..app.files.len())
+        .filter_map(|index| app.tree_row(index))
+        .map(|row| (row.threads, row.unresolved))
+        .unzip();
 
     let mut tree = Tree::build(
         app.files,
         &app.filtered_file_indices(),
         app.collapsed(),
         app.file_filter.is_some(),
+        &threads,
         &unresolved,
     );
 

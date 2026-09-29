@@ -32,8 +32,10 @@ pub enum Row {
         /// Files underneath, at any depth, so a collapsed row still says how
         /// much it is hiding.
         files: usize,
-        /// Open conversations under it, for the same reason: folding a
-        /// directory must not fold away the thing the reader is looking for.
+        /// Conversations under it, and how many of those are open, for the
+        /// same reason: folding a directory must not fold away the thing the
+        /// reader is looking for.
+        threads: usize,
         unresolved: usize,
         is_collapsed: bool,
     },
@@ -87,6 +89,7 @@ impl Tree {
         visible: &[usize],
         collapsed: &HashSet<Arc<str>>,
         is_filtered: bool,
+        threads: &[usize],
         unresolved: &[usize],
     ) -> Self
     where
@@ -101,6 +104,7 @@ impl Tree {
             files,
             collapsed,
             is_filtered,
+            threads,
             unresolved,
             rows: Vec::with_capacity(sorted.len()),
         };
@@ -245,6 +249,8 @@ struct Builder<'a, F> {
     files: &'a [F],
     collapsed: &'a HashSet<Arc<str>>,
     is_filtered: bool,
+    /// Conversations per file, parallel to `files`.
+    threads: &'a [usize],
     /// Open conversations per file, parallel to `files`.
     unresolved: &'a [usize],
     rows: Vec<Row>,
@@ -310,12 +316,8 @@ where
             path,
             depth,
             files: group.len(),
-            unresolved: group
-                .iter()
-                .map(|&index| {
-                    self.unresolved.get(index).copied().unwrap_or_default()
-                })
-                .sum(),
+            threads: sum(self.threads, group),
+            unresolved: sum(self.unresolved, group),
             is_collapsed,
         });
 
@@ -340,6 +342,13 @@ where
     }
 }
 
+fn sum(counts: &[usize], group: &[usize]) -> usize {
+    group
+        .iter()
+        .map(|&index| counts.get(index).copied().unwrap_or_default())
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,7 +371,7 @@ mod tests {
         let folded: HashSet<Arc<str>> =
             collapsed.iter().map(|path| Arc::from(*path)).collect();
 
-        Tree::build(&files, &visible, &folded, false, &[])
+        Tree::build(&files, &visible, &folded, false, &[], &[])
     }
 
     fn build(paths: &[&str], collapsed: &[&str]) -> Vec<String> {
@@ -462,7 +471,7 @@ mod tests {
         let folded: HashSet<Arc<str>> =
             std::iter::once(Arc::from("src/app/")).collect();
 
-        let tree = Tree::build(&files, &[0, 1], &folded, true, &[]);
+        let tree = Tree::build(&files, &[0, 1], &folded, true, &[], &[]);
         assert_eq!(tree.files().collect::<Vec<_>>(), [0, 1]);
     }
 
@@ -470,7 +479,8 @@ mod tests {
     fn a_fold_key_finds_the_heading_above_the_cursor() {
         let files: Vec<ChangedFile> =
             ["src/app/mod.rs", "src/lib.rs"].map(file).into();
-        let tree = Tree::build(&files, &[0, 1], &HashSet::new(), false, &[]);
+        let tree =
+            Tree::build(&files, &[0, 1], &HashSet::new(), false, &[], &[]);
 
         // `src/` names the pane, so the rows are: app/, mod.rs, lib.rs.
         assert_eq!(
@@ -487,7 +497,8 @@ mod tests {
     fn files_come_back_in_the_order_the_tree_lists_them() {
         let paths = ["z/last.rs", "a/first.rs"];
         let files: Vec<ChangedFile> = paths.map(file).into();
-        let tree = Tree::build(&files, &[0, 1], &HashSet::new(), false, &[]);
+        let tree =
+            Tree::build(&files, &[0, 1], &HashSet::new(), false, &[], &[]);
 
         assert_eq!(tree.files().collect::<Vec<_>>(), [1, 0]);
     }

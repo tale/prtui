@@ -387,10 +387,9 @@ fn draw_diff(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
     let title = app.current_file().map_or_else(
         || " Diff ".to_string(),
         |file| {
-            let comments =
-                app.threads_by_path.get(&file.path).map_or(0, |threads| {
-                    threads.iter().filter(|thread| !thread.is_resolved).count()
-                });
+            let comments = app
+                .tree_row(app.selected_file)
+                .map_or(0, |row| row.unresolved);
             let suffix = if comments == 0 {
                 format!("  +{} -{}", file.additions, file.deletions)
             } else {
@@ -1493,7 +1492,7 @@ fn draw_bottom_bar(
         .threads_by_path
         .values()
         .flatten()
-        .filter(|thread| !thread.is_resolved)
+        .filter(|thread| !ThreadState::of(thread).is_settled())
         .count();
     if comments > 0 {
         spans.push(Span::styled(
