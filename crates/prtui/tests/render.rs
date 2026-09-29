@@ -446,6 +446,33 @@ fn opening_a_gap_fetches_the_file_and_then_reveals_it() {
     );
 }
 
+/// `↵` on a gap grows it from both hunks at once, and keeps its header under
+/// the cursor while any of it is left.
+#[test]
+fn enter_on_a_gap_grows_it_from_both_ends() {
+    let mut app = load();
+    focus_pane(&mut app, Pane::Diff);
+    select_file(&mut app, 1);
+    move_to(&mut app, 8);
+
+    let path = app.view().files[1].path.clone();
+    let before = app.view().files[1].lines.len();
+    assert_eq!(app.gaps()[1].len, Some(217));
+
+    act(&mut app, &Action::Activate);
+    app.take_requests();
+    app.finish(Ok(Sent::Blob {
+        path,
+        commit: head_oid(&app),
+        lines: head_of(&app),
+    }));
+
+    assert_eq!(app.view().files[1].lines.len(), before + 2 * STEP as usize);
+    assert_eq!(app.view().cursor, 8 + STEP as usize);
+    assert_eq!(app.view().files[1].lines[28].kind, LineKind::Hunk);
+    assert_eq!(app.gaps()[1].len, Some(217 - 2 * STEP));
+}
+
 /// A gap is named by the header the cursor rests on, so that header has to
 /// still be under the cursor once the reveal has pushed it down.
 #[test]
@@ -472,7 +499,7 @@ fn a_reveal_keeps_the_header_it_opened_under_the_cursor() {
     assert_eq!(app.view().files[1].lines[8].text, "head line 21");
 }
 
-/// `zR` in the diff: every run at once, which is the whole file rather than
+/// `E` in the diff: every run at once, which is the whole file rather than
 /// the parts of it that changed.
 #[test]
 fn expanding_the_file_opens_every_gap_at_once() {

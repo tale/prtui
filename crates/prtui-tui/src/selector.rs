@@ -49,7 +49,6 @@ const KEYS: &[(&str, &str, &str)] = &[
     ("no", "<CR>", "activate"),
     ("n", "q", "quit"),
     ("n", "<Esc>", "escape"),
-    ("o", "za", "expand-all"),
     ("o", "K", "close-panel"),
     ("o", "q", "close-panel"),
     ("o", "<Esc>", "close-panel"),
@@ -122,7 +121,7 @@ struct Panel {
     /// frame scrolls to follow.
     cursor: Cursor,
     /// A busy repository reports dozens of checks, so they open on the tally
-    /// and the list is asked for with `za`.
+    /// and the list is asked for with `↵`.
     folds: FoldState,
 }
 
@@ -342,7 +341,6 @@ impl Selector {
                 return Some(Effect::Open(target));
             }
             Action::CloseOverlay => self.close_panel(),
-            Action::Expand(_) => self.toggle_fold(metrics),
             // The line starts empty each time: the list it narrows is right
             // there, so there is nothing to recall.
             Action::StartFind => {
@@ -877,7 +875,7 @@ fn key_hints(
         if selector.is_on_fold(metrics.width, metrics.theme) {
             return &[
                 ("j/k", "move"),
-                ("↵/za", "toggle"),
+                ("↵", "toggle"),
                 ("gx", "browser"),
                 ("esc", "close"),
             ];
@@ -1409,21 +1407,7 @@ mod tests {
 
         assert!(rendered.contains("clippy"));
         assert!(rendered.contains("build"));
-        assert!(rendered.contains("↵/za toggle"));
-    }
-
-    /// `za` toggles the fold under the cursor.
-    #[test]
-    fn za_folds_the_checks_under_the_cursor() {
-        let mut selector = ready(many());
-        overview_ready(&mut selector);
-
-        press(&mut selector, "7G");
-        press(&mut selector, "za");
-        assert!(render_selector(&selector).contains("clippy"));
-
-        press(&mut selector, "za");
-        assert!(!render_selector(&selector).contains("clippy"));
+        assert!(rendered.contains("↵ toggle"));
     }
 
     /// The panel's cursor is a row of its own, which the frame follows.

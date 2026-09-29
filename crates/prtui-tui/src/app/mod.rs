@@ -239,6 +239,8 @@ struct SearchOrigin {
 enum Wanted {
     /// One run of hidden lines, by index into the open file's gaps.
     Gap(usize, Reveal),
+    /// One press on a run: a step off each end it can grow from.
+    Step(usize),
     /// Every run at once, which puts the whole file on screen.
     File,
 }
@@ -256,6 +258,12 @@ fn wanted_gaps(file: &ChangedFile, wanted: Wanted) -> Vec<(Gap, Reveal)> {
             .map(|gap| (*gap, reveal))
             .into_iter()
             .collect(),
+        Wanted::Step(index) => gaps.get(index).map_or_else(Vec::new, |gap| {
+            expand::step(gap, expand::STEP)
+                .into_iter()
+                .map(|reveal| (*gap, reveal))
+                .collect()
+        }),
         Wanted::File => gaps
             .into_iter()
             .rev()
@@ -977,6 +985,19 @@ impl App {
         };
 
         self.open_gaps(Wanted::Gap(gap, reveal));
+    }
+
+    /// Grows the run under the cursor from each end.
+    pub(super) fn expand_step(&mut self) {
+        let Some(gap) = self.gap_at_cursor() else {
+            return;
+        };
+
+        self.open_gaps(Wanted::Step(gap));
+    }
+
+    pub(super) fn is_on_gap(&self) -> bool {
+        self.gap_at_cursor().is_some()
     }
 
     /// Pulls in every run the open file's patch left out, which is the whole

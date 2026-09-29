@@ -166,6 +166,10 @@ impl<'a> View<'a> {
         self.app.gaps()
     }
 
+    pub fn is_on_gap(self) -> bool {
+        self.app.is_on_gap()
+    }
+
     pub fn live_query(self) -> Option<super::search::Query<'a>> {
         self.app.live_query()
     }
