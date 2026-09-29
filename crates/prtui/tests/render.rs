@@ -1631,7 +1631,7 @@ fn the_reference_lists_the_keys_over_the_panes() {
     let rendered = draw(&app);
     assert!(rendered.contains("HELP"), "{rendered}");
     assert!(rendered.contains("keys"), "{rendered}");
-    assert!(rendered.contains("motion"), "{rendered}");
+    assert!(rendered.contains("move"), "{rendered}");
     assert!(rendered.contains("move-down"), "{rendered}");
     assert!(rendered.contains("down one row"), "{rendered}");
     assert!(rendered.contains("esc close"), "{rendered}");
