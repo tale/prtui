@@ -2737,6 +2737,27 @@ fn commenting_on_a_focused_thread_replies_to_it() {
     assert_eq!(app.view().status, "reply posted");
 }
 
+/// Commenting under an open thread used to start a second thread beside it.
+#[test]
+fn commenting_on_a_thread_line_replies_without_focusing_the_card() {
+    let mut app = load();
+    let thread = park_on_unresolved_thread(&mut app);
+    assert_eq!(app.focused_thread(), None);
+
+    press(&mut app, "c");
+    replace_prompt(&mut app, "good catch");
+    act(&mut app, &Action::CommitComment);
+
+    assert!(app.view().drafts.is_empty());
+    assert_eq!(
+        app.take_requests(),
+        vec![Request::Reply {
+            in_reply_to: thread.reply_target().unwrap(),
+            body: "good catch".into(),
+        }]
+    );
+}
+
 #[test]
 fn resolving_toggles_the_focused_thread() {
     let mut app = load();
