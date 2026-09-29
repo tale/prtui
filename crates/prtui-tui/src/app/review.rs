@@ -3,6 +3,7 @@ use super::editor::CommentEditor;
 use super::effect::Effect;
 use super::{App, Card, Composer, Mode, Pane, Selection, Target};
 use crate::layout::Layout;
+use crate::layout::rows::ThreadState;
 use prtui_core::{NewThread, Parent, ReviewThread};
 use std::sync::Arc;
 
@@ -142,19 +143,16 @@ impl Failure {
 }
 
 impl App {
-    /// A focused thread takes a reply; anything else starts a fresh draft over
-    /// the cursor line or the visual selection. A focused draft of the reader's
-    /// own is not one of those: `c` composes and `e` revises, so a drafted line
-    /// still takes a second comment.
+    /// A focused thread, or an open one under the cursor line, takes a reply;
+    /// anything else starts a fresh draft over the cursor line or the visual
+    /// selection. A focused draft of the reader's own is not one of those: `c`
+    /// composes and `e` revises, so a drafted line still takes a second comment.
     pub(super) fn start_comment(&mut self, layout: &Layout) {
         if self.navigation.pane != Pane::Diff {
             return;
         }
 
-        if let Some(id) =
-            self.navigation.focused_card.as_ref().and_then(Card::thread)
-        {
-            let id = id.clone();
+        if let Some(id) = self.thread_to_answer(layout) {
             self.start_reply(&id, layout);
             return;
         }
@@ -274,6 +272,29 @@ impl App {
             Some(Composer::new(editor, target, draft.path.clone()));
         self.navigation.mode = Mode::Insert;
         self.scroll_into_view(layout, layout.viewport_once_docked());
+    }
+
+    /// A settled thread under the line is history, so only a focused one or
+    /// an open one is answered. A selection means a new span, not a reply.
+    fn thread_to_answer(&self, layout: &Layout) -> Option<Arc<str>> {
+        if let Some(card) = &self.navigation.focused_card {
+            return card.thread().cloned();
+        }
+        if self.navigation.selection.is_some() {
+            return None;
+        }
+
+        layout
+            .rows
+            .stops_at(self.navigation.cursor)
+            .iter()
+            .filter_map(|stop| stop.card.thread())
+            .find(|id| {
+                self.thread(id).is_some_and(|thread| {
+                    ThreadState::of(thread) == ThreadState::Open
+                })
+            })
+            .cloned()
     }
 
     fn start_reply(&mut self, id: &str, layout: &Layout) {
