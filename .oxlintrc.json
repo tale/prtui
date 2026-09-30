@@ -1,0 +1,10 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": [
+    "node_modules/**",
+    "target/**",
+    "docs/.vitepress/cache/**",
+    "docs/.vitepress/dist/**",
+    "crates/**/tests/fixtures/**"
+  ]
+}

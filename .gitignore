@@ -1,3 +1,7 @@
 /target
 /mutants.out*
 .DS_Store
+
+/node_modules/
+/docs/.vitepress/cache/
+/docs/.vitepress/dist/

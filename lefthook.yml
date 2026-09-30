@@ -1,6 +1,15 @@
 pre-commit:
   piped: true
   jobs:
+    - name: oxfmt
+      glob: "*.{js,jsx,mjs,cjs,ts,tsx,mts,cts,vue,json,jsonc,yml,yaml,css,scss,less,html,md,mdx,toml}"
+      run: pnpm exec oxfmt --write --no-error-on-unmatched-pattern {staged_files}
+      stage_fixed: true
+
+    - name: oxlint
+      glob: "*.{js,jsx,mjs,cjs,ts,tsx,mts,cts,vue}"
+      run: pnpm exec oxlint --deny-warnings --no-error-on-unmatched-pattern {staged_files}
+
     - name: fmt
       glob:
         - "*.rs"
