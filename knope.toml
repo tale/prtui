@@ -29,6 +29,10 @@ type = "CreateChangeFile"
 name = "release"
 
 [[workflows.steps]]
+type = "Command"
+command = "mise run check"
+
+[[workflows.steps]]
 type = "PrepareRelease"
 
 [[workflows.steps]]
@@ -37,3 +41,7 @@ command = "git commit -m 'chore: release $version' Cargo.toml Cargo.lock crates/
 
 [[workflows.steps]]
 type = "Release"
+
+[[workflows.steps]]
+type = "Command"
+command = "git push --atomic origin main refs/tags/v$version"

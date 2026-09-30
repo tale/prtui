@@ -23,3 +23,11 @@ run = "cargo clippy --all-targets --all-features -- -D warnings"
 description = "Everything CI runs"
 depends = ["lint"]
 run = ["cargo fmt --all -- --check", "cargo test --all-features"]
+
+[tasks.release]
+description = "Check, commit, tag, and publish a release from main"
+run = "knope release"
+
+[tasks."release:dry-run"]
+description = "Preview the release version and changelog without changing anything"
+run = "knope release --dry-run"
