@@ -21,7 +21,7 @@ jobs:
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     name: Determine release version
     outputs:
-      tag: ${{ steps.version.outputs.tag }}
+      artifact: ${{ steps.version.outputs.artifact }}
       version: ${{ steps.version.outputs.version }}
     runs-on: ubuntu-latest
     steps:
@@ -32,8 +32,8 @@ jobs:
         run: |
           manifest=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           if [ "$GITHUB_REF_TYPE" != tag ]; then
-            echo "tag=nightly" >> "$GITHUB_OUTPUT"
-            echo "version=$manifest-nightly.${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+            echo "artifact=prtui-main-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            echo "version=$manifest-dev.${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           version=${GITHUB_REF_NAME#v}
@@ -41,14 +41,14 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml $manifest" >&2
             exit 1
           fi
-          echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "artifact=prtui-$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.target }}
     needs: verify
     env:
-      PRTUI_TAG: ${{ needs.verify.outputs.tag }}
+      PRTUI_ARTIFACT: ${{ needs.verify.outputs.artifact }}
       PRTUI_VERSION: ${{ needs.verify.outputs.version }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -95,7 +95,7 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          name="prtui-${PRTUI_TAG}-${{ matrix.target }}"
+          name="${PRTUI_ARTIFACT}-${{ matrix.target }}"
           mkdir "$name"
           cp target/${{ matrix.target }}/release/prtui README.md LICENSE "$name"/
           tar czf "$name.tar.gz" "$name"
@@ -117,13 +117,14 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: prtui-${{ matrix.target }}
+          name: ${{ needs.verify.outputs.artifact }}-${{ matrix.target }}
           path: |
             *.tar.gz
             *.tar.gz.sha256
-          retention-days: 1
+          retention-days: 30
 
   release:
+    if: github.ref_type == 'tag'
     name: Publish the GitHub release
     needs: [verify, build]
     runs-on: ubuntu-latest
@@ -142,7 +143,6 @@ jobs:
       # knope wrote this section from the changesets; lifting it verbatim is
       # what keeps the release notes and the file the same words.
       - name: Lift the release notes out of the changelog
-        if: github.ref_type == 'tag'
         run: |
           version="${GITHUB_REF_NAME#v}"
           awk -v heading="## $version " '
@@ -156,7 +156,6 @@ jobs:
           fi
 
       - name: Create the release
-        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -165,22 +164,6 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes-file NOTES.md \
             artifacts/*
-
-      - name: Update nightly release
-        if: github.ref_type != 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          notes="Built from $GITHUB_SHA on main."
-          if ! gh release view nightly >/dev/null 2>&1; then
-            gh release create nightly --prerelease --latest=false \
-              --target "$GITHUB_SHA" --title Nightly --notes "$notes"
-          fi
-          gh release upload nightly artifacts/* --clobber
-          gh api --method PATCH "repos/$GH_REPO/git/refs/tags/nightly" \
-            -f sha="$GITHUB_SHA" -F force=true >/dev/null
-          gh release edit nightly --prerelease --latest=false --notes "$notes"
 
   # The tap regenerates its formula from whatever the newest release published,
   # so this has to follow `release` rather than `build`: dispatching earlier
