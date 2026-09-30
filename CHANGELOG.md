@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.1 (2026-09-30)
+
+### Features
+
+- The review diff can be narrowed to one commit, a range of commits, or the changes since your last review from the commit panel (`L`).
+- Scrolling past either end of a file in the diff continues into the next or previous file.
+- The PR overview now lists submitted reviews with their decision in chronological order.
+
+### Fixes
+
+- Key hints, the key reference, and status messages use the same name for each action on every screen.
+- UI components of the application now follow consistent styling throughout the review screen and PR list.
+- Branches, authors, dates, line counts, and unresolved thread counts are all formatted the same across the application.
+- Commenting (`c`) on a draft reopens it, and commenting from the file tree writes a file note.
+- The cursor stays visible on diff hunk headers and on range-selected commits in the commit panel.
+- The documentation site covers installation, review workflows, local diffs, keyboard shortcuts, and configuration.
+- Hidden lines in a diff can be expanded with the Enter key or `E` to expand the entire file.
+- Thread markers in the file tree, diff title, and status bar count only open threads, leaving out outdated ones, and folded directories without threads show no marker.
+- `:e`/`:reload` can refresh the data in the PR overview and review UI.
+- Commenting (`c`) on a line with an open thread replies to that thread.
+- Panel key hints appear only in the status bar, and the diff's status bar keeps its navigation hints while drafts are pending and shows visual mode hints when reviewing local changes.
+- The keybind reference panel groups keys by tasks, significantly simplifying the listing.
+- The file tree shows and hides with `:tree` instead of `f`.
+- Resolved GitHub review threads can be reopened with `R`.
+
 ## 0.4.0 (2026-09-16)
 
 ### Features
