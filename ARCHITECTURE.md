@@ -16,7 +16,7 @@ and every place that needed one worked around it locally instead, so the same
 logic now exists three times in three shapes. The defects below are all
 symptoms of that, not of careless code.
 
-### The load-bearing defect: render mutates — *resolved (A, B)*
+### The load-bearing defect: render mutates — _resolved (A, B)_
 
 `ui::draw(frame, app: &mut App)` takes the model mutably.
 `sync_expanded_thread_scroll` writes `app.thread_scroll_limit` and clamps
@@ -24,7 +24,7 @@ symptoms of that, not of careless code.
 so layout facts have to be smuggled back into the model to be usable next
 frame. Most of what follows hangs off this.
 
-### Layout is computed twice per frame — *resolved (A)*
+### Layout is computed twice per frame — _resolved (A)_
 
 `draw_diff` builds fully styled thread rows purely to measure their height,
 then builds them again to draw them. `sync_expanded_thread_scroll` renders a
@@ -36,14 +36,14 @@ in a comment:
 // slice 2, but a comment block can no longer push the cursor off screen.
 ```
 
-### `viewport_height` threaded through 42 call sites — *resolved (B)*
+### `viewport_height` threaded through 42 call sites — _resolved (B)_
 
 The model cannot act without layout facts, so an untyped `usize` follows every
 action down the call chain. `main.rs` independently hardcodes the chrome height
 as `area.height - 3`, duplicating knowledge that lives in `ui::draw`'s layout
 constraints.
 
-### Three effect channels, three shapes — *resolved (C)*
+### Three effect channels, three shapes — _resolved (C)_
 
 The old app exposed separate request, highlighting, and external-errand
 outboxes, while refetch-after-write was decided inside a `select!` arm.
@@ -54,14 +54,14 @@ Metadata reads are generation-tagged and limited to one in flight. A write
 marks the active generation stale; its completion is discarded and queues one
 new generation. The arbitration is unit-tested without the runtime.
 
-### `serde_json::Value` as the inter-layer transport — *resolved (D)*
+### `serde_json::Value` as the inter-layer transport — _resolved (D)_
 
 The old boundary handed fetch results back as `Value` for `main` to parse and
 stored pre-serialized draft JSON inside `Request`. `prtui-github::wire` now
 owns the derived response schemas and outbound field names; fetches return
 domain models and application requests carry typed draft data.
 
-### One traversal, three implementations — *resolved (A)*
+### One traversal, three implementations — _resolved (A)_
 
 "Which threads attach to which row, in what order" is written in
 `App::thread_rows`, `App::thread_ids_at_row`, and `ui::thread_rows_for_line` +
@@ -71,18 +71,18 @@ own.
 ### Smaller, same family
 
 - `App::travel` writes motion arithmetic four times over, five levels deep.
-  *Resolved (A): one `step(motion, current, len, viewport)` serves all four.*
+  _Resolved (A): one `step(motion, current, len, viewport)` serves all four._
 - `highlights: HashMap<usize, _>` is keyed by index into `files`;
   `finish(Sent::Review(n))` assumes the submitted drafts are the first `n`.
   Positional identity, correct only until the underlying list mutates.
 - `ui.rs` is four modules in one: layout, widgets, pure text measurement, and
   kitty placement math. `Theme` + `width` + `ThreadRenderState` pass by value
   into ~15 free functions, and `ThreadGroupContext` is a five-field bag rebuilt
-  at each call site — a widget struct asking to exist. *Partly resolved: layout
+  at each call site — a widget struct asking to exist. _Partly resolved: layout
   and measurement have moved out and both bags are gone; splitting what is left
-  into `view/` is step E.*
-- `App` exposes ~25 public fields and 64 public items. *Resolved: state is
-  private and grouped by review, navigation, prompt, and runtime concerns.*
+  into `view/` is step E._
+- `App` exposes ~25 public fields and 64 public items. _Resolved: state is
+  private and grouped by review, navigation, prompt, and runtime concerns._
 
 ## Rules
 
@@ -90,25 +90,25 @@ Five invariants. The tree follows from them; these are the actual contract.
 Each is tagged with the step that delivers it, so a rule that is still a target
 is not mistaken for one the code already keeps.
 
-1. **The view never mutates.** *(Live since A and B.)* Layout and rendering
+1. **The view never mutates.** _(Live since A and B.)_ Layout and rendering
    consume `app::View<'_>`, an explicit borrowed projection of `App`. Building
    it clones and allocates nothing, and the view cannot reach state that was
    not deliberately projected.
-2. **Layout is a value, computed once per frame.** *(Live since B.)*
+2. **Layout is a value, computed once per frame.** _(Live since B.)_
    `Layout::compute(area, app.view())` holds the pane rects, viewport heights,
    and the virtual row list. The loop computes it and hands the same value to
    both `apply` and `draw`. This is what removes the `viewport_height`
    parameter and the `- 3`.
-3. **One effect channel.** *(Live since C.)* `App::apply` queues an `Effect`;
+3. **One effect channel.** _(Live since C.)_ `App::apply` queues an `Effect`;
    every result arrives as one message; the loop is the only thing that spawns.
    Metadata requests carry a generation so a stale response drops instead of
    clobbering state.
-4. **Domain types at boundaries.** *(Live since D.)* `serde_json::Value` never
+4. **Domain types at boundaries.** _(Live since D.)_ `serde_json::Value` never
    leaves `prtui-github`; its `wire` module owns review schemas and
    serialization. The runtime is generic over `prtui_core::Provider`;
    host clients return `Meta` / `Vec<ChangedFile>` and serialize
    drafts at the edge, never inside `app`.
-5. **Grouped private state.** *(Live since E.)* `App` owns private review,
+5. **Grouped private state.** _(Live since E.)_ `App` owns private review,
    navigation, prompt, and runtime state. Callers inspect a borrowed `View` and
    change state only through actions, messages, and narrow ingestion methods.
 
@@ -174,7 +174,7 @@ offset when it slices, so a conversation collapsing under the cursor can never
 leave the viewport short — and clamping while reading keeps it out of the model.
 
 One honest wrinkle: `Layout::compute` runs before a keystroke is dispatched, so
-an action reads the row list the *previous* frame was drawn from. That is the
+an action reads the row list the _previous_ frame was drawn from. That is the
 same frame-behind relationship the old `viewport_height` had; the difference is
 that it is now a single named value the action and the renderer share, rather
 than an integer re-derived in two places.

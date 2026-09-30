@@ -1,0 +1,17 @@
+{
+  "scripts": {
+    "fmt": "oxfmt --write",
+    "fmt:check": "oxfmt --check",
+    "lint": "oxlint --deny-warnings",
+    "lint:fix": "oxlint --fix --deny-warnings",
+    "check": "pnpm fmt:check && pnpm lint",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  "devDependencies": {
+    "oxfmt": "^0.71.0",
+    "oxlint": "^1.86.0",
+    "vitepress": "2.0.0-alpha.20"
+  }
+}
