@@ -9,11 +9,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check:
+    name: Rust
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
