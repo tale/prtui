@@ -72,16 +72,20 @@ move to its end and press `Enter` to apply it.
 
 Press `:`, type a command, then `Enter`. `Esc` cancels. `↑` / `↓` recall commands.
 
-| Command          | Action                                |
-| ---------------- | ------------------------------------- |
-| `:tree`          | Show or hide the file tree            |
-| `:42` / `:$`     | Jump to line 42 / the last line       |
-| `:noh`           | Clear the search or filter            |
-| `:w` / `:submit` | Open the review form                  |
-| `:h` / `:help`   | Open the key reference                |
-| `:o` / `:open`   | Open the current context in a browser |
-| `:y` / `:yank`   | Copy a permalink                      |
-| `:q` / `:quit`   | Leave the review                      |
+| Command           | Action                                |
+| ----------------- | ------------------------------------- |
+| `:e` / `:refresh` | Reload the current data               |
+| `:tree`           | Show or hide the file tree            |
+| `:42` / `:$`      | Jump to line 42 / the last line       |
+| `:noh`            | Clear the search or filter            |
+| `:w` / `:submit`  | Open the review form                  |
+| `:h` / `:help`    | Open the key reference                |
+| `:o` / `:open`    | Open the current context in a browser |
+| `:y` / `:yank`    | Copy a permalink                      |
+| `:q` / `:quit`    | Leave the review                      |
 
 Named actions also work as commands, for example `:next-file`, `:overview`,
 `:commits`, and `:expand-file`.
+
+The dashboard refreshes whenever you return from a review. Use `:e` or
+`:refresh` on the dashboard, in a review, or in a local diff to reload data.

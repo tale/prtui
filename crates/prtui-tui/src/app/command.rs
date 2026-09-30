@@ -339,6 +339,12 @@ pub const COMMANDS: &[Command] = &[
         build: |_| Action::YankLink,
     },
     Command {
+        name: "refresh",
+        group: "prtui",
+        summary: "refresh current data (:e)",
+        build: |_| Action::Refresh,
+    },
+    Command {
         name: "command-line",
         group: "prtui",
         summary: "type a command, or a line to jump to",

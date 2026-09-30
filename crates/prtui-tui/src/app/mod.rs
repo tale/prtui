@@ -416,6 +416,7 @@ struct RuntimeState {
     loading_frame: usize,
     should_quit: bool,
     in_flight: usize,
+    is_refreshing: bool,
     effects: Vec<Effect>,
     loading: Loading,
 }
@@ -538,6 +539,32 @@ impl App {
         self.runtime.effects.push(Effect::FetchMeta { generation });
     }
 
+    fn refresh(&mut self) {
+        if self.runtime.is_refreshing || self.is_loading() {
+            self.runtime.status = "refresh already in progress".into();
+            return;
+        }
+        if self.runtime.in_flight != 0 {
+            self.runtime.status =
+                "wait for pending requests before refreshing".into();
+            return;
+        }
+
+        self.runtime.loading.clear_failure();
+        self.runtime.is_refreshing = true;
+        self.runtime.status = "refreshing…".into();
+        self.runtime.effects.push(Effect::FetchFiles);
+        if self.local_root.is_some() {
+            return;
+        }
+
+        if let Some(generation) = self.runtime.loading.request_meta() {
+            self.runtime.effects.push(Effect::FetchMeta { generation });
+        }
+        self.request_summary();
+        self.request_commits();
+    }
+
     /// The event loop is the only executor; all policy has already happened by
     /// the time it drains this list.
     pub fn take_effects(&mut self) -> Vec<Effect> {
@@ -554,13 +581,44 @@ impl App {
     /// Returns whether a visible value changed.
     pub fn receive(&mut self, message: Message) -> bool {
         match message {
+            Message::Local {
+                files,
+                blobs,
+                states,
+            } => {
+                self.local_files = states;
+                self.receive(Message::Files(Ok(files)));
+                self.blobs = blobs;
+                true
+            }
             Message::Files(outcome) => {
+                let is_refreshing =
+                    std::mem::take(&mut self.runtime.is_refreshing);
                 let pending_before = self.runtime.loading.pending();
 
                 match outcome {
                     Ok(files) => {
+                        let path = self.current_path().map(Arc::<str>::from);
                         self.set_files(files);
+                        if is_refreshing {
+                            let index = path
+                                .and_then(|path| {
+                                    self.shown_files()
+                                        .iter()
+                                        .position(|file| file.path == path)
+                                })
+                                .unwrap_or(0);
+                            self.navigation.selected_file = index;
+                            self.set_selected_file(index, false);
+                        }
+                        if is_refreshing && !self.is_status_alarming() {
+                            self.runtime.status = "diff refreshed".into();
+                        }
                         self.runtime.effects.push(Effect::HighlightAll);
+                    }
+                    Err(error) if is_refreshing => {
+                        self.runtime.status =
+                            format!("error: refreshing diff: {error}");
                     }
                     Err(error) => {
                         self.fail_files();
@@ -632,8 +690,16 @@ impl App {
             Message::Request(outcome) => {
                 let sent = outcome.as_ref().ok();
                 let needs_refetch = sent.is_some_and(Sent::needs_refetch);
+                let is_review = matches!(sent, Some(Sent::Review));
                 let invalidates = sent.is_some_and(Sent::invalidates_fetch);
+                if outcome.is_err() {
+                    self.runtime.should_quit = false;
+                }
                 self.finish(outcome);
+                if is_review {
+                    self.request_summary();
+                    self.request_commits();
+                }
 
                 if invalidates {
                     self.runtime.loading.invalidate_meta();
@@ -659,7 +725,7 @@ impl App {
     }
 
     pub const fn should_quit(&self) -> bool {
-        self.runtime.should_quit
+        self.runtime.should_quit && self.runtime.in_flight == 0
     }
 
     pub const fn take_failure(&mut self) -> Option<String> {
@@ -673,8 +739,9 @@ impl App {
         I: IntoIterator,
         I::Item: Into<Arc<ChangedFile>>,
     {
-        // A path that comes back with a new patch cannot keep its old colors.
         self.highlights.clear();
+        self.blobs.clear();
+        self.deferred = None;
         self.review.files = files.into_iter().map(Into::into).collect();
         self.runtime.loading.files = FilesState::Loaded;
         self.reseed_drafts();
@@ -1245,7 +1312,14 @@ impl App {
                 self.navigation.commit_anchor = None;
             }
             Action::OpenCommits => self.open_commits(layout),
-            Action::Quit => self.runtime.should_quit = true,
+            Action::Refresh => self.refresh(),
+            Action::Quit => {
+                self.runtime.should_quit = true;
+                if self.runtime.in_flight != 0 {
+                    self.runtime.status =
+                        "waiting for pending requests before leaving…".into();
+                }
+            }
             Action::TogglePane => self.toggle_pane(),
             Action::ToggleTree => {
                 self.navigation.is_files_visible =

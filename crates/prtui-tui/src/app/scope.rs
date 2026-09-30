@@ -101,6 +101,10 @@ impl App {
                 current_row(log, &self.review.pick, layout);
         }
 
+        self.request_commits();
+    }
+
+    pub(super) fn request_commits(&mut self) {
         self.review.commits_generation =
             self.review.commits_generation.wrapping_add(1);
         let generation = self.review.commits_generation;

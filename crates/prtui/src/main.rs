@@ -5,7 +5,6 @@ use prtui_core::{PullRequestTarget, Repo};
 use prtui_github::GitHub;
 use prtui_gitlab::GitLab;
 use prtui_tui::app::App;
-use prtui_tui::app::action::Action;
 use prtui_tui::app::effect::{Effect, Message as AppMessage};
 use prtui_tui::app::input::InputRouter;
 use prtui_tui::app::link::{Errand, Link};
@@ -642,10 +641,10 @@ async fn viewer_loop(
                                 && key.modifiers.contains(termina::event::Modifiers::CONTROL)
                             {
                                 exit = ReviewExit::Process;
-                                app.apply(&Action::Quit, &layout);
-                            } else {
-                                input.dispatch_key(&mut app, key, &layout);
+                                break;
                             }
+
+                            input.dispatch_key(&mut app, key, &layout);
                             is_dirty = true;
                         }
                     }

@@ -15,7 +15,9 @@ use std::{
     sync::Arc,
 };
 
-use crate::{ReviewExit, ThemeChoice, viewer_loop};
+use crate::{
+    AppMessage, Effect, Message, ReviewExit, ThemeChoice, viewer_loop,
+};
 
 struct Snapshot {
     root: PathBuf,
@@ -207,6 +209,7 @@ pub async fn run(choice: ThemeChoice) -> Result<()> {
         return Ok(());
     }
     let mut theme = Theme::for_mode(choice.resolve());
+    let root = snapshot.root.clone();
     let app = App::local(
         theme,
         snapshot.root.display().to_string(),
@@ -223,7 +226,33 @@ pub async fn run(choice: ThemeChoice) -> Result<()> {
             choice.follows_terminal(),
             app,
             ReviewExit::Process,
-            |effect, _, _| bail!("unexpected local diff effect: {effect:?}"),
+            move |effect, tx, _| {
+                if effect != Effect::FetchFiles {
+                    bail!("unexpected local diff effect: {effect:?}");
+                }
+
+                let root = root.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        Snapshot::load(&root)
+                    })
+                    .await;
+                    let message = match outcome {
+                        Ok(Ok(snapshot)) => AppMessage::Local {
+                            files: snapshot.files,
+                            blobs: snapshot.blobs,
+                            states: snapshot.states,
+                        },
+                        Ok(Err(error)) => {
+                            AppMessage::Files(Err(error.to_string()))
+                        }
+                        Err(error) => AppMessage::Files(Err(error.to_string())),
+                    };
+                    let _ = tx.send(Message::App(message));
+                });
+                Ok(())
+            },
         )
         .await?;
         Ok(())

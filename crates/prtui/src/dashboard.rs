@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 pub struct Dashboard<P: Provider> {
     selector: Selector,
+    repo: Option<Repo>,
     provider: P,
     tx: mpsc::UnboundedSender<Message>,
     rx: mpsc::UnboundedReceiver<Message>,
@@ -22,10 +23,10 @@ pub struct Dashboard<P: Provider> {
 impl<P: Provider> Dashboard<P> {
     pub fn new(repo: Option<Repo>, provider: P) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        spawn_listing(repo, provider, tx.clone());
 
         Self {
             selector: Selector::new(),
+            repo,
             provider,
             tx,
             rx,
@@ -40,6 +41,8 @@ impl<P: Provider> Dashboard<P> {
         follow_terminal: bool,
     ) -> Result<Option<PullRequestTarget>> {
         self.selector.resume();
+        let effect = self.selector.refresh();
+        self.execute(Some(effect));
         let mut animation = tokio::time::interval(Duration::from_millis(90));
         animation
             .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -103,8 +106,21 @@ impl<P: Provider> Dashboard<P> {
 
     fn execute(&self, effect: Option<Effect>) {
         match effect {
-            Some(Effect::FetchOverview(target)) => {
-                spawn_overview(target, self.provider, self.tx.clone());
+            Some(Effect::FetchListing(generation)) => {
+                spawn_listing(
+                    self.repo.clone(),
+                    self.provider,
+                    generation,
+                    self.tx.clone(),
+                );
+            }
+            Some(Effect::FetchOverview(generation, target)) => {
+                spawn_overview(
+                    target,
+                    self.provider,
+                    generation,
+                    self.tx.clone(),
+                );
             }
             Some(Effect::Open(target)) => {
                 let url =
@@ -121,6 +137,7 @@ impl<P: Provider> Dashboard<P> {
 fn spawn_listing<P: Provider>(
     repo: Option<Repo>,
     provider: P,
+    generation: u64,
     tx: mpsc::UnboundedSender<Message>,
 ) {
     tokio::spawn(async move {
@@ -130,13 +147,14 @@ fn spawn_listing<P: Provider>(
         }
         .map_err(|err| err.to_string());
 
-        let _ = tx.send(Message::Listed(listed));
+        let _ = tx.send(Message::Listed(generation, listed));
     });
 }
 
 fn spawn_overview<P: Provider>(
     target: Arc<PullRequestTarget>,
     provider: P,
+    generation: u64,
     tx: mpsc::UnboundedSender<Message>,
 ) {
     tokio::spawn(async move {
@@ -145,6 +163,6 @@ fn spawn_overview<P: Provider>(
             .await
             .map(Box::new)
             .map_err(|err| err.to_string());
-        let _ = tx.send(Message::Overview(target, overview));
+        let _ = tx.send(Message::Overview(generation, target, overview));
     });
 }

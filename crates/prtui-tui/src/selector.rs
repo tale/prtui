@@ -41,6 +41,10 @@ const KEYS: &[(&str, &str, &str)] = &[
     ("no", "<C-u>", "half-page-up"),
     ("no", "gg", "goto-first-line"),
     ("no", "G", "goto-last-line"),
+    ("no", ":", "command-line"),
+    ("c", "<CR>", "run-command-line"),
+    ("c", "<Esc>", "cancel-command-line"),
+    ("c", "<C-c>", "cancel-command-line"),
     ("n", "/", "find"),
     ("n", "K", "overview"),
     ("no", "gx", "open"),
@@ -64,9 +68,10 @@ const HEADER_ROWS: u16 = 2;
 /// Result of work the selector asked the runtime to execute.
 pub enum Message {
     /// A completed pull request listing.
-    Listed(Result<PullRequestList, String>),
+    Listed(u64, Result<PullRequestList, String>),
     /// A completed overview for the named pull request.
     Overview(
+        u64,
         Arc<PullRequestTarget>,
         Result<Box<PullRequestOverview>, String>,
     ),
@@ -76,8 +81,9 @@ pub enum Message {
 
 /// Work the selector delegates to the runtime.
 pub enum Effect {
+    FetchListing(u64),
     /// Fetch an overview for a pull request.
-    FetchOverview(Arc<PullRequestTarget>),
+    FetchOverview(u64, Arc<PullRequestTarget>),
     /// Open a pull request in the browser.
     Open(PullRequestTarget),
 }
@@ -137,6 +143,10 @@ pub struct Selector {
     /// The `/` line, which narrows the list on every keystroke rather than on
     /// the one that ends it.
     filter: String,
+    command_line: String,
+    listing_generation: u64,
+    overview_generation: u64,
+    is_refreshing: bool,
     /// The rows the filter leaves, as indices into the listing.
     visible: Vec<usize>,
     /// The row `/` was opened on, which cancelling puts back.
@@ -163,6 +173,10 @@ impl Selector {
             mode: Mode::Normal,
             keymap: Keymap::from_table(KEYS),
             filter: String::new(),
+            command_line: String::new(),
+            listing_generation: 0,
+            overview_generation: 0,
+            is_refreshing: false,
             visible: Vec::new(),
             snapshot: None,
             panel: None,
@@ -175,7 +189,8 @@ impl Selector {
 
     /// Whether a loading animation should advance.
     pub const fn is_waiting(&self) -> bool {
-        self.listing.is_loading()
+        self.is_refreshing
+            || self.listing.is_loading()
             || matches!(
                 self.panel,
                 Some(Panel {
@@ -238,15 +253,43 @@ impl Selector {
     pub fn receive(&mut self, message: Message, metrics: Metrics) {
         let viewport = metrics.viewport;
         match message {
-            Message::Listed(Ok(pull_requests)) => {
-                self.listing = Listing::Ready(pull_requests);
-                self.sync_visible(viewport);
+            Message::Listed(generation, outcome) => {
+                if generation != self.listing_generation {
+                    return;
+                }
+
+                self.is_refreshing = false;
+                match outcome {
+                    Ok(pull_requests) => {
+                        let target = self.target();
+                        self.listing = Listing::Ready(pull_requests);
+                        self.sync_visible(viewport);
+                        if let Some(target) = target {
+                            let row = self.listing.rows().and_then(|list| {
+                                list.items.iter().position(|item| {
+                                    item.target.number == target.number
+                                        && item.target.repo == target.repo
+                                })
+                            });
+                            if let Some(row) = row {
+                                self.land_on(row, viewport);
+                            }
+                        }
+                        self.status.clear();
+                    }
+                    Err(err) if self.listing.rows().is_some() => {
+                        self.status =
+                            format!("error: refreshing pull requests: {err}");
+                    }
+                    Err(err) => {
+                        self.listing = Listing::Failed(format!("error: {err}"));
+                    }
+                }
             }
-            Message::Listed(Err(err)) => {
-                self.listing = Listing::Failed(format!("error: {err}"));
-            }
-            Message::Overview(target, overview) => {
-                self.set_overview(&target, overview);
+            Message::Overview(generation, target, overview) => {
+                if generation == self.overview_generation {
+                    self.set_overview(&target, overview);
+                }
             }
             Message::Failed(error) => self.status = format!("error: {error}"),
         }
@@ -293,6 +336,39 @@ impl Selector {
     fn apply(&mut self, action: &Action, metrics: Metrics) -> Option<Effect> {
         let viewport = metrics.viewport;
         match action {
+            Action::Refresh => return Some(self.refresh()),
+            Action::StartCommandLine => {
+                self.command_line.clear();
+                self.set_mode(Mode::CommandLine);
+            }
+            Action::CancelCommandLine => {
+                self.set_mode(if self.panel.is_some() {
+                    Mode::Overview
+                } else {
+                    Mode::Normal
+                });
+            }
+            Action::RunCommandLine => {
+                self.set_mode(if self.panel.is_some() {
+                    Mode::Overview
+                } else {
+                    Mode::Normal
+                });
+                match crate::app::ex::parse(&self.command_line) {
+                    Ok(Some(
+                        action @ (Action::Refresh
+                        | Action::Quit
+                        | Action::OpenInBrowser),
+                    )) => {
+                        return self.apply(&action, metrics);
+                    }
+                    Ok(None) => {}
+                    Ok(Some(_)) => {
+                        self.status = "command unavailable on dashboard".into();
+                    }
+                    Err(error) => self.status = format!("error: {error}"),
+                }
+            }
             Action::Move(motion) => {
                 match self.panel.as_mut() {
                     Some(panel) => {
@@ -332,7 +408,11 @@ impl Selector {
                 self.sync_visible(viewport);
             }
             Action::OpenOverview => {
-                return self.open_panel().map(Effect::FetchOverview);
+                let target = self.open_panel()?;
+                return Some(Effect::FetchOverview(
+                    self.overview_generation,
+                    target,
+                ));
             }
             Action::OpenInBrowser => {
                 let target = self.target()?;
@@ -366,8 +446,22 @@ impl Selector {
         None
     }
 
-    /// Typing only ever reaches the `/` line: nothing else here takes text.
     fn type_key(&mut self, key: KeyEvent, viewport: usize) {
+        if self.mode == Mode::CommandLine {
+            match key.code {
+                KeyCode::Char(character)
+                    if !key.modifiers.contains(Modifiers::CONTROL) =>
+                {
+                    self.command_line.push(character);
+                }
+                KeyCode::Backspace => {
+                    self.command_line.pop();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.mode != Mode::Filter {
             return;
         }
@@ -399,6 +493,7 @@ impl Selector {
         let title = item.title.clone();
         let target = Arc::new(item.target.clone());
 
+        self.overview_generation = self.overview_generation.wrapping_add(1);
         self.panel = Some(Panel {
             target: Arc::clone(&target),
             title,
@@ -455,6 +550,24 @@ impl Selector {
         self.panel = None;
         self.status.clear();
         self.set_mode(Mode::Normal);
+    }
+
+    /// Reloads the open overview or the list, preserving its rows and filter.
+    pub fn refresh(&mut self) -> Effect {
+        if let Some(panel) = &mut self.panel {
+            self.overview_generation = self.overview_generation.wrapping_add(1);
+            panel.state = PanelState::Loading;
+            return Effect::FetchOverview(
+                self.overview_generation,
+                panel.target.clone(),
+            );
+        }
+
+        self.listing_generation = self.listing_generation.wrapping_add(1);
+        self.is_refreshing = true;
+        self.close_panel();
+        self.status = "refreshing…".into();
+        Effect::FetchListing(self.listing_generation)
     }
 
     /// Advances the loading animation by one frame.
@@ -780,6 +893,13 @@ fn draw_status(
     let bar = ui::bar_style(theme);
     let mut spans = vec![ui::mode_chip(selector.mode, theme)];
 
+    if selector.mode == Mode::CommandLine {
+        spans.push(Span::styled(
+            format!("  :{}", selector.command_line),
+            bar.fg(theme.heading),
+        ));
+    }
+
     if selector.mode == Mode::Filter {
         spans.push(Span::styled("  /", bar.fg(theme.purple)));
         spans
@@ -865,6 +985,10 @@ fn key_hints(
     selector: &Selector,
     metrics: Metrics,
 ) -> &'static [(&'static str, &'static str)] {
+    if selector.mode == Mode::CommandLine {
+        return &[("↵", "run"), ("esc", "cancel")];
+    }
+
     if selector.mode == Mode::Filter {
         return &[("↑↓", "move"), ("↵", "apply"), ("esc", "cancel")];
     }
@@ -903,6 +1027,7 @@ fn key_hints(
         ("↵", "review"),
         ("gx", "browser"),
         ("/", "filter"),
+        (":e", "refresh"),
         ("q", "quit"),
     ]
 }
@@ -1014,9 +1139,95 @@ mod tests {
     fn ready(pull_requests: PullRequestList) -> Selector {
         let mut selector = Selector::new();
         let metrics = frame_metrics(&selector);
-        selector.receive(Message::Listed(Ok(pull_requests)), metrics);
+        selector.receive(Message::Listed(0, Ok(pull_requests)), metrics);
 
         selector
+    }
+
+    #[test]
+    fn refresh_keeps_the_filter_and_selected_identity_and_ignores_old_results()
+    {
+        let mut selector = ready(many());
+        press(&mut selector, "/Change 2");
+        press_key(&mut selector, KeyCode::Enter, Modifiers::NONE);
+        press(&mut selector, "j");
+        let number = selector.target().unwrap().number;
+        press(&mut selector, ":e");
+        let metrics = frame_metrics(&selector);
+        let Some(Effect::FetchListing(first)) = selector
+            .press(KeyEvent::new(KeyCode::Enter, Modifiers::NONE), metrics)
+        else {
+            panic!("expected refresh");
+        };
+        let Effect::FetchListing(latest) = selector.refresh() else {
+            panic!("expected listing");
+        };
+        selector.receive(Message::Listed(first, Err("stale".into())), metrics);
+        assert!(selector.is_refreshing);
+        assert!(!selector.status.contains("stale"));
+
+        let mut listing = many();
+        listing.items.reverse();
+        selector.receive(Message::Listed(latest, Ok(listing)), metrics);
+        assert_eq!(selector.filter, "Change 2");
+        assert_eq!(selector.target().unwrap().number, number);
+        assert!(!selector.is_refreshing);
+    }
+
+    #[test]
+    fn refresh_failure_leaves_the_dashboard_usable_and_retry_can_empty_it() {
+        let mut selector = ready(many());
+        let metrics = frame_metrics(&selector);
+        let Effect::FetchListing(generation) = selector.refresh() else {
+            panic!("expected listing");
+        };
+        selector.receive(
+            Message::Listed(generation, Err("offline".into())),
+            metrics,
+        );
+        assert_eq!(selector.listing.len(), 40);
+        assert!(selector.status.contains("offline"));
+        let Effect::FetchListing(generation) = selector.refresh() else {
+            panic!("expected listing");
+        };
+        selector.receive(
+            Message::Listed(
+                generation,
+                Ok(list(PullRequestListScope::User, vec![])),
+            ),
+            metrics,
+        );
+        assert!(selector.target().is_none());
+        assert!(selector.status.is_empty());
+    }
+
+    #[test]
+    fn refreshing_an_overview_rejects_its_previous_response() {
+        let mut selector = ready(many());
+        let metrics = frame_metrics(&selector);
+        let Some(Effect::FetchOverview(first, target)) =
+            selector.apply(&Action::OpenOverview, metrics)
+        else {
+            panic!("expected overview");
+        };
+        let Effect::FetchOverview(latest, _) = selector.refresh() else {
+            panic!("expected overview refresh");
+        };
+        selector.receive(
+            Message::Overview(first, target.clone(), Err("stale".into())),
+            metrics,
+        );
+        assert!(matches!(
+            selector.panel.as_ref().unwrap().state,
+            PanelState::Loading
+        ));
+        selector.receive(
+            Message::Overview(latest, target, Err("current".into())),
+            metrics,
+        );
+        assert!(
+            matches!(&selector.panel.as_ref().unwrap().state, PanelState::Failed(error) if error.contains("current"))
+        );
     }
 
     fn many() -> PullRequestList {
@@ -1124,8 +1335,10 @@ mod tests {
     fn a_failed_listing_stays_on_screen() {
         let mut selector = Selector::new();
         let metrics = frame_metrics(&selector);
-        selector
-            .receive(Message::Listed(Err("gh pr list failed".into())), metrics);
+        selector.receive(
+            Message::Listed(0, Err("gh pr list failed".into())),
+            metrics,
+        );
 
         assert!(
             render_selector(&selector).contains("error: gh pr list failed")
@@ -1245,7 +1458,7 @@ mod tests {
         let mut selector = ready(many());
 
         press(&mut selector, "5G");
-        let Some(Effect::FetchOverview(asked)) =
+        let Some(Effect::FetchOverview(_, asked)) =
             selector.apply(&Action::OpenOverview, frame_metrics(&selector))
         else {
             panic!("K did not request a summary");
@@ -1301,7 +1514,7 @@ mod tests {
     }
 
     fn overview_ready(selector: &mut Selector) {
-        let Some(Effect::FetchOverview(target)) =
+        let Some(Effect::FetchOverview(generation, target)) =
             selector.apply(&Action::OpenOverview, frame_metrics(selector))
         else {
             panic!("K did not request a summary");
@@ -1320,7 +1533,7 @@ mod tests {
             reviews: Vec::new(),
         };
         selector.receive(
-            Message::Overview(target, Ok(Box::new(overview))),
+            Message::Overview(generation, target, Ok(Box::new(overview))),
             frame_metrics(selector),
         );
     }

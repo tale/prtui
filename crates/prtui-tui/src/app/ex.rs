@@ -5,6 +5,8 @@ use super::command::{self, Count};
 /// up in the command table under its own name, so `:next-comment` works
 /// without an entry here.
 const ALIASES: &[(&str, &str)] = &[
+    ("e", "refresh"),
+    ("edit", "refresh"),
     ("q", "quit"),
     ("q!", "quit"),
     ("qa", "quit"),
@@ -70,6 +72,9 @@ mod tests {
 
     #[test]
     fn a_name_is_looked_up_in_the_command_table() {
+        assert_eq!(run("e"), Ok(Some(Action::Refresh)));
+        assert_eq!(run("edit"), Ok(Some(Action::Refresh)));
+        assert_eq!(run("refresh"), Ok(Some(Action::Refresh)));
         assert_eq!(run("q"), Ok(Some(Action::Quit)));
         assert_eq!(run("w"), Ok(Some(Action::StartSubmit)));
         assert_eq!(run("submit"), Ok(Some(Action::StartSubmit)));

@@ -35,6 +35,11 @@ pub enum Effect {
 
 #[derive(Debug)]
 pub enum Message {
+    Local {
+        files: Vec<ChangedFile>,
+        blobs: std::collections::HashMap<Arc<str>, Arc<[String]>>,
+        states: std::collections::HashMap<Arc<str>, super::local::LocalFile>,
+    },
     Files(Result<Vec<ChangedFile>, String>),
     Meta {
         generation: u64,
@@ -178,6 +183,12 @@ impl Loading {
         self.is_meta_pending = false;
     }
 
+    pub fn clear_failure(&mut self) {
+        self.failure = None;
+        self.outage = None;
+        self.is_outage_probed = false;
+    }
+
     pub fn fail(&mut self, failure: String) -> bool {
         self.failure = Some(failure);
 
@@ -213,7 +224,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use prtui_core::PullRequest;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     fn meta(title: &str) -> Meta {
         Meta {
@@ -328,6 +339,119 @@ mod tests {
             is_viewed: true,
         })));
         assert!(app.take_effects().is_empty());
+    }
+
+    fn file(path: &str) -> ChangedFile {
+        ChangedFile {
+            path: path.into(),
+            previous_path: None,
+            status: "modified".into(),
+            additions: 0,
+            deletions: 0,
+            lines: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn refreshing_reloads_data_and_keeps_the_selected_file_after_reordering() {
+        let mut app = App::new();
+        app.start();
+        app.take_effects();
+        app.receive(Message::Files(Ok(vec![file("a"), file("b")])));
+        app.receive(Message::Meta {
+            generation: 1,
+            outcome: Ok(Box::new(meta("first"))),
+        });
+        app.set_selected_file(1, false);
+        app.take_effects();
+
+        app.refresh();
+        assert_eq!(
+            app.take_effects(),
+            [
+                Effect::FetchFiles,
+                Effect::FetchMeta { generation: 2 },
+                Effect::FetchSummary { generation: 1 },
+                Effect::FetchCommits { generation: 1 },
+            ]
+        );
+        app.refresh();
+        assert!(app.take_effects().is_empty());
+        assert_eq!(app.current_path(), Some("b"));
+
+        app.receive(Message::Files(Ok(vec![file("b"), file("a")])));
+        assert_eq!(app.current_path(), Some("b"));
+        app.refresh();
+        app.receive(Message::Files(Ok(vec![])));
+        assert_eq!(app.current_path(), None);
+    }
+
+    #[test]
+    fn a_failed_refresh_keeps_the_diff_and_allows_retrying() {
+        let mut app = App::new();
+        app.set_files(vec![file("a")]);
+        app.refresh();
+        app.take_effects();
+        app.receive(Message::Files(Err("offline".into())));
+        assert_eq!(app.current_path(), Some("a"));
+        assert!(app.view().status.contains("offline"));
+        assert!(app.take_failure().is_none());
+
+        app.refresh();
+        assert!(app.take_effects().contains(&Effect::FetchFiles));
+        app.receive(Message::Files(Ok(vec![file("b")])));
+        assert_eq!(app.current_path(), Some("b"));
+    }
+
+    #[test]
+    fn submitted_reviews_refresh_metadata_summary_and_commits() {
+        let mut app = App::new();
+        app.receive(Message::Request(Ok(Sent::Review)));
+        let effects = app.take_effects();
+        assert!(effects.contains(&Effect::FetchMeta { generation: 1 }));
+        assert!(effects.contains(&Effect::FetchSummary { generation: 1 }));
+        assert!(effects.contains(&Effect::FetchCommits { generation: 1 }));
+    }
+
+    #[test]
+    fn leaving_waits_for_the_write_and_a_failure_keeps_the_review_open() {
+        for is_success in [true, false] {
+            let mut app = App::new();
+            app.runtime.in_flight = 1;
+            let layout = crate::layout::Layout::compute(
+                ratatui::layout::Rect::new(0, 0, 100, 30),
+                app.view(),
+            );
+            app.apply(&crate::app::action::Action::Quit, &layout);
+            assert!(!app.should_quit());
+            app.receive(Message::Request(if is_success {
+                Ok(Sent::Review)
+            } else {
+                Err(Failure::Review("rejected".into()))
+            }));
+            assert_eq!(app.should_quit(), is_success);
+        }
+    }
+
+    #[test]
+    fn local_refresh_only_requests_a_new_snapshot() {
+        let mut app = App::local(
+            crate::renderer::Theme::dark(),
+            "/repo".into(),
+            vec![file("a")],
+            HashMap::default(),
+            HashMap::default(),
+        );
+        app.take_effects();
+        app.refresh();
+        assert_eq!(app.take_effects(), [Effect::FetchFiles]);
+        app.receive(Message::Local {
+            files: vec![file("b")],
+            blobs: HashMap::default(),
+            states: HashMap::default(),
+        });
+        assert_eq!(app.current_path(), Some("b"));
+        assert!(!app.runtime.is_refreshing);
     }
 
     #[test]

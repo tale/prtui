@@ -10,6 +10,7 @@ pub use crate::vim::Motion;
 /// editing stays inside the input router.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    Refresh,
     Move(Motion),
     /// Counts say how many stops to take. Every command that repeats carries
     /// one, so a count prefix means the same thing wherever it is typed.
