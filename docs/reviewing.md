@@ -1,6 +1,8 @@
 ---
 title: Review a pull request
 description: Navigate diffs, write comments, follow threads, and publish a review.
+ogImage: /og/commit-diffs.jpg
+ogImageAlt: prtui's commit picker showing the commits available to review
 ---
 
 # Review a pull request

@@ -1,6 +1,8 @@
 ---
 title: Review local changes
 description: Inspect staged, unstaged, and untracked changes before opening a pull request.
+ogImage: /og/local-diffs.jpg
+ogImageAlt: prtui displaying local file changes and their staging state
 ---
 
 # Review local changes
