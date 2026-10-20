@@ -165,7 +165,7 @@ pub fn build(
     rows.entries.push(None);
 
     for (index, commit) in log.commits.iter().enumerate() {
-        let date = commit.authored_at.get(..10).unwrap_or(&commit.authored_at);
+        let date = crate::datetime::format_local(&commit.authored_at);
         let byline = format!("  @{} · {date}", commit.author);
         let oid = format!("{} ", short(&commit.oid));
         let budget =

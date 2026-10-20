@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod commits;
+mod datetime;
 pub mod expand;
 pub mod highlighter;
 pub mod layout;

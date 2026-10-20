@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// Columns the labels are padded to, so the values line up under each other.
-const LABEL_WIDTH: usize = 10;
+const LABEL_WIDTH: usize = 17;
 
 /// Columns a named reviewer is padded to before their verdict.
 const NAME_WIDTH: usize = 28;
@@ -81,9 +81,9 @@ pub fn build(
         row("  ", "changes", changes(summary, theme), theme),
         row(
             "  ",
-            "updated",
+            "updated (local)",
             vec![Span::styled(
-                summary.updated_on.clone(),
+                crate::datetime::format_local(&summary.updated_on),
                 Style::default().fg(theme.muted),
             )],
             theme,

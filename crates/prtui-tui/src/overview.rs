@@ -167,7 +167,7 @@ fn comment_header(
     theme: Theme,
 ) -> Line<'static> {
     let marker = if is_open { "▾ " } else { "▸ " };
-    let date = comment.created_at.get(..10).unwrap_or(&comment.created_at);
+    let date = crate::datetime::format_local(&comment.created_at);
     let mut spans = vec![
         Span::styled(
             marker,
@@ -203,10 +203,7 @@ fn review_header(
         (false, true) => "▾ ",
         (false, false) => "▸ ",
     };
-    let date = review
-        .submitted_at
-        .get(..10)
-        .unwrap_or(&review.submitted_at);
+    let date = crate::datetime::format_local(&review.submitted_at);
     let color = summary::verdict_color(review.verdict, theme);
     let mut spans = vec![
         Span::styled(
@@ -387,9 +384,15 @@ mod tests {
             Theme::dark(),
         );
 
-        let first = row_of(&rows, "2026-09-02");
+        let first = row_of(
+            &rows,
+            &crate::datetime::format_local("2026-09-02T10:00:00Z"),
+        );
         let middle = row_of(&rows, "@alice ·");
-        let last = row_of(&rows, "2026-09-04");
+        let last = row_of(
+            &rows,
+            &crate::datetime::format_local("2026-09-04T10:00:00Z"),
+        );
 
         assert!(first < middle && middle < last);
         assert!(rows.lines[first].to_string().contains("changes requested"));
@@ -407,8 +410,20 @@ mod tests {
         let rows =
             build(&summary(), "why", &[], &reviews, &state, 60, Theme::dark());
 
-        assert!(rows.fold_at(row_of(&rows, "2026-09-02")).is_none());
-        assert!(rows.fold_at(row_of(&rows, "2026-09-04")).is_some());
+        assert!(
+            rows.fold_at(row_of(
+                &rows,
+                &crate::datetime::format_local("2026-09-02T10:00:00Z")
+            ))
+            .is_none()
+        );
+        assert!(
+            rows.fold_at(row_of(
+                &rows,
+                &crate::datetime::format_local("2026-09-04T10:00:00Z")
+            ))
+            .is_some()
+        );
         assert!(
             rows.lines
                 .iter()

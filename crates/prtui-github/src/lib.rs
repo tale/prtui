@@ -754,7 +754,7 @@ fn parse_summary(val: &serde_json::Value) -> Result<Summary> {
         additions: pr.additions,
         deletions: pr.deletions,
         changed_files: pr.changed_files,
-        updated_on: pr.updated_at.get(..10).unwrap_or_default().to_owned(),
+        updated_on: pr.updated_at,
         comments: pr.comments.total_count,
         checks,
         reviewers: read_reviewers(
@@ -2225,7 +2225,7 @@ mod tests {
         let summary = parse_summary(&val).unwrap();
 
         assert_eq!(summary.author, "tale");
-        assert_eq!(summary.updated_on, "2026-08-28");
+        assert_eq!(summary.updated_on, "2026-08-28T20:04:55Z");
 
         // Failing first, then running, then the rest by name.
         let checks: Vec<(&str, CheckState)> = summary

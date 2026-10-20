@@ -953,7 +953,7 @@ fn comment_header(
         return Vec::new();
     };
 
-    let date = comment.created_at.get(..10).unwrap_or(&comment.created_at);
+    let date = crate::datetime::format_local(&comment.created_at);
     let mut header = if comment_index == 0 {
         format!("@{}", comment.author)
     } else {
@@ -962,7 +962,7 @@ fn comment_header(
 
     if !date.is_empty() {
         header.push_str(" · ");
-        header.push_str(date);
+        header.push_str(&date);
     }
     if continued {
         header.push_str(" · continued");
