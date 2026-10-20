@@ -20,7 +20,7 @@ async fn read_live_merge_request() -> Result<()> {
     let files = GitLab.fetch_files(&repo, number).await?;
     let meta = GitLab.fetch_meta(&repo, number).await?;
     let overview = GitLab.fetch_overview(&repo, number).await?;
-    let listing = GitLab.repository_pull_requests(repo.clone()).await?;
+    let listing = GitLab.repository_pull_requests(repo.clone(), true).await?;
     let listed = listing
         .items
         .iter()
@@ -30,7 +30,7 @@ async fn read_live_merge_request() -> Result<()> {
     if std::env::var("GITLAB_HOST").as_deref()
         == Ok(prtui_gitlab::host_of(&repo))
     {
-        let authored = GitLab.user_pull_requests().await?;
+        let authored = GitLab.user_pull_requests(true).await?;
         let authored_item = authored
             .items
             .iter()

@@ -408,7 +408,10 @@ pub struct PullRequestTarget {
 }
 
 /// One row in a provider-produced pull request listing.
+#[derive(Clone)]
 pub struct PullRequestListItem {
+    /// Provider ID used to fetch details without listing the repository again.
+    pub id: Arc<str>,
     /// Repository and number opened by this row.
     pub target: PullRequestTarget,
     /// Pull request title.
@@ -465,7 +468,10 @@ impl PullRequestList {
 }
 
 /// Provider-normalized review state for a pull request row.
+#[derive(Clone)]
 pub enum ReviewStatus {
+    /// Review details have not loaded yet.
+    Loading,
     /// Pull request is still a draft.
     Draft,
     /// A reviewer requested changes.

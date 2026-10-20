@@ -674,12 +674,23 @@ impl Provider for GitLab {
     async fn repository_pull_requests(
         self,
         repo: Repo,
+        include_details: bool,
     ) -> Result<PullRequestList> {
-        listing::repository_pull_requests(repo).await
+        listing::repository_pull_requests(repo, include_details).await
     }
 
-    async fn user_pull_requests(self) -> Result<PullRequestList> {
-        listing::user_pull_requests().await
+    async fn user_pull_requests(
+        self,
+        include_details: bool,
+    ) -> Result<PullRequestList> {
+        listing::user_pull_requests(include_details).await
+    }
+
+    async fn fetch_listing_details(
+        self,
+        items: Vec<prtui_core::PullRequestListItem>,
+    ) -> Result<Vec<prtui_core::PullRequestListItem>> {
+        listing::fetch_listing_details(items).await
     }
 
     async fn fetch_summary(self, repo: &Repo, number: u32) -> Result<Summary> {

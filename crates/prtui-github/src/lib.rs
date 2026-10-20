@@ -267,6 +267,19 @@ query($owner:String!, $repo:String!, $number:Int!, $includeProse:Boolean!) {
 }
 ";
 
+const LISTING_ROW_FRAGMENT: &str = r"
+fragment ListingRow on PullRequest {
+  id number title isDraft updatedAt
+  author { login }
+}
+";
+
+const LISTING_DETAILS_FRAGMENT: &str = r"
+fragment ListingDetails on PullRequest {
+  reviewDecision additions deletions
+}
+";
+
 const REPOSITORY_PULL_REQUESTS_QUERY: &str = r"
 query($owner:String!, $repo:String!) {
   repository(owner:$owner, name:$repo) {
@@ -276,8 +289,7 @@ query($owner:String!, $repo:String!) {
       orderBy:{field:UPDATED_AT,direction:DESC}
     ) {
       nodes {
-        number title isDraft reviewDecision updatedAt additions deletions
-        author { login }
+        ...ListingRow
       }
     }
   }
@@ -294,8 +306,7 @@ query($endCursor:String) {
       orderBy:{field:UPDATED_AT,direction:DESC}
     ) {
       nodes {
-        number title isDraft reviewDecision updatedAt additions deletions
-        author { login }
+        ...ListingRow
         repository { nameWithOwner }
       }
       pageInfo { hasNextPage endCursor }
@@ -405,14 +416,16 @@ enum ReviewDecision {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WirePullRequest {
+    #[serde(default)]
+    id: String,
     number: u32,
     title: String,
     author: Option<WireLogin>,
     is_draft: bool,
     updated_at: String,
-    additions: u32,
-    deletions: u32,
-    #[serde(deserialize_with = "deserialize_cli_review_decision")]
+    additions: Option<u32>,
+    deletions: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_cli_review_decision")]
     review_decision: Option<ReviewDecision>,
 }
 
@@ -813,20 +826,24 @@ const fn review_status(
 impl WirePullRequest {
     fn into_item(self, repo: Arc<Repo>) -> PullRequestListItem {
         PullRequestListItem {
+            id: self.id.into(),
             target: prtui_core::PullRequestTarget {
                 repo,
                 number: self.number,
             },
             title: self.title,
             author: self.author.map(|author| author.login).unwrap_or_default(),
-            review_status: review_status(
-                self.is_draft,
-                self.review_decision.as_ref(),
+            review_status: if !self.is_draft && self.additions.is_none() {
+                ReviewStatus::Loading
+            } else {
+                review_status(self.is_draft, self.review_decision.as_ref())
+            },
+            changes: self.additions.zip(self.deletions).map(
+                |(additions, deletions)| Changes {
+                    additions,
+                    deletions,
+                },
             ),
-            changes: Some(Changes {
-                additions: self.additions,
-                deletions: self.deletions,
-            }),
         }
     }
 }
@@ -1496,7 +1513,122 @@ async fn fetch_outage(repo: &Repo) -> Option<String> {
     .ok()?
 }
 
-async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
+const LISTING_BATCH_SIZE: usize = 20;
+const LISTING_CONCURRENCY: usize = 4;
+
+fn complete_listing(
+    url: &str,
+    token: &str,
+    nodes: &mut serde_json::Value,
+) -> Result<()> {
+    let nodes = nodes.as_array_mut().context("missing pull request rows")?;
+    let query = format!(
+        "query($ids:[ID!]!) {{ nodes(ids:$ids) {{ ... on PullRequest {{ id ...ListingDetails }} }} }}\n{LISTING_DETAILS_FRAGMENT}"
+    );
+
+    for group in nodes.chunks_mut(LISTING_BATCH_SIZE * LISTING_CONCURRENCY) {
+        std::thread::scope(|scope| -> Result<()> {
+            let tasks: Vec<_> = group
+                .chunks_mut(LISTING_BATCH_SIZE)
+                .map(|batch| {
+                    let query = &query;
+                    scope.spawn(move || -> Result<()> {
+                        let ids: Vec<_> = batch
+                            .iter()
+                            .map(|row| {
+                                row["id"]
+                                    .as_str()
+                                    .context("missing pull request ID")
+                            })
+                            .collect::<Result<_>>()?;
+                        let details = graphql(
+                            url,
+                            Some(token),
+                            query,
+                            &serde_json::json!({"ids": ids}),
+                            "fetching pull request list details",
+                            Retry::Transient,
+                        )?;
+                        merge_listing_details(batch, &details["data"]["nodes"])
+                    })
+                })
+                .collect();
+            for task in tasks {
+                task.join().map_err(|_| {
+                    anyhow::anyhow!("listing details task panicked")
+                })??;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+fn merge_listing_details(
+    rows: &mut [serde_json::Value],
+    details: &serde_json::Value,
+) -> Result<()> {
+    let details = details.as_array().context("missing listing details")?;
+    for row in rows {
+        let id = row["id"].as_str().context("missing pull request ID")?;
+        let detail = details
+            .iter()
+            .find(|detail| detail["id"].as_str() == Some(id))
+            .context("pull request details unavailable")?;
+        for field in ["reviewDecision", "additions", "deletions"] {
+            row[field] = detail
+                .get(field)
+                .with_context(|| format!("missing listing detail: {field}"))?
+                .clone();
+        }
+    }
+    Ok(())
+}
+
+async fn fetch_listing_details(
+    mut items: Vec<PullRequestListItem>,
+) -> Result<Vec<PullRequestListItem>> {
+    let Some(first) = items.first() else {
+        return Ok(items);
+    };
+    let token = write_token(&first.target.repo).await?;
+    let url = graphql_url(&first.target.repo);
+    if items
+        .iter()
+        .any(|item| graphql_url(&item.target.repo) != url)
+    {
+        bail!("listing detail batch crosses GitHub hosts");
+    }
+    let mut rows = serde_json::Value::Array(
+        items
+            .iter()
+            .map(|item| serde_json::json!({"id": item.id.as_ref()}))
+            .collect(),
+    );
+    tokio::task::spawn_blocking(move || {
+        complete_listing(&url, &token, &mut rows)?;
+        for (item, row) in items.iter_mut().zip(rows.as_array().unwrap()) {
+            let decision =
+                deserialize_cli_review_decision(&row["reviewDecision"])?;
+            item.review_status = review_status(
+                matches!(item.review_status, ReviewStatus::Draft),
+                decision.as_ref(),
+            );
+            item.changes = Some(Changes {
+                additions: serde_json::from_value(row["additions"].clone())?,
+                deletions: serde_json::from_value(row["deletions"].clone())?,
+            });
+        }
+        Ok(items)
+    })
+    .await
+    .context("listing detail fetch panicked")?
+}
+
+async fn repository_pull_requests(
+    repo: Repo,
+    include_details: bool,
+) -> Result<PullRequestList> {
     let token = write_token(&repo).await?;
     let url = graphql_url(&repo);
     let variables = serde_json::json!({
@@ -1505,15 +1637,20 @@ async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
     });
 
     tokio::task::spawn_blocking(move || {
-        let value = graphql(
+        let mut value = graphql(
             &url,
             Some(&token),
-            REPOSITORY_PULL_REQUESTS_QUERY,
+            &format!(
+                "{REPOSITORY_PULL_REQUESTS_QUERY}\n{LISTING_ROW_FRAGMENT}"
+            ),
             &variables,
             "listing repository pull requests",
             Retry::Transient,
         )?;
-        let nodes = &value["data"]["repository"]["pullRequests"]["nodes"];
+        let nodes = &mut value["data"]["repository"]["pullRequests"]["nodes"];
+        if include_details {
+            complete_listing(&url, &token, nodes)?;
+        }
 
         parse_repository_pull_requests(repo, &serde_json::to_vec(nodes)?)
     })
@@ -1579,7 +1716,7 @@ async fn fetch_overview(
     .context("overview fetch panicked")?
 }
 
-async fn user_pull_requests() -> Result<PullRequestList> {
+async fn user_pull_requests(include_details: bool) -> Result<PullRequestList> {
     let host = std::env::var("GH_HOST")
         .ok()
         .filter(|host| !host.is_empty());
@@ -1595,7 +1732,7 @@ async fn user_pull_requests() -> Result<PullRequestList> {
         let mut value = graphql(
             &url,
             Some(&token),
-            USER_PULL_REQUESTS_QUERY,
+            &format!("{USER_PULL_REQUESTS_QUERY}\n{LISTING_ROW_FRAGMENT}"),
             &serde_json::json!({}),
             "listing user pull requests",
             Retry::Transient,
@@ -1604,7 +1741,7 @@ async fn user_pull_requests() -> Result<PullRequestList> {
             let mut page = graphql(
                 &url,
                 Some(&token),
-                USER_PULL_REQUESTS_QUERY,
+                &format!("{USER_PULL_REQUESTS_QUERY}\n{LISTING_ROW_FRAGMENT}"),
                 &serde_json::json!({"endCursor": cursor}),
                 "listing more user pull requests",
                 Retry::Transient,
@@ -1612,6 +1749,13 @@ async fn user_pull_requests() -> Result<PullRequestList> {
 
             Ok(page["data"]["viewer"]["pullRequests"].take())
         })?;
+        if include_details {
+            complete_listing(
+                &url,
+                &token,
+                &mut value["data"]["viewer"]["pullRequests"]["nodes"],
+            )?;
+        }
         let mut list =
             parse_user_pull_requests(&serde_json::to_vec(&[value])?)?;
         for item in &mut list.items {
@@ -1667,12 +1811,23 @@ impl Provider for GitHub {
     async fn repository_pull_requests(
         self,
         repo: Repo,
+        include_details: bool,
     ) -> Result<PullRequestList> {
-        repository_pull_requests(repo).await
+        repository_pull_requests(repo, include_details).await
     }
 
-    async fn user_pull_requests(self) -> Result<PullRequestList> {
-        user_pull_requests().await
+    async fn user_pull_requests(
+        self,
+        include_details: bool,
+    ) -> Result<PullRequestList> {
+        user_pull_requests(include_details).await
+    }
+
+    async fn fetch_listing_details(
+        self,
+        items: Vec<PullRequestListItem>,
+    ) -> Result<Vec<PullRequestListItem>> {
+        fetch_listing_details(items).await
     }
 
     async fn fetch_summary(self, repo: &Repo, number: u32) -> Result<Summary> {
@@ -2211,6 +2366,58 @@ mod tests {
         assert_eq!(summary.threads.unresolved, 100);
         assert_eq!(summary.threads.total, 140);
         assert!(summary.threads.is_truncated);
+    }
+
+    #[test]
+    fn listing_details_match_ids_without_changing_row_order() {
+        let mut rows = vec![
+            serde_json::json!({"id":"a", "title":"First"}),
+            serde_json::json!({"id":"b", "title":"Second"}),
+        ];
+        let details = serde_json::json!([
+            {"id":"b", "reviewDecision":null, "additions":0, "deletions":0},
+            {"id":"a", "reviewDecision":"APPROVED", "additions":4, "deletions":2},
+        ]);
+        merge_listing_details(&mut rows, &details).unwrap();
+        assert_eq!(rows[0]["title"], "First");
+        assert_eq!(rows[0]["reviewDecision"], "APPROVED");
+        assert_eq!(rows[0]["additions"], 4);
+        assert_eq!(rows[1]["title"], "Second");
+        assert!(rows[1]["reviewDecision"].is_null());
+        assert_eq!(rows[1]["additions"], 0);
+    }
+
+    #[test]
+    fn incomplete_listing_details_fail_instead_of_inventing_values() {
+        for details in [
+            serde_json::Value::Null,
+            serde_json::json!([null]),
+            serde_json::json!([{"id":"other"}]),
+            serde_json::json!([{"id":"a", "reviewDecision":null}]),
+        ] {
+            let mut rows = vec![serde_json::json!({"id":"a"})];
+            assert!(merge_listing_details(&mut rows, &details).is_err());
+        }
+    }
+
+    #[test]
+    fn lightweight_rows_do_not_invent_review_decisions_or_zero_counts() {
+        let listing = parse_repository_pull_requests(
+            parse_repo("owner/repo").unwrap(),
+            br#"[
+                {"number":1,"title":"Ready","isDraft":false,"updatedAt":"2026-10-19"},
+                {"number":2,"title":"Draft","isDraft":true,"updatedAt":"2026-10-19"}
+            ]"#,
+        ).unwrap();
+        assert!(matches!(
+            listing.items[0].review_status,
+            ReviewStatus::Loading
+        ));
+        assert!(matches!(
+            listing.items[1].review_status,
+            ReviewStatus::Draft
+        ));
+        assert!(listing.items.iter().all(|item| item.changes.is_none()));
     }
 
     #[test]

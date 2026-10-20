@@ -6,12 +6,13 @@ use prtui_core::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use crate::{DEFAULT_HOST, PAGE_SIZE, host_of, transport, wire::WireUser};
 
 const REPOSITORY_QUERY: &str = r"
-query($path: ID!, $first: Int!, $after: String) {
+query($path: ID!, $first: Int!, $after: String, $includeDetails: Boolean!) {
   scope: project(fullPath: $path) {
     mergeRequests(state: opened, sort: UPDATED_DESC, first: $first, after: $after) {
       ...Listing
@@ -20,7 +21,7 @@ query($path: ID!, $first: Int!, $after: String) {
 }";
 
 const USER_QUERY: &str = r"
-query($first: Int!, $after: String) {
+query($first: Int!, $after: String, $includeDetails: Boolean!) {
   scope: currentUser {
     mergeRequests: authoredMergeRequests(state: opened, sort: UPDATED_DESC, first: $first, after: $after) {
       ...Listing
@@ -31,13 +32,18 @@ query($first: Int!, $after: String) {
 const LISTING: &str = r"
 fragment Listing on MergeRequestConnection {
   nodes {
-    iid title draft
+    id iid title draft
     author { username name }
-    reviewers(first: 1) { nodes { username } }
-    diffStatsSummary { additions deletions }
+    ...ListingDetails @include(if: $includeDetails)
     targetProject { fullPath }
   }
   pageInfo { hasNextPage endCursor }
+}";
+
+const LISTING_DETAILS: &str = r"
+fragment ListingDetails on MergeRequest {
+  reviewers(first: 1) { nodes { username } }
+  diffStatsSummary { additions deletions }
 }";
 
 #[derive(Deserialize)]
@@ -57,11 +63,13 @@ struct PageInfo {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MergeRequest {
+    #[serde(default)]
+    id: String,
     iid: String,
     title: String,
     draft: bool,
     author: Option<WireUser>,
-    reviewers: Reviewers,
+    reviewers: Option<Reviewers>,
     diff_stats_summary: Option<DiffStats>,
     target_project: Project,
 }
@@ -83,17 +91,35 @@ struct Project {
     full_path: String,
 }
 
+const fn review_status(
+    is_draft: bool,
+    reviewers: Option<&Reviewers>,
+) -> ReviewStatus {
+    if is_draft {
+        return ReviewStatus::Draft;
+    }
+    match reviewers {
+        None => ReviewStatus::Loading,
+        Some(reviewers) if reviewers.nodes.is_empty() => {
+            ReviewStatus::NoDecision
+        }
+        Some(_) => ReviewStatus::ReviewRequired,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Details {
+    reviewers: Reviewers,
+    diff_stats_summary: Option<DiffStats>,
+}
+
 impl MergeRequest {
     fn into_item(self, repo: Arc<Repo>) -> Result<PullRequestListItem> {
-        let review_status = if self.draft {
-            ReviewStatus::Draft
-        } else if self.reviewers.nodes.is_empty() {
-            ReviewStatus::NoDecision
-        } else {
-            ReviewStatus::ReviewRequired
-        };
+        let review_status = review_status(self.draft, self.reviewers.as_ref());
 
         Ok(PullRequestListItem {
+            id: self.id.into(),
             target: PullRequestTarget {
                 repo,
                 number: self
@@ -116,9 +142,61 @@ impl MergeRequest {
     }
 }
 
-pub async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
-    let variables =
-        json!({ "path": format!("{}/{}", repo.namespace, repo.name) });
+pub async fn fetch_listing_details(
+    mut items: Vec<PullRequestListItem>,
+) -> Result<Vec<PullRequestListItem>> {
+    let Some(first) = items.first() else {
+        return Ok(items);
+    };
+    let host = host_of(&first.target.repo).to_owned();
+    if items.iter().any(|item| host_of(&item.target.repo) != host) {
+        bail!("listing detail batch crosses GitLab hosts");
+    }
+    let token = transport::token(&host).await;
+    let url = format!("https://{host}/api/graphql");
+    let mut query = String::from("query {");
+    for (index, item) in items.iter().enumerate() {
+        let repo = &item.target.repo;
+        let path = serde_json::to_string(&format!(
+            "{}/{}",
+            repo.namespace, repo.name
+        ))?;
+        let number = item.target.number;
+        write!(
+            query,
+            "r{index}: project(fullPath:{path}) {{ mergeRequest(iid:\"{number}\") {{ ...ListingDetails }} }}"
+        )?;
+    }
+    query.push('}');
+    query.push_str(LISTING_DETAILS);
+    tokio::task::spawn_blocking(move || {
+        let mut value =
+            transport::graphql(&url, token.as_deref(), &query, &json!({}))?;
+        for (index, item) in items.iter_mut().enumerate() {
+            let details: Details = serde_json::from_value(
+                value["data"][format!("r{index}")]["mergeRequest"].take(),
+            )
+            .context("invalid merge request details")?;
+            item.review_status = review_status(
+                matches!(item.review_status, ReviewStatus::Draft),
+                Some(&details.reviewers),
+            );
+            item.changes = details.diff_stats_summary.map(|stats| Changes {
+                additions: stats.additions,
+                deletions: stats.deletions,
+            });
+        }
+        Ok(items)
+    })
+    .await
+    .context("listing detail fetch failed")?
+}
+
+pub async fn repository_pull_requests(
+    repo: Repo,
+    include_details: bool,
+) -> Result<PullRequestList> {
+    let variables = json!({ "path": format!("{}/{}", repo.namespace, repo.name), "includeDetails": include_details });
     let requests = fetch(host_of(&repo), REPOSITORY_QUERY, variables).await?;
     let repo = Arc::new(repo);
     let items = requests
@@ -132,12 +210,19 @@ pub async fn repository_pull_requests(repo: Repo) -> Result<PullRequestList> {
     })
 }
 
-pub async fn user_pull_requests() -> Result<PullRequestList> {
+pub async fn user_pull_requests(
+    include_details: bool,
+) -> Result<PullRequestList> {
     let host = std::env::var("GITLAB_HOST")
         .ok()
         .filter(|host| !host.is_empty())
         .unwrap_or_else(|| DEFAULT_HOST.to_owned());
-    let requests = fetch(&host, USER_QUERY, json!({})).await?;
+    let requests = fetch(
+        &host,
+        USER_QUERY,
+        json!({"includeDetails": include_details}),
+    )
+    .await?;
     let items = requests
         .into_iter()
         .map(|mr| {
@@ -186,7 +271,7 @@ fn read_all(
     query: &str,
     mut variables: Value,
 ) -> Result<Vec<MergeRequest>> {
-    let query = format!("{query}\n{LISTING}");
+    let query = format!("{query}\n{LISTING}\n{LISTING_DETAILS}");
     variables["first"] = json!(PAGE_SIZE);
     variables["after"] = Value::Null;
     let mut items = Vec::new();
@@ -342,6 +427,19 @@ mod tests {
     }
 
     #[test]
+    fn lightweight_rows_leave_review_status_and_counts_unloaded() {
+        let mut value = merge_request();
+        value.as_object_mut().unwrap().remove("reviewers");
+        value.as_object_mut().unwrap().remove("diffStatsSummary");
+        let item = serde_json::from_value::<MergeRequest>(value)
+            .unwrap()
+            .into_item(Arc::new(crate::parse_repo("group/project").unwrap()))
+            .unwrap();
+        assert!(matches!(item.review_status, ReviewStatus::Loading));
+        assert!(item.changes.is_none());
+    }
+
+    #[test]
     fn both_listings_follow_cursors_beyond_one_hundred_results() {
         for query in [REPOSITORY_QUERY, USER_QUERY] {
             let (url, server) = server(vec![
@@ -352,7 +450,7 @@ mod tests {
                 &url,
                 Some("test-token"),
                 query,
-                json!({ "path": "group/sub/project" }),
+                json!({ "path": "group/sub/project", "includeDetails": true }),
             )
             .unwrap();
             assert_eq!(items.len(), 101);

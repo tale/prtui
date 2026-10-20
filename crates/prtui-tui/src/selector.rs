@@ -69,6 +69,8 @@ const HEADER_ROWS: u16 = 2;
 pub enum Message {
     /// A completed pull request listing.
     Listed(u64, Result<PullRequestList, String>),
+    /// Details for already displayed rows.
+    Details(u64, Result<Vec<PullRequestListItem>, String>),
     /// A completed overview for the named pull request.
     Overview(
         u64,
@@ -286,6 +288,34 @@ impl Selector {
                     }
                 }
             }
+            Message::Details(generation, outcome) => {
+                if generation != self.listing_generation {
+                    return;
+                }
+                let Listing::Ready(list) = &mut self.listing else {
+                    return;
+                };
+                match outcome {
+                    Ok(details) => {
+                        for detail in details {
+                            if let Some(item) =
+                                list.items.iter_mut().find(|item| {
+                                    item.target.repo == detail.target.repo
+                                        && item.target.number
+                                            == detail.target.number
+                                })
+                            {
+                                item.review_status = detail.review_status;
+                                item.changes = detail.changes;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.status =
+                            format!("error: loading list details: {error}");
+                    }
+                }
+            }
             Message::Overview(generation, target, overview) => {
                 if generation == self.overview_generation {
                     self.set_overview(&target, overview);
@@ -293,6 +323,25 @@ impl Selector {
             }
             Message::Failed(error) => self.status = format!("error: {error}"),
         }
+    }
+
+    /// Reports the rows currently displayed in the list.
+    pub fn visible_rows(
+        &self,
+        metrics: Metrics,
+    ) -> Option<(u64, Vec<PullRequestListItem>)> {
+        if self.is_refreshing || self.panel.is_some() || self.is_done {
+            return None;
+        }
+        let list = self.listing.rows()?;
+        let rows = self
+            .visible
+            .iter()
+            .skip(self.cursor.scroll)
+            .take(metrics.viewport)
+            .map(|index| list.items[*index].clone())
+            .collect();
+        Some((self.listing_generation, rows))
     }
 
     /// A summary that arrives after the panel moved on belongs to nothing on
@@ -1083,6 +1132,7 @@ fn changes_cell(changes: Option<Changes>, theme: Theme) -> Cell<'static> {
 
 fn status_cell(status: &ReviewStatus, theme: Theme) -> Cell<'static> {
     let (label, color) = match status {
+        ReviewStatus::Loading => ("…", theme.dim),
         ReviewStatus::Draft => ("DRAFT", theme.dim),
         ReviewStatus::ChangesRequested => ("CHANGES REQUESTED", theme.danger),
         ReviewStatus::ReviewRequired | ReviewStatus::NoDecision => {
@@ -1111,6 +1161,7 @@ mod tests {
         review_status: ReviewStatus,
     ) -> PullRequestListItem {
         PullRequestListItem {
+            id: format!("PR_{number}").into(),
             target: PullRequestTarget {
                 repo: Arc::new(Repo {
                     host: None,
@@ -1172,6 +1223,110 @@ mod tests {
         assert_eq!(selector.filter, "Change 2");
         assert_eq!(selector.target().unwrap().number, number);
         assert!(!selector.is_refreshing);
+    }
+
+    #[test]
+    fn details_keep_navigation_and_failures_leave_rows_usable() {
+        let mut basic = many();
+        for item in &mut basic.items {
+            item.review_status = ReviewStatus::Loading;
+            item.changes = None;
+        }
+        let mut selector = ready(basic);
+        press(&mut selector, "/Change 2");
+        press_key(&mut selector, KeyCode::Enter, Modifiers::NONE);
+        press(&mut selector, "j");
+        let target = selector.target().unwrap();
+        let metrics = frame_metrics(&selector);
+        selector.receive(
+            Message::Details(0, Err("details unavailable".into())),
+            metrics,
+        );
+        assert_eq!(selector.target().unwrap().number, target.number);
+        assert!(
+            selector
+                .listing
+                .rows()
+                .unwrap()
+                .items
+                .iter()
+                .all(|item| item.changes.is_none())
+        );
+        selector.receive(Message::Details(0, Ok(many().items)), metrics);
+        assert_eq!(selector.target().unwrap().number, target.number);
+        assert_eq!(selector.filter, "Change 2");
+        assert!(
+            selector
+                .listing
+                .rows()
+                .unwrap()
+                .items
+                .iter()
+                .all(|item| item.changes.is_some())
+        );
+        selector.refresh();
+        selector
+            .receive(Message::Details(0, Err("stale details".into())), metrics);
+        assert!(!selector.status.contains("stale"));
+    }
+
+    #[test]
+    fn visible_rows_follow_scrolling_and_resizing() {
+        let mut selector = ready(many());
+        let mut metrics = frame_metrics(&selector);
+        metrics.viewport = 7;
+        assert_eq!(selector.visible_rows(metrics).unwrap().1.len(), 7);
+        selector.cursor.scroll = 30;
+        let (_, rows) = selector.visible_rows(metrics).unwrap();
+        for (row, index) in rows.iter().zip(30..37) {
+            assert_eq!(
+                row.target.number,
+                selector.listing.rows().unwrap().items[index].target.number
+            );
+        }
+        metrics.viewport = 10;
+        assert_eq!(selector.visible_rows(metrics).unwrap().1.len(), 10);
+        selector.refresh();
+        assert!(selector.visible_rows(metrics).is_none());
+    }
+
+    #[test]
+    fn detail_updates_are_partial_and_cannot_cross_refresh_generations() {
+        let mut selector = ready(many());
+        let metrics = frame_metrics(&selector);
+        let (_, mut items) = selector.visible_rows(metrics).unwrap();
+        let number = items[0].target.number;
+        items.truncate(1);
+        items[0].changes = Some(Changes {
+            additions: 999,
+            deletions: 0,
+        });
+        selector.receive(Message::Details(0, Ok(items.clone())), metrics);
+        let list = selector.listing.rows().unwrap();
+        assert_eq!(list.len(), 40);
+        assert_eq!(
+            list.items
+                .iter()
+                .find(|item| item.target.number == number)
+                .unwrap()
+                .changes
+                .unwrap()
+                .additions,
+            999
+        );
+        assert_eq!(list.items[1].changes.unwrap().additions, 12);
+        selector.refresh();
+        assert!(selector.visible_rows(metrics).is_none());
+        selector.receive(Message::Listed(1, Ok(many())), metrics);
+        selector.receive(Message::Details(0, Ok(items)), metrics);
+        assert_eq!(
+            selector.listing.rows().unwrap().items[0]
+                .changes
+                .unwrap()
+                .additions,
+            12
+        );
+        assert!(selector.visible_rows(metrics).is_some());
     }
 
     #[test]

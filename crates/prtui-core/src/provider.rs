@@ -6,7 +6,8 @@
 
 use crate::{
     AddedThread, ChangedFile, CommitLog, Meta, NewThread, Parent,
-    PullRequestList, PullRequestOverview, Repo, ReviewEvent, Summary,
+    PullRequestList, PullRequestListItem, PullRequestOverview, Repo,
+    ReviewEvent, Summary,
 };
 use anyhow::Result;
 use std::{future::Future, sync::Arc};
@@ -40,16 +41,24 @@ pub trait Provider: Copy + Send + 'static {
         lines: Option<(u32, u32)>,
     ) -> String;
 
-    /// Lists open pull requests in one repository.
+    /// Lists open pull requests, optionally including review status and churn.
     fn repository_pull_requests(
         self,
         repo: Repo,
+        include_details: bool,
     ) -> impl Future<Output = Result<PullRequestList>> + Send;
 
-    /// Lists open pull requests relevant to the authenticated user.
+    /// Lists the user's open pull requests, optionally including status and churn.
     fn user_pull_requests(
         self,
+        include_details: bool,
     ) -> impl Future<Output = Result<PullRequestList>> + Send;
+
+    /// Loads review status and churn for a batch of already listed rows.
+    fn fetch_listing_details(
+        self,
+        items: Vec<PullRequestListItem>,
+    ) -> impl Future<Output = Result<Vec<PullRequestListItem>>> + Send;
 
     /// Fetches the selector summary for one pull request.
     fn fetch_summary(

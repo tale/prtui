@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 mod dashboard;
 mod detection;
 mod external;
+mod loading;
 mod local;
 
 #[derive(Parser)]

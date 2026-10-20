@@ -18,6 +18,7 @@ pub struct Dashboard<P: Provider> {
     provider: P,
     tx: mpsc::UnboundedSender<Message>,
     rx: mpsc::UnboundedReceiver<Message>,
+    loading: crate::loading::Loader,
 }
 
 impl<P: Provider> Dashboard<P> {
@@ -30,6 +31,7 @@ impl<P: Provider> Dashboard<P> {
             provider,
             tx,
             rx,
+            loading: crate::loading::Loader::default(),
         }
     }
 
@@ -59,11 +61,23 @@ impl<P: Provider> Dashboard<P> {
                 *theme,
             );
 
+            if let Some((generation, rows)) =
+                self.selector.visible_rows(metrics)
+            {
+                self.loading.visible(self.provider, generation, &rows);
+            }
+
             let event = tokio::select! {
+                message = self.loading.next() => {
+                    self.selector.receive(message, metrics);
+                    continue;
+                }
+
                 _ = animation.tick(), if self.selector.is_waiting() => {
                     self.selector.advance_loading();
                     continue;
                 }
+
                 message = self.rx.recv() => {
                     let Some(message) = message else {
                         bail!("selector message channel closed");
@@ -71,6 +85,7 @@ impl<P: Provider> Dashboard<P> {
                     self.selector.receive(message, metrics);
                     continue;
                 }
+
                 event = terminal::next_event(events) => {
                     event
                         .context("terminal event stream closed")?
@@ -104,14 +119,13 @@ impl<P: Provider> Dashboard<P> {
         Ok(self.selector.take_chosen())
     }
 
-    fn execute(&self, effect: Option<Effect>) {
+    fn execute(&mut self, effect: Option<Effect>) {
         match effect {
             Some(Effect::FetchListing(generation)) => {
-                spawn_listing(
-                    self.repo.clone(),
+                self.loading.refresh(
                     self.provider,
+                    self.repo.clone(),
                     generation,
-                    self.tx.clone(),
                 );
             }
             Some(Effect::FetchOverview(generation, target)) => {
@@ -132,23 +146,6 @@ impl<P: Provider> Dashboard<P> {
             None => {}
         }
     }
-}
-
-fn spawn_listing<P: Provider>(
-    repo: Option<Repo>,
-    provider: P,
-    generation: u64,
-    tx: mpsc::UnboundedSender<Message>,
-) {
-    tokio::spawn(async move {
-        let listed = match repo {
-            Some(repo) => provider.repository_pull_requests(repo).await,
-            None => provider.user_pull_requests().await,
-        }
-        .map_err(|err| err.to_string());
-
-        let _ = tx.send(Message::Listed(generation, listed));
-    });
 }
 
 fn spawn_overview<P: Provider>(
