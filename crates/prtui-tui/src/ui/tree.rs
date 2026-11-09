@@ -247,8 +247,8 @@ fn directory_line(
 /// Where the tree's cursor is, as one file row needs to know it.
 #[derive(Clone, Copy)]
 struct FileRowFocus<'a> {
-    /// Whether the tree is the pane holding the keys. The bar is what says
-    /// where typing lands, so only the focused pane draws one.
+    /// Whether the tree is the pane holding the keys, which is the only time
+    /// its cursor can rest on a heading.
     pane: bool,
     /// The heading the cursor left the open file to rest on, if it did. Only
     /// one row in the tree carries the cursor bar.
@@ -299,16 +299,17 @@ fn file_line<'a>(
         counts_width + MARKER_WIDTH + indent + ICON_WIDTH + staging_width,
     );
 
-    // Two things to say and no bar left to say one of them: the background is
-    // where the cursor is, the weight is which file the diff is showing. They
-    // are the same row until the cursor steps up onto a heading — or until the
-    // diff takes the keys, which leaves the weight alone to say it.
-    let has_cursor = focus.pane && is_selected && focus.directory.is_none();
-    let base = match (has_cursor, is_selected) {
-        (true, _) => Style::default()
+    // The open file keeps its bar while the diff holds the keys; weight alone
+    // reads the same as a heading. It only gives the bar up to a heading the
+    // tree cursor rests on, keeping a fainter one so it stays findable.
+    let is_on_heading = focus.pane && focus.directory.is_some();
+    let base = match (is_selected, is_on_heading) {
+        (true, false) => Style::default()
             .bg(theme.cursor)
             .add_modifier(Modifier::BOLD),
-        (false, true) => Style::default().add_modifier(Modifier::BOLD),
+        (true, true) => {
+            Style::default().bg(theme.hunk).add_modifier(Modifier::BOLD)
+        }
         _ => Style::default(),
     };
 
