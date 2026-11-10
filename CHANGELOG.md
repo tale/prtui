@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0 (2026-11-10)
+
+### Features
+
+- GitHub repository listings group pull requests by whether your review was requested directly, through one of your teams, or not at all, and dim the last group.
+
+### Fixes
+
+- The overview page now loads significantly faster through concurrent fetching.
+- Scrolling in the diff stops at either end of a file instead of continuing into the next or previous one.
+- Review statuses in the pull request list fill in sooner, starting from the top of the screen.
+- The file tree highlights the open file while the diff has focus.
+- Pull request updates, comments, reviews, and commits now show dates and times in the local timezone.
+
 ## 0.4.1 (2026-09-30)
 
 ### Features
