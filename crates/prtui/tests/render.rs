@@ -1523,11 +1523,10 @@ fn a_folded_directory_without_threads_carries_no_mark() {
     );
 }
 
-/// The tree filter and the diff search share a matcher, so the tree can show
-/// Two panes and one set of keys: whichever pane holds them draws the cursor
-/// bar and wears the accent title, so which one is live is never a guess.
+/// Two panes and one set of keys: the focused pane wears the accent title and
+/// the chip, while the open file keeps its bar in the tree either way.
 #[test]
-fn only_the_focused_pane_carries_the_cursor() {
+fn the_chip_follows_the_keys_and_the_open_file_keeps_its_bar() {
     use prtui_tui::renderer::Theme;
 
     let mut app = load();
@@ -1570,8 +1569,8 @@ fn only_the_focused_pane_carries_the_cursor() {
 
     focus_pane(&mut app, Pane::Diff);
     let (bar, files_chip, diff_chip) = painted(&app);
-    assert_ne!(bar, Some(theme.cursor), "the bar goes with the keys");
-    assert!(diff_chip > 0 && files_chip == 0, "and so does the chip");
+    assert_eq!(bar, Some(theme.cursor), "the open file keeps its bar");
+    assert!(diff_chip > 0 && files_chip == 0, "but the chip moves");
 }
 
 /// where the hit landed instead of only which files survived it.
