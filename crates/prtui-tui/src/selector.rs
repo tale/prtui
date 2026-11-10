@@ -15,7 +15,7 @@ use crate::ui::{self, SPINNER};
 use crate::vim::Cursor;
 use prtui_core::{
     Changes, PullRequestList, PullRequestListItem, PullRequestListScope,
-    PullRequestOverview, PullRequestTarget, ReviewStatus,
+    PullRequestOverview, PullRequestTarget, ReviewRequest, ReviewStatus,
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -25,6 +25,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row,
     Table, TableState,
 };
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
@@ -236,7 +237,11 @@ impl Selector {
         let landing = current
             .and_then(|row| self.visible.iter().position(|shown| *shown == row))
             .unwrap_or(0);
-        self.cursor.jump(landing, self.visible.len(), viewport);
+        self.cursor.jump(
+            landing,
+            self.visible.len(),
+            self.list_viewport(viewport),
+        );
     }
 
     /// Puts the cursor back on one pull request of the listing, by the index
@@ -248,7 +253,17 @@ impl Selector {
             .position(|shown| *shown == row)
             .unwrap_or(0);
 
-        self.cursor.jump(landing, self.visible.len(), viewport);
+        self.cursor.jump(
+            landing,
+            self.visible.len(),
+            self.list_viewport(viewport),
+        );
+    }
+
+    // Measured against the listing as it stands, since a load or a filter
+    // can change the headings after the frame was measured.
+    fn list_viewport(&self, rows: usize) -> usize {
+        rows.saturating_sub(heading_lines(self)).max(1)
     }
 
     /// Applies one runtime result.
@@ -262,7 +277,28 @@ impl Selector {
 
                 self.is_refreshing = false;
                 match outcome {
-                    Ok(pull_requests) => {
+                    Ok(mut pull_requests) => {
+                        // Bands only help when something reaches the reader;
+                        // otherwise the whole listing would sit dimmed under
+                        // "others".
+                        let reaches_reader =
+                            pull_requests.items.iter().any(|item| {
+                                matches!(
+                                    band(item),
+                                    Some(Band::Viewer | Band::Teams)
+                                )
+                            });
+                        if !reaches_reader {
+                            for item in &mut pull_requests.items {
+                                item.review_request = None;
+                            }
+                        }
+
+                        // What was asked of the reader leads; the provider's
+                        // order holds within each band.
+                        pull_requests.items.sort_by(|left, right| {
+                            band(left).cmp(&band(right))
+                        });
                         let target = self.target();
                         self.listing = Listing::Ready(pull_requests);
                         self.sync_visible(viewport);
@@ -334,10 +370,13 @@ impl Selector {
             return None;
         }
         let list = self.listing.rows()?;
+        // The table pulls rows above the scroll into the room the headings
+        // leave once they scroll away.
+        let headings = heading_lines(self);
         let rows = self
             .visible
             .iter()
-            .skip(self.cursor.scroll)
+            .skip(self.cursor.scroll.saturating_sub(headings))
             .take(metrics.viewport)
             .map(|index| list.items[*index].clone())
             .collect();
@@ -429,7 +468,7 @@ impl Selector {
                         self.cursor.apply(
                             *motion,
                             self.visible.len(),
-                            viewport,
+                            self.list_viewport(viewport),
                         );
                     }
                 }
@@ -700,13 +739,7 @@ pub fn metrics(area: Rect, selector: &Selector, theme: Theme) -> Metrics {
             let inner = panel_inner(panel_area(body));
             (inner.height as usize, inner.width as usize)
         }
-        None => (
-            body.height
-                .saturating_sub(2)
-                .saturating_sub(HEADER_ROWS)
-                .into(),
-            0,
-        ),
+        None => (usize::from(body.height.saturating_sub(2 + HEADER_ROWS)), 0),
     };
 
     Metrics {
@@ -834,28 +867,50 @@ fn draw_table(
                 .add_modifier(Modifier::BOLD),
         )
         .bottom_margin(1);
-    let rows = selector.visible.iter().filter_map(|index| {
-        let item = pull_requests.get(*index)?;
-        let mut cells = vec![status_cell(&item.review_status, theme)];
-        if has_repository_column {
-            cells.push(
-                Cell::from(item.target.repo.slug())
-                    .style(Style::default().fg(theme.muted)),
-            );
+    // The cursor walks pull requests only, so where it and the scroll land
+    // among the drawn rows has to account for the headings between them.
+    // Headings are painted over blank rows afterwards, since a table cell is
+    // too narrow to hold one.
+    let mut rows = Vec::with_capacity(selector.visible.len());
+    let mut headings = Vec::new();
+    let mut offset = 0;
+    let mut selected = None;
+    let mut previous = None;
+
+    for (position, index) in selector.visible.iter().enumerate() {
+        let item = &pull_requests.items[*index];
+        let band = band(item);
+        let is_new_band = band.is_some() && band != previous;
+
+        if let Some(band) = band.as_ref().filter(|_| is_new_band) {
+            if previous.is_some() {
+                rows.push(Row::new([""]));
+            }
+            let members: Vec<_> = selector.visible[position..]
+                .iter()
+                .map(|index| &pull_requests.items[*index])
+                .take_while(|member| self::band(member).as_ref() == Some(band))
+                .collect();
+            headings.push((rows.len(), heading_line(band, &members, theme)));
+            rows.push(Row::new([""]));
         }
-        cells.extend([
-            Cell::from(format!("#{}", item.target.number))
-                .style(Style::default().fg(theme.warning)),
-            Cell::from(format!("@{}", item.author))
-                .style(Style::default().fg(theme.accent)),
-            Cell::from(item.title.as_str())
-                .style(Style::default().fg(theme.code)),
-            changes_cell(item.changes, theme),
-        ]);
+        if position == selector.cursor.scroll {
+            offset = rows.len() - usize::from(is_new_band);
+        }
+        if selector.selected() == Some(position) {
+            selected = Some(rows.len());
+        }
 
-        Some(Row::new(cells))
-    });
+        rows.push(pull_request_row(
+            item,
+            band == Some(Band::Others),
+            has_repository_column,
+            theme,
+        ));
+        previous = band;
+    }
 
+    let row_count = rows.len();
     let table = Table::new(rows, widths)
         .header(header)
         .block(block)
@@ -868,10 +923,142 @@ fn draw_table(
                 .add_modifier(Modifier::BOLD),
         );
 
+    // The cursor's viewport keeps room for every heading, so near the end,
+    // where they have scrolled away, the table is pulled up to fill it.
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let body_height = inner.height.saturating_sub(HEADER_ROWS);
+    let offset = offset.min(row_count.saturating_sub(body_height.into()));
     let mut state = TableState::default()
-        .with_selected(selector.selected())
-        .with_offset(selector.cursor.scroll);
+        .with_selected(selected)
+        .with_offset(offset);
     frame.render_stateful_widget(table, area, &mut state);
+
+    // Past the header, and past the gutter the cursor bar is drawn in.
+    for (row, line) in headings {
+        let Some(line_offset) = row
+            .checked_sub(state.offset())
+            .and_then(|line| u16::try_from(line).ok())
+            .filter(|line| *line < body_height)
+        else {
+            continue;
+        };
+
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x: inner.x + 2,
+                y: inner.y + HEADER_ROWS + line_offset,
+                width: inner.width.saturating_sub(2),
+                height: 1,
+            },
+        );
+    }
+}
+
+// A draft is not asking anyone yet, so it waits with the rest until it is
+// marked ready.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Band {
+    Viewer,
+    Teams,
+    Others,
+}
+
+fn band(item: &PullRequestListItem) -> Option<Band> {
+    let request = item.review_request.as_ref()?;
+    if matches!(item.review_status, ReviewStatus::Draft) {
+        return Some(Band::Others);
+    }
+
+    Some(match request {
+        ReviewRequest::Viewer => Band::Viewer,
+        ReviewRequest::Teams(_) => Band::Teams,
+        ReviewRequest::Others => Band::Others,
+    })
+}
+
+fn heading_lines(selector: &Selector) -> usize {
+    let Some(list) = selector.listing.rows() else {
+        return 0;
+    };
+    let mut headings: usize = 0;
+    let mut previous = None;
+
+    for index in &selector.visible {
+        let band = band(&list.items[*index]);
+        if band.is_some() && band != previous {
+            headings += 1;
+        }
+        previous = band;
+    }
+
+    (headings * 2).saturating_sub(1)
+}
+
+// Your teams are named together, since one pull request often asks several
+// of them at once.
+fn heading_line(
+    band: &Band,
+    members: &[&PullRequestListItem],
+    theme: Theme,
+) -> Line<'static> {
+    let (label, color) = match band {
+        Band::Viewer => ("you".to_owned(), theme.heading),
+        Band::Teams => {
+            let teams: BTreeSet<&str> = members
+                .iter()
+                .filter_map(|item| match &item.review_request {
+                    Some(ReviewRequest::Teams(teams)) => {
+                        Some(teams.iter().map(String::as_str))
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+
+            (
+                teams.into_iter().collect::<Vec<_>>().join(", "),
+                theme.heading,
+            )
+        }
+        Band::Others => ("others".to_owned(), theme.dim),
+    };
+
+    Line::from(vec![
+        Span::styled(
+            label,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" · {}", members.len()),
+            Style::default().fg(theme.dim),
+        ),
+    ])
+}
+
+fn pull_request_row(
+    item: &PullRequestListItem,
+    is_dimmed: bool,
+    has_repository_column: bool,
+    theme: Theme,
+) -> Row<'static> {
+    let tone =
+        |color| Style::default().fg(if is_dimmed { theme.dim } else { color });
+
+    let mut cells = vec![status_cell(&item.review_status, is_dimmed, theme)];
+    if has_repository_column {
+        cells
+            .push(Cell::from(item.target.repo.slug()).style(tone(theme.muted)));
+    }
+    cells.extend([
+        Cell::from(format!("#{}", item.target.number))
+            .style(tone(theme.warning)),
+        Cell::from(format!("@{}", item.author)).style(tone(theme.accent)),
+        Cell::from(item.title.clone()).style(tone(theme.code)),
+        changes_cell(item.changes, is_dimmed, theme),
+    ]);
+
+    Row::new(cells)
 }
 
 fn draw_panel(
@@ -1112,25 +1299,38 @@ fn draw_centered(frame: &mut Frame, area: Rect, line: Line<'static>) {
     );
 }
 
-fn changes_cell(changes: Option<Changes>, theme: Theme) -> Cell<'static> {
+fn changes_cell(
+    changes: Option<Changes>,
+    is_dimmed: bool,
+    theme: Theme,
+) -> Cell<'static> {
     let Some(changes) = changes else {
         return Cell::from("");
+    };
+    let (added, removed) = if is_dimmed {
+        (theme.dim, theme.dim)
+    } else {
+        (theme.success, theme.danger)
     };
 
     Cell::from(Line::from(vec![
         Span::styled(
             format!("+{}", changes.additions),
-            Style::default().fg(theme.success),
+            Style::default().fg(added),
         ),
         Span::raw(" "),
         Span::styled(
             format!("−{}", changes.deletions),
-            Style::default().fg(theme.danger),
+            Style::default().fg(removed),
         ),
     ]))
 }
 
-fn status_cell(status: &ReviewStatus, theme: Theme) -> Cell<'static> {
+fn status_cell(
+    status: &ReviewStatus,
+    is_dimmed: bool,
+    theme: Theme,
+) -> Cell<'static> {
     let (label, color) = match status {
         ReviewStatus::Loading => ("…", theme.dim),
         ReviewStatus::Draft => ("DRAFT", theme.dim),
@@ -1140,6 +1340,7 @@ fn status_cell(status: &ReviewStatus, theme: Theme) -> Cell<'static> {
         }
         ReviewStatus::Approved => ("APPROVED", theme.success),
     };
+    let color = if is_dimmed { theme.dim } else { color };
 
     Cell::from(Line::from(Span::styled(
         label,
@@ -1177,6 +1378,7 @@ mod tests {
                 additions: 12,
                 deletions: 3,
             }),
+            review_request: None,
         }
     }
 
@@ -1484,6 +1686,69 @@ mod tests {
 
         assert!(!rendered.contains("REPOSITORY"));
         assert!(rendered.contains("Local change"));
+    }
+
+    #[test]
+    fn requests_of_the_reader_lead_the_listing_under_headings() {
+        let rows = [
+            (ReviewRequest::Others, ReviewStatus::ReviewRequired),
+            (
+                ReviewRequest::Teams(vec!["tech-leads".into()]),
+                ReviewStatus::Approved,
+            ),
+            (ReviewRequest::Viewer, ReviewStatus::ReviewRequired),
+            (ReviewRequest::Viewer, ReviewStatus::Draft),
+            (
+                ReviewRequest::Teams(vec![
+                    "full-stack".into(),
+                    "tech-leads".into(),
+                ]),
+                ReviewStatus::Approved,
+            ),
+        ];
+        let items = rows
+            .into_iter()
+            .zip(1..)
+            .map(|((request, status), number)| PullRequestListItem {
+                review_request: Some(request),
+                ..pull(number, "Change", status)
+            })
+            .collect();
+
+        let selector = ready(list(PullRequestListScope::Repository, items));
+        let order: Vec<u32> = selector
+            .listing
+            .rows()
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.target.number)
+            .collect();
+        assert_eq!(order, [3, 2, 5, 1, 4]);
+
+        let screen = render_selector(&selector);
+        let headings: Vec<_> =
+            ["you · 1", "full-stack, tech-leads · 2", "others · 2"]
+                .iter()
+                .map(|heading| screen.find(heading).expect(heading))
+                .collect();
+        assert!(headings.is_sorted());
+    }
+
+    #[test]
+    fn a_listing_that_asks_nothing_of_the_reader_stays_flat() {
+        let items = [ReviewStatus::ReviewRequired, ReviewStatus::Draft]
+            .into_iter()
+            .zip(1..)
+            .map(|(status, number)| PullRequestListItem {
+                review_request: Some(ReviewRequest::Others),
+                ..pull(number, "Change", status)
+            })
+            .collect();
+
+        let selector = ready(list(PullRequestListScope::Repository, items));
+
+        assert!(!render_selector(&selector).contains("others ·"));
     }
 
     #[test]

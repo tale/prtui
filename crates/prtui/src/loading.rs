@@ -180,6 +180,7 @@ mod tests {
             author: "author".into(),
             review_status: ReviewStatus::Loading,
             changes: None,
+            review_request: None,
         }
     }
 

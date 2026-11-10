@@ -422,6 +422,20 @@ pub struct PullRequestListItem {
     pub review_status: ReviewStatus,
     /// Line churn, absent when the provider's listing does not carry it.
     pub changes: Option<Changes>,
+    /// Why the viewer would review this, absent when the provider does not say.
+    pub review_request: Option<ReviewRequest>,
+}
+
+/// How a pending review request reaches the viewer, strongest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewRequest {
+    /// The viewer was asked by name.
+    Viewer,
+    /// Teams the viewer belongs to were asked, named without their
+    /// organization.
+    Teams(Vec<String>),
+    /// Only other people or teams were asked, or nobody was.
+    Others,
 }
 
 /// Added and removed line counts for one pull request.

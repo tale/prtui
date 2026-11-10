@@ -4,10 +4,11 @@ use prtui_core::Provider;
 use prtui_core::{
     AddedThread, ChangedFile, Changes, Check, CheckState, CommitLog, Meta,
     NewThread, Parent, PullRequestList, PullRequestListItem,
-    PullRequestListScope, PullRequestOverview, Repo, ReviewEvent, ReviewStatus,
-    Reviewer, Summary, Threads, Verdict,
+    PullRequestListScope, PullRequestOverview, Repo, ReviewEvent,
+    ReviewRequest, ReviewStatus, Reviewer, Summary, Threads, Verdict,
 };
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::Arc;
 use ureq::http::Uri;
 
@@ -282,6 +283,7 @@ fragment ListingDetails on PullRequest {
 
 const REPOSITORY_PULL_REQUESTS_QUERY: &str = r"
 query($owner:String!, $repo:String!) {
+  viewer { login }
   repository(owner:$owner, name:$repo) {
     pullRequests(
       first:100
@@ -290,6 +292,17 @@ query($owner:String!, $repo:String!) {
     ) {
       nodes {
         ...ListingRow
+        reviewRequests(first:100) {
+          nodes {
+            requestedReviewer {
+              __typename
+              ... on User { login }
+              ... on Bot { login }
+              ... on Mannequin { login }
+              ... on Team { combinedSlug }
+            }
+          }
+        }
       }
     }
   }
@@ -427,6 +440,20 @@ struct WirePullRequest {
     deletions: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_cli_review_decision")]
     review_decision: Option<ReviewDecision>,
+    review_requests: Option<WireNodes<WireReviewRequest>>,
+}
+
+#[derive(Default)]
+struct Viewer {
+    login: String,
+    // `org/slug`, the way GitHub's `combinedSlug` spells them.
+    teams: HashSet<String>,
+}
+
+#[derive(Deserialize)]
+struct WireTeam {
+    slug: String,
+    organization: WireLogin,
 }
 
 #[derive(Deserialize)]
@@ -823,8 +850,51 @@ const fn review_status(
     }
 }
 
+// A request by name outranks one through a team, since it was meant for the
+// viewer in particular.
+fn review_request(
+    requests: Vec<WireReviewRequest>,
+    viewer: &Viewer,
+) -> ReviewRequest {
+    let mut teams = Vec::new();
+
+    for request in requests {
+        match request.requested_reviewer {
+            Some(WireRequestedReviewer::User { login })
+                if login == viewer.login =>
+            {
+                return ReviewRequest::Viewer;
+            }
+            Some(WireRequestedReviewer::Team { combined_slug })
+                if viewer.teams.contains(&combined_slug) =>
+            {
+                let slug = combined_slug
+                    .split_once('/')
+                    .map_or(combined_slug.as_str(), |(_, slug)| slug);
+                teams.push(slug.to_owned());
+            }
+            _ => {}
+        }
+    }
+
+    if teams.is_empty() {
+        return ReviewRequest::Others;
+    }
+
+    teams.sort();
+    ReviewRequest::Teams(teams)
+}
+
 impl WirePullRequest {
-    fn into_item(self, repo: Arc<Repo>) -> PullRequestListItem {
+    fn into_item(
+        self,
+        repo: Arc<Repo>,
+        viewer: Option<&Viewer>,
+    ) -> PullRequestListItem {
+        let review_request = viewer
+            .zip(self.review_requests)
+            .map(|(viewer, requests)| review_request(requests.nodes, viewer));
+
         PullRequestListItem {
             id: self.id.into(),
             target: prtui_core::PullRequestTarget {
@@ -844,12 +914,14 @@ impl WirePullRequest {
                     deletions,
                 },
             ),
+            review_request,
         }
     }
 }
 
 fn parse_repository_pull_requests(
     repo: Repo,
+    viewer: &Viewer,
     bytes: &[u8],
 ) -> Result<PullRequestList> {
     let mut pulls: Vec<WirePullRequest> = serde_json::from_slice(bytes)
@@ -867,7 +939,7 @@ fn parse_repository_pull_requests(
         scope: PullRequestListScope::Repository,
         items: pulls
             .into_iter()
-            .map(|pull| pull.into_item(Arc::clone(&repo)))
+            .map(|pull| pull.into_item(Arc::clone(&repo), Some(viewer)))
             .collect(),
     })
 }
@@ -896,7 +968,7 @@ fn parse_user_pull_requests(bytes: &[u8]) -> Result<PullRequestList> {
         .map(|pull| {
             let repo = Arc::new(parse_repo(&pull.repository.name_with_owner)?);
 
-            Ok(pull.pull.into_item(repo))
+            Ok(pull.pull.into_item(repo, None))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -1625,6 +1697,45 @@ async fn fetch_listing_details(
     .context("listing detail fetch panicked")?
 }
 
+// Reading teams needs the `read:org` scope; without it team requests read as
+// someone else's rather than failing the listing.
+fn viewer_teams(repo: &Repo, token: &str) -> HashSet<String> {
+    let first = rest_url(repo, "/user/teams?per_page=100");
+    let Ok(origin) = first.parse::<Uri>() else {
+        return HashSet::new();
+    };
+    let mut teams = HashSet::new();
+    let mut next = Some(first);
+
+    while let Some(url) = next {
+        let page = (|| -> Result<_> {
+            let mut response = get(&url, JSON_ACCEPT, Some(token))?;
+            check(&mut response, "listing viewer teams")?;
+            let next = next_page(response.headers(), &origin)?;
+            let page: Vec<WireTeam> = response
+                .body_mut()
+                .with_config()
+                .limit(API_LIMIT)
+                .read_json()
+                .context("failed to parse viewer teams")?;
+
+            Ok((page, next))
+        })();
+        let Ok((page, cursor)) = page else {
+            return HashSet::new();
+        };
+
+        teams.extend(
+            page.into_iter().map(|team| {
+                format!("{}/{}", team.organization.login, team.slug)
+            }),
+        );
+        next = cursor;
+    }
+
+    teams
+}
+
 async fn repository_pull_requests(
     repo: Repo,
     include_details: bool,
@@ -1636,7 +1747,12 @@ async fn repository_pull_requests(
         "repo": repo.name,
     });
 
-    tokio::task::spawn_blocking(move || {
+    let teams = tokio::task::spawn_blocking({
+        let repo = repo.clone();
+        let token = Arc::clone(&token);
+        move || viewer_teams(&repo, &token)
+    });
+    let listing = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut value = graphql(
             &url,
             Some(&token),
@@ -1651,11 +1767,25 @@ async fn repository_pull_requests(
         if include_details {
             complete_listing(&url, &token, nodes)?;
         }
+        let login = value["data"]["viewer"]["login"]
+            .as_str()
+            .context("missing viewer login")?
+            .to_owned();
+        let nodes = serde_json::to_vec(
+            &value["data"]["repository"]["pullRequests"]["nodes"],
+        )?;
 
-        parse_repository_pull_requests(repo, &serde_json::to_vec(nodes)?)
-    })
-    .await
-    .context("repository listing panicked")?
+        Ok((repo, login, nodes))
+    });
+
+    let (repo, login, nodes) =
+        listing.await.context("repository listing panicked")??;
+    let viewer = Viewer {
+        login,
+        teams: teams.await.context("viewer team lookup panicked")?,
+    };
+
+    parse_repository_pull_requests(repo, &viewer, &nodes)
 }
 
 /// The summary panel's one round trip, asked for only when the panel is
@@ -2110,6 +2240,7 @@ mod tests {
         ]);
         let local = parse_repository_pull_requests(
             parse_repo("owner/repo").unwrap(),
+            &Viewer::default(),
             &serde_json::to_vec(&pulls).unwrap(),
         )
         .unwrap();
@@ -2142,6 +2273,7 @@ mod tests {
     fn parses_repository_pull_requests_and_moves_the_repository_once() {
         let local = parse_repository_pull_requests(
             parse_repo("owner/repo").unwrap(),
+            &Viewer::default(),
             br#"[
                 {"number":12,"title":"Draft","author":{"login":"alice"},"isDraft":true,"updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"reviewDecision":null},
                 {"number":13,"title":"Ready","isDraft":false,"updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"reviewDecision":"APPROVED"},
@@ -2401,9 +2533,66 @@ mod tests {
     }
 
     #[test]
+    fn review_requests_rank_the_viewer_over_their_teams() {
+        let viewer = Viewer {
+            login: "tale".into(),
+            teams: HashSet::from([
+                "spear-ai/tech-leads".to_owned(),
+                "spear-ai/full-stack".to_owned(),
+            ]),
+        };
+        let user = |login: &str| serde_json::json!({"requestedReviewer":{"__typename":"User","login":login}});
+        let team = |slug: &str| serde_json::json!({"requestedReviewer":{"__typename":"Team","combinedSlug":slug}});
+        let rows = serde_json::json!([
+            {"number":1,"updatedAt":"4","reviewRequests":{"nodes":[team("spear-ai/tech-leads"), user("tale")]}},
+            {"number":2,"updatedAt":"3","reviewRequests":{"nodes":[team("spear-ai/tech-leads"), team("spear-ai/data"), team("spear-ai/full-stack")]}},
+            {"number":3,"updatedAt":"2","reviewRequests":{"nodes":[team("spear-ai/data"), user("alice")]}},
+            {"number":4,"updatedAt":"1","reviewRequests":{"nodes":[
+                {"requestedReviewer":{"__typename":"Bot","login":"copilot"}}
+            ]}}
+        ]);
+        let rows: Vec<_> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let mut row = row.clone();
+                row["title"] = "Change".into();
+                row["isDraft"] = false.into();
+                row
+            })
+            .collect();
+
+        let listing = parse_repository_pull_requests(
+            parse_repo("spear-ai/horizon").unwrap(),
+            &viewer,
+            &serde_json::to_vec(&rows).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            listing
+                .items
+                .iter()
+                .map(|item| item.review_request.clone())
+                .collect::<Vec<_>>(),
+            [
+                Some(ReviewRequest::Viewer),
+                Some(ReviewRequest::Teams(vec![
+                    "full-stack".into(),
+                    "tech-leads".into(),
+                ])),
+                Some(ReviewRequest::Others),
+                Some(ReviewRequest::Others),
+            ]
+        );
+    }
+
+    #[test]
     fn lightweight_rows_do_not_invent_review_decisions_or_zero_counts() {
         let listing = parse_repository_pull_requests(
             parse_repo("owner/repo").unwrap(),
+            &Viewer::default(),
             br#"[
                 {"number":1,"title":"Ready","isDraft":false,"updatedAt":"2026-10-19"},
                 {"number":2,"title":"Draft","isDraft":true,"updatedAt":"2026-10-19"}
@@ -2424,6 +2613,7 @@ mod tests {
     fn rejects_unknown_review_decisions() {
         let local = parse_repository_pull_requests(
             parse_repo("owner/repo").unwrap(),
+            &Viewer::default(),
             br#"[{"number":1,"title":"Unknown","isDraft":false,
                 "updatedAt":"2026-09-08T12:00:00Z","additions":10,"deletions":2,"reviewDecision":"QUEUED"}]"#,
         );

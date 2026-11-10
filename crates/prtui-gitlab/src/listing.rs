@@ -138,6 +138,7 @@ impl MergeRequest {
                 additions: stats.additions,
                 deletions: stats.deletions,
             }),
+            review_request: None,
         })
     }
 }
