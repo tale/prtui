@@ -3,7 +3,10 @@ use prtui_tui::selector::Message;
 use std::collections::{HashMap, HashSet};
 use tokio::task::JoinSet;
 
-const CONCURRENCY: usize = 4;
+// GitHub works out each review decision in turn within a query, so small
+// batches side by side fill the screen sooner than one large one.
+const BATCH_SIZE: usize = 5;
+const CONCURRENCY: usize = 8;
 type Key = (String, u32);
 
 #[derive(Default)]
@@ -70,6 +73,9 @@ impl Loader {
     ) -> Vec<PullRequestListItem> {
         let mut items: Vec<PullRequestListItem> = Vec::new();
         for row in rows {
+            if items.len() == BATCH_SIZE {
+                break;
+            }
             let key = (row.target.repo.slug(), row.target.number);
             if self.requested.contains(&key) {
                 continue;
@@ -195,18 +201,20 @@ mod tests {
     }
 
     #[test]
-    fn visible_rows_are_one_batch_and_remain_cached_across_scrolling() {
+    fn visible_rows_split_top_down_and_remain_cached_across_scrolling() {
         let mut loader = Loader::default();
         let rows: Vec<_> = (1..=40).map(|number| row(number, None)).collect();
-        assert_eq!(loader.batch(&rows[..25]).len(), 25);
-        assert!(loader.batch(&rows[..25]).is_empty());
-        let next = loader.batch(&rows[20..30]);
-        assert_eq!(
-            next.iter().map(|row| row.target.number).collect::<Vec<_>>(),
-            [26, 27, 28, 29, 30]
-        );
-        assert!(loader.batch(&rows[..25]).is_empty());
-        assert_eq!(loader.requested.len(), 30);
+        let numbers = |batch: Vec<PullRequestListItem>| {
+            batch
+                .iter()
+                .map(|row| row.target.number)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(numbers(loader.batch(&rows[..8])), [1, 2, 3, 4, 5]);
+        assert_eq!(numbers(loader.batch(&rows[..8])), [6, 7, 8]);
+        assert!(loader.batch(&rows[..8]).is_empty());
+        assert_eq!(numbers(loader.batch(&rows[5..12])), [9, 10, 11, 12]);
+        assert_eq!(loader.requested.len(), 12);
     }
 
     #[test]
