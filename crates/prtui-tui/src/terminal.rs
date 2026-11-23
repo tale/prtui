@@ -80,8 +80,8 @@ impl TerminaTerminal for SharedTerminal {
     }
 }
 
-/// Query the terminal preference before entering the alternate screen. Modern
-/// terminals can answer the semantic query; OSC 11 covers older implementations.
+/// Query the terminal background before entering the alternate screen, falling
+/// back to the semantic color scheme report when OSC 11 goes unanswered.
 pub fn detect_theme() -> ThemeMode {
     query_theme().ok().flatten().unwrap_or(ThemeMode::Dark)
 }
@@ -91,12 +91,11 @@ fn query_theme() -> io::Result<Option<ThemeMode>> {
     terminal.enter_raw_mode()?;
 
     let result = (|| {
+        // Replies come back in query order, so asking for the background first
+        // lets it win. Ghostty answers the scheme query with the OS appearance,
+        // which can disagree with the background it actually draws.
         let query_mode = Csi::Mode(Mode::QueryTheme);
-        let query_background = Osc::ChangeDynamicColors(
-            DynamicColorNumber::TextBackgroundColor,
-            vec![ColorOrQuery::Query],
-        );
-        write!(terminal, "{query_mode}{query_background}")?;
+        write!(terminal, "{}{query_mode}", background_query())?;
         terminal.flush()?;
 
         let filter = |event: &Event| theme_from_event(event).is_some();
@@ -121,6 +120,20 @@ fn theme_from_event(event: &Event) -> Option<ThemeMode> {
         Event::Csi(Csi::Mode(Mode::ReportTheme(TerminalThemeMode::Light))) => {
             Some(ThemeMode::Light)
         }
+        _ => background_theme(event),
+    }
+}
+
+/// Asks for the terminal background; the reply arrives as an event for
+/// [`background_theme`].
+pub fn query_background(terminal: &mut AppTerminal) -> io::Result<()> {
+    write!(terminal.backend_mut(), "{}", background_query())?;
+    terminal.backend_mut().flush()
+}
+
+/// Classifies an OSC 11 background report by its luminance.
+pub fn background_theme(event: &Event) -> Option<ThemeMode> {
+    match event {
         Event::Osc(Osc::ChangeDynamicColors(
             DynamicColorNumber::TextBackgroundColor,
             colors,
@@ -139,6 +152,13 @@ fn theme_from_event(event: &Event) -> Option<ThemeMode> {
         }),
         _ => None,
     }
+}
+
+fn background_query() -> Osc<'static> {
+    Osc::ChangeDynamicColors(
+        DynamicColorNumber::TextBackgroundColor,
+        vec![ColorOrQuery::Query],
+    )
 }
 
 /// Runs asynchronous application code inside a fully restored Termina session.

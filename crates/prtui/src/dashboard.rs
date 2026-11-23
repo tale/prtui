@@ -1,13 +1,11 @@
 use anyhow::{Context, Result, bail};
 use prtui_core::{Provider, PullRequestTarget, Repo};
-use prtui_tui::renderer::{Theme, ThemeMode};
+use prtui_tui::renderer::Theme;
 use prtui_tui::selector::{self, Effect, Message, Selector};
 use prtui_tui::terminal;
 use std::sync::Arc;
 use std::time::Duration;
-use termina::escape::csi::{
-    Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode,
-};
+use termina::escape::csi::{Csi, Mode as CsiMode};
 use termina::event::KeyEventKind;
 use termina::{Event, EventStream};
 use tokio::sync::mpsc;
@@ -103,14 +101,16 @@ impl<P: Provider> Dashboard<P> {
                     let effect = self.selector.press(key, metrics);
                     self.execute(effect);
                 }
-                Event::Csi(Csi::Mode(CsiMode::ReportTheme(terminal_mode)))
+                Event::Csi(Csi::Mode(CsiMode::ReportTheme(_)))
                     if follow_terminal =>
                 {
-                    let mode = match terminal_mode {
-                        TerminalThemeMode::Dark => ThemeMode::Dark,
-                        TerminalThemeMode::Light => ThemeMode::Light,
-                    };
-                    *theme = Theme::for_mode(mode);
+                    terminal::query_background(terminal)
+                        .context("querying terminal background")?;
+                }
+                Event::Osc(_) if follow_terminal => {
+                    if let Some(mode) = terminal::background_theme(&event) {
+                        *theme = Theme::for_mode(mode);
+                    }
                 }
                 _ => {}
             }

@@ -14,9 +14,7 @@ use prtui_tui::renderer::{self, Theme, ThemeMode};
 use prtui_tui::ui;
 use prtui_tui::{highlighter, terminal};
 use std::{sync::Arc, time::Duration};
-use termina::escape::csi::{
-    Csi, Mode as CsiMode, ThemeMode as TerminalThemeMode,
-};
+use termina::escape::csi::{Csi, Mode as CsiMode};
 use termina::event::KeyEventKind;
 use termina::{Event, EventStream};
 use tokio::sync::mpsc;
@@ -653,14 +651,18 @@ async fn viewer_loop(
                         input.dispatch_paste(&mut app, &text, &layout);
                         is_dirty = true;
                     }
-                    Event::Csi(Csi::Mode(CsiMode::ReportTheme(terminal_mode)))
+                    // The reported scheme can be the OS appearance rather than
+                    // the terminal's own, so it only prompts a background check.
+                    Event::Csi(Csi::Mode(CsiMode::ReportTheme(_)))
                         if follow_terminal =>
                     {
-                        let mode = match terminal_mode {
-                            TerminalThemeMode::Dark => ThemeMode::Dark,
-                            TerminalThemeMode::Light => ThemeMode::Light,
-                        };
-                        if app.set_theme_mode(mode) {
+                        terminal::query_background(terminal)
+                            .context("querying terminal background")?;
+                    }
+                    Event::Osc(_) if follow_terminal => {
+                        if let Some(mode) = terminal::background_theme(&event)
+                            && app.set_theme_mode(mode)
+                        {
                             is_dirty = true;
                         }
                     }
