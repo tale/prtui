@@ -9,10 +9,10 @@ use std::io::{self, Write};
 use std::ops::AsyncFnOnce;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use termina::escape::csi::{
-    Csi, DecPrivateMode, DecPrivateModeCode, Keyboard, KittyKeyboardFlags,
-    Mode, ThemeMode as TerminalThemeMode,
+    Csi, DecPrivateMode, DecPrivateModeCode, Device, Keyboard,
+    KittyKeyboardFlags, Mode,
 };
 use termina::escape::osc::{ColorOrQuery, DynamicColorNumber, Osc, Selection};
 use termina::{
@@ -80,8 +80,7 @@ impl TerminaTerminal for SharedTerminal {
     }
 }
 
-/// Query the terminal background before entering the alternate screen, falling
-/// back to the semantic color scheme report when OSC 11 goes unanswered.
+/// Query the terminal background before entering the alternate screen.
 pub fn detect_theme() -> ThemeMode {
     query_theme().ok().flatten().unwrap_or(ThemeMode::Dark)
 }
@@ -91,36 +90,44 @@ fn query_theme() -> io::Result<Option<ThemeMode>> {
     terminal.enter_raw_mode()?;
 
     let result = (|| {
-        // Replies come back in query order, so asking for the background first
-        // lets it win. Ghostty answers the scheme query with the OS appearance,
-        // which can disagree with the background it actually draws.
-        let query_mode = Csi::Mode(Mode::QueryTheme);
-        write!(terminal, "{}{query_mode}", background_query())?;
+        // DA1 is very widely supported
+        let sentinel = Csi::Device(Device::RequestPrimaryDeviceAttributes);
+        write!(terminal, "{}{sentinel}", background_query())?;
         terminal.flush()?;
 
-        let filter = |event: &Event| theme_from_event(event).is_some();
-        if !terminal.poll(filter, Some(Duration::from_millis(120)))? {
-            return Ok(None);
+        let is_sentinel = |event: &Event| {
+            matches!(
+                event,
+                Event::Csi(Csi::Device(Device::DeviceAttributes(())))
+            )
+        };
+
+        let filter = |event: &Event| {
+            background_theme(event).is_some() || is_sentinel(event)
+        };
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut theme = None;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if !terminal.poll(filter, Some(remaining))? {
+                break;
+            }
+
+            match background_theme(&terminal.read(filter)?) {
+                Some(mode) => theme = Some(mode),
+                None => break,
+            }
         }
-        terminal.read(filter).map(|event| theme_from_event(&event))
+
+        Ok(theme)
     })();
 
     let restored = terminal.enter_cooked_mode();
     match (result, restored) {
         (Ok(theme), Ok(())) => Ok(theme),
         (Err(error), _) | (_, Err(error)) => Err(error),
-    }
-}
-
-fn theme_from_event(event: &Event) -> Option<ThemeMode> {
-    match event {
-        Event::Csi(Csi::Mode(Mode::ReportTheme(TerminalThemeMode::Dark))) => {
-            Some(ThemeMode::Dark)
-        }
-        Event::Csi(Csi::Mode(Mode::ReportTheme(TerminalThemeMode::Light))) => {
-            Some(ThemeMode::Light)
-        }
-        _ => background_theme(event),
     }
 }
 
@@ -252,13 +259,8 @@ impl TerminalSession {
             .context("configuring terminal")?;
 
             if follow_theme {
-                write!(
-                    output,
-                    "{}{}",
-                    set_mode(DecPrivateModeCode::Theme),
-                    Csi::Mode(Mode::QueryTheme),
-                )
-                .context("enabling terminal theme notifications")?;
+                write!(output, "{}", set_mode(DecPrivateModeCode::Theme))
+                    .context("enabling terminal theme notifications")?;
             }
             output.flush().context("flushing terminal setup")?;
 
@@ -345,11 +347,11 @@ mod tests {
         };
 
         assert_eq!(
-            theme_from_event(&report(RgbColor::new(13, 17, 23))),
+            background_theme(&report(RgbColor::new(13, 17, 23))),
             Some(ThemeMode::Dark)
         );
         assert_eq!(
-            theme_from_event(&report(RgbColor::new(255, 255, 255))),
+            background_theme(&report(RgbColor::new(255, 255, 255))),
             Some(ThemeMode::Light)
         );
     }
@@ -360,7 +362,6 @@ mod tests {
             set_mode(DecPrivateModeCode::Theme).to_string(),
             "\x1b[?2031h"
         );
-        assert_eq!(Csi::Mode(Mode::QueryTheme).to_string(), "\x1b[?996n");
         assert_eq!(
             reset_mode(DecPrivateModeCode::Theme).to_string(),
             "\x1b[?2031l"
