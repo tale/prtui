@@ -1,3 +1,4 @@
+use super::Scheme;
 use ratatui::style::Color;
 
 /// The terminal background class used by both syntax and diff rendering.
@@ -28,72 +29,80 @@ pub struct Theme {
     pub code: Color,
     pub accent: Color,
     pub purple: Color,
-    pub orange: Color,
+    pub cyan: Color,
     pub success: Color,
     pub danger: Color,
     pub warning: Color,
     pub heading: Color,
 }
 
+const RED: usize = 1;
+const GREEN: usize = 2;
+const YELLOW: usize = 3;
+const BLUE: usize = 4;
+const MAGENTA: usize = 5;
+const CYAN: usize = 6;
+
+const LUMA_MAX: u32 = 255_000;
+
 impl Theme {
-    pub const fn for_mode(mode: ThemeMode) -> Self {
-        match mode {
-            ThemeMode::Dark => Self::dark(),
-            ThemeMode::Light => Self::light(),
-        }
+    pub fn for_mode(mode: ThemeMode) -> Self {
+        Self::from_scheme(&Scheme::for_mode(mode))
     }
 
-    pub const fn dark() -> Self {
-        Self {
-            mode: ThemeMode::Dark,
-            background: Color::Reset,
-            add: Color::Rgb(18, 38, 30),
-            delete: Color::Rgb(45, 22, 25),
-            add_emphasis: Color::Rgb(31, 111, 58),
-            delete_emphasis: Color::Rgb(111, 51, 55),
-            cursor: Color::Rgb(48, 54, 61),
-            selection: Color::Rgb(56, 67, 80),
-            hunk: Color::Rgb(27, 31, 36),
-            search: Color::Rgb(70, 58, 20),
-            search_current: Color::Rgb(140, 106, 18),
-            ink: Color::Rgb(1, 4, 9),
-            dim: Color::Rgb(125, 133, 144),
-            muted: Color::Rgb(140, 149, 159),
-            code: Color::Rgb(230, 237, 243),
-            accent: Color::Rgb(47, 129, 247),
-            purple: Color::Rgb(210, 168, 255),
-            orange: Color::Rgb(255, 166, 87),
-            success: Color::Rgb(63, 185, 80),
-            danger: Color::Rgb(248, 81, 73),
-            warning: Color::Rgb(210, 153, 34),
-            heading: Color::Rgb(230, 237, 243),
-        }
+    pub fn dark() -> Self {
+        Self::from_scheme(&Scheme::GITHUB_DARK)
     }
 
-    pub const fn light() -> Self {
+    pub fn light() -> Self {
+        Self::from_scheme(&Scheme::GITHUB_LIGHT)
+    }
+
+    pub fn from_scheme(scheme: &Scheme) -> Self {
+        let foreground = rgb(scheme.foreground);
+        let background = rgb(scheme.background);
+        let ansi = |index: usize| rgb(scheme.palette[index]);
+
+        let luma = luma(scheme.background);
+        let mode = if luma >= LUMA_MAX / 2 {
+            ThemeMode::Light
+        } else {
+            ThemeMode::Dark
+        };
+
+        let strength = |dark: u16, light: u16| {
+            let mixed =
+                u32::from(dark) * (LUMA_MAX - luma) + u32::from(light) * luma;
+            (mixed / LUMA_MAX) as u16
+        };
+        let surface =
+            |hue, dark, light| mix(background, hue, strength(dark, light));
+        let text =
+            |dark, light| mix(foreground, background, strength(dark, light));
+
         Self {
-            mode: ThemeMode::Light,
+            mode,
             background: Color::Reset,
-            add: Color::Rgb(218, 251, 225),
-            delete: Color::Rgb(255, 235, 233),
-            add_emphasis: Color::Rgb(172, 238, 187),
-            delete_emphasis: Color::Rgb(255, 206, 203),
-            cursor: Color::Rgb(208, 215, 222),
-            selection: Color::Rgb(191, 208, 226),
-            hunk: Color::Rgb(221, 244, 255),
-            search: Color::Rgb(255, 243, 176),
-            search_current: Color::Rgb(250, 214, 92),
-            ink: Color::Rgb(255, 255, 255),
-            dim: Color::Rgb(110, 119, 129),
-            muted: Color::Rgb(89, 99, 110),
-            code: Color::Rgb(31, 35, 40),
-            accent: Color::Rgb(9, 105, 218),
-            purple: Color::Rgb(130, 80, 223),
-            orange: Color::Rgb(188, 76, 0),
-            success: Color::Rgb(26, 127, 55),
-            danger: Color::Rgb(207, 34, 46),
-            warning: Color::Rgb(154, 103, 0),
-            heading: Color::Rgb(31, 35, 40),
+            add: surface(ansi(GREEN), 12, 18),
+            delete: surface(ansi(RED), 13, 12),
+            add_emphasis: surface(ansi(GREEN), 50, 40),
+            delete_emphasis: surface(ansi(RED), 45, 28),
+            cursor: surface(foreground, 18, 20),
+            selection: surface(ansi(BLUE), 28, 32),
+            hunk: surface(ansi(BLUE), 10, 12),
+            search: surface(ansi(YELLOW), 25, 30),
+            search_current: surface(ansi(YELLOW), 55, 60),
+            ink: background,
+            dim: text(48, 36),
+            muted: text(40, 26),
+            code: foreground,
+            accent: ansi(BLUE),
+            purple: ansi(MAGENTA),
+            cyan: ansi(CYAN),
+            success: ansi(GREEN),
+            danger: ansi(RED),
+            warning: ansi(YELLOW),
+            heading: foreground,
         }
     }
 
@@ -105,6 +114,14 @@ impl Theme {
     pub fn selection_background(self, background: Color) -> Color {
         mix(background, self.selection, 58)
     }
+}
+
+const fn rgb(hex: u32) -> Color {
+    Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+const fn luma(hex: u32) -> u32 {
+    (hex >> 16 & 0xff) * 299 + (hex >> 8 & 0xff) * 587 + (hex & 0xff) * 114
 }
 
 fn mix(from: Color, to: Color, percent: u16) -> Color {

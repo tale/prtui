@@ -269,7 +269,7 @@ fn draw_header(frame: &mut Frame, app: AppView<'_>, area: Rect) {
                 spans.push(take(
                     format!(" {scope} "),
                     Style::default()
-                        .bg(theme.orange)
+                        .bg(theme.cyan)
                         .fg(theme.ink)
                         .add_modifier(Modifier::BOLD),
                 ));
@@ -724,7 +724,7 @@ fn card_indent(width: usize) -> usize {
 const fn draft_tint(sync: &Sync, theme: Theme) -> Color {
     match sync {
         Sync::Failed(_) => theme.danger,
-        Sync::Synced => theme.orange,
+        Sync::Synced => theme.cyan,
         _ => theme.dim,
     }
 }
@@ -1067,7 +1067,7 @@ fn draw_composer(frame: &mut Frame, app: AppView<'_>, layout: &Layout) {
         (position, theme.dim)
     };
 
-    let block = docked_block(title, theme.orange).title_bottom(
+    let block = docked_block(title, theme.cyan).title_bottom(
         Line::styled(footer, Style::default().fg(footer_color)).right_aligned(),
     );
     let inner = block.inner(rect);
@@ -1311,7 +1311,7 @@ pub fn bar_style(theme: Theme) -> Style {
 pub fn mode_chip(mode: Mode, theme: Theme) -> Span<'static> {
     let background = match mode {
         Mode::Normal => theme.accent,
-        Mode::Visual => theme.orange,
+        Mode::Visual => theme.cyan,
         Mode::Insert => theme.success,
         Mode::Filter => theme.purple,
         Mode::Search => theme.warning,
@@ -1459,7 +1459,7 @@ fn draw_bottom_bar(
         let rows = selection.row_count();
         spans.push(Span::styled(
             format!("   {rows} {}", if rows == 1 { "line" } else { "lines" }),
-            bar.fg(theme.orange),
+            bar.fg(theme.cyan),
         ));
     }
 
@@ -1486,7 +1486,7 @@ fn draw_bottom_bar(
     if !app.drafts.is_empty() {
         spans.push(Span::styled(
             format!("   ✎ {}", app.drafts.len()),
-            bar.fg(theme.orange),
+            bar.fg(theme.cyan),
         ));
     }
 

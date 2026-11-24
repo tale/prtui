@@ -446,13 +446,10 @@ impl Builder {
             }
             Event::Code(code) => self.append(
                 code.into_string(),
-                self.style.fg(self.theme.orange).bg(self.theme.cursor),
+                self.style.fg(self.theme.cyan).bg(self.theme.cursor),
             ),
             Event::InlineMath(math) | Event::DisplayMath(math) => {
-                self.append(
-                    math.into_string(),
-                    self.style.fg(self.theme.orange),
-                );
+                self.append(math.into_string(), self.style.fg(self.theme.cyan));
             }
             Event::Html(html) | Event::InlineHtml(html) => self.html(&html),
             Event::FootnoteReference(label) => self.append(
