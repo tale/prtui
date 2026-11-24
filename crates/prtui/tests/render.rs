@@ -10,7 +10,7 @@ use prtui_tui::app::{App, Card, Pane};
 use prtui_tui::expand::{Place, Reveal, STEP};
 use prtui_tui::layout::Layout;
 use prtui_tui::layout::rows::{GUTTER, Row};
-use prtui_tui::renderer::ThemeMode;
+use prtui_tui::renderer::Theme;
 use prtui_tui::ui;
 use ratatui::Frame;
 use ratatui::Terminal;
@@ -1121,9 +1121,7 @@ fn scrolling_stays_in_bounds() {
 
 #[test]
 fn light_mode_uses_light_diff_and_syntax_palettes() {
-    use prtui_tui::renderer::Theme;
-
-    let mut app = App::with_theme(Theme::for_mode(ThemeMode::Light));
+    let mut app = App::with_theme(Theme::light());
     app.set_files(parse_files(include_bytes!("fixtures/files.json")).unwrap());
     set_tree_visible(&mut app, false);
     highlight(&mut app);
@@ -1214,9 +1212,9 @@ fn switching_terminal_appearance_invalidates_old_syntax_colors() {
     highlight(&mut app);
     assert!(app.open().unwrap().segments(0).is_some());
 
-    assert!(app.set_theme_mode(ThemeMode::Light));
+    assert!(app.set_theme(Theme::light()));
     assert!(app.open().unwrap().segments(0).is_none());
-    assert!(!app.set_theme_mode(ThemeMode::Light));
+    assert!(!app.set_theme(Theme::light()));
 }
 
 #[test]
@@ -1527,8 +1525,6 @@ fn a_folded_directory_without_threads_carries_no_mark() {
 /// the chip, while the open file keeps its bar in the tree either way.
 #[test]
 fn the_chip_follows_the_keys_and_the_open_file_keeps_its_bar() {
-    use prtui_tui::renderer::Theme;
-
     let mut app = load();
     set_tree_visible(&mut app, true);
     select_file(&mut app, 1);
@@ -1577,7 +1573,6 @@ fn the_chip_follows_the_keys_and_the_open_file_keeps_its_bar() {
 #[test]
 fn the_file_filter_paints_its_hit_in_the_path() {
     use prtui_tui::app::input::InputRouter;
-    use prtui_tui::renderer::Theme;
 
     let mut app = load();
     set_tree_visible(&mut app, true);
@@ -1747,7 +1742,6 @@ fn the_tree_keeps_the_rule_between_the_panes() {
 #[test]
 fn search_paints_only_the_matched_bytes_of_a_diff_line() {
     use prtui_tui::app::input::InputRouter;
-    use prtui_tui::renderer::Theme;
 
     const NEEDLE: &str = "DisableAuthCheckFlag";
 
@@ -2625,8 +2619,6 @@ fn row_background(app: &App, x: u16, y: u16) -> Option<ratatui::style::Color> {
 
 #[test]
 fn the_cursor_shows_on_a_hunk_header() {
-    use prtui_tui::renderer::Theme;
-
     let mut app = load();
     focus_pane(&mut app, Pane::Diff);
     assert_eq!(
@@ -2645,8 +2637,6 @@ fn the_cursor_shows_on_a_hunk_header() {
 
 #[test]
 fn a_selected_commit_keeps_its_highlight_under_the_cursor() {
-    use prtui_tui::renderer::Theme;
-
     let mut app = load();
     press(&mut app, "L");
     let Some(Effect::FetchCommits { generation }) = app.take_effects().pop()

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use prtui_core::{Provider, PullRequestTarget, Repo};
-use prtui_tui::renderer::Theme;
+use prtui_tui::renderer::{Schemes, Theme};
 use prtui_tui::selector::{self, Effect, Message, Selector};
 use prtui_tui::terminal;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ impl<P: Provider> Dashboard<P> {
         terminal: &mut terminal::AppTerminal,
         events: &mut EventStream,
         theme: &mut Theme,
-        follow_terminal: bool,
+        schemes: Schemes,
     ) -> Result<Option<PullRequestTarget>> {
         self.selector.resume();
         let effect = self.selector.refresh();
@@ -101,15 +101,14 @@ impl<P: Provider> Dashboard<P> {
                     let effect = self.selector.press(key, metrics);
                     self.execute(effect);
                 }
-                Event::Csi(Csi::Mode(CsiMode::ReportTheme(_)))
-                    if follow_terminal =>
-                {
+                Event::Csi(Csi::Mode(CsiMode::ReportTheme(_))) => {
                     terminal::query_background(terminal)
                         .context("querying terminal background")?;
                 }
-                Event::Osc(_) if follow_terminal => {
-                    if let Some(mode) = terminal::background_theme(&event) {
-                        *theme = Theme::for_mode(mode);
+                Event::Osc(_) => {
+                    if let Some(background) = terminal::background_color(&event)
+                    {
+                        *theme = Theme::new(schemes, Some(background));
                     }
                 }
                 _ => {}

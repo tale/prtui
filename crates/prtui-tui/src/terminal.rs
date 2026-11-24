@@ -1,4 +1,3 @@
-use crate::renderer::ThemeMode;
 use anyhow::{Context, Result};
 use futures_core::Stream;
 use ratatui::backend::TerminaBackend;
@@ -81,11 +80,11 @@ impl TerminaTerminal for SharedTerminal {
 }
 
 /// Query the terminal background before entering the alternate screen.
-pub fn detect_theme() -> ThemeMode {
-    query_theme().ok().flatten().unwrap_or(ThemeMode::Dark)
+pub fn detect_background() -> Option<u32> {
+    read_background().ok().flatten()
 }
 
-fn query_theme() -> io::Result<Option<ThemeMode>> {
+fn read_background() -> io::Result<Option<u32>> {
     let mut terminal = PlatformTerminal::new()?;
     terminal.enter_raw_mode()?;
 
@@ -103,11 +102,11 @@ fn query_theme() -> io::Result<Option<ThemeMode>> {
         };
 
         let filter = |event: &Event| {
-            background_theme(event).is_some() || is_sentinel(event)
+            background_color(event).is_some() || is_sentinel(event)
         };
 
         let deadline = Instant::now() + Duration::from_millis(100);
-        let mut theme = None;
+        let mut background = None;
 
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -115,46 +114,41 @@ fn query_theme() -> io::Result<Option<ThemeMode>> {
                 break;
             }
 
-            match background_theme(&terminal.read(filter)?) {
-                Some(mode) => theme = Some(mode),
+            match background_color(&terminal.read(filter)?) {
+                Some(color) => background = Some(color),
                 None => break,
             }
         }
 
-        Ok(theme)
+        Ok(background)
     })();
 
     let restored = terminal.enter_cooked_mode();
     match (result, restored) {
-        (Ok(theme), Ok(())) => Ok(theme),
+        (Ok(background), Ok(())) => Ok(background),
         (Err(error), _) | (_, Err(error)) => Err(error),
     }
 }
 
-/// Asks for the terminal background; the reply arrives as an event for
-/// [`background_theme`].
+/// Asks for the terminal background. The reply arrives as an event for
+/// [`background_color`].
 pub fn query_background(terminal: &mut AppTerminal) -> io::Result<()> {
     write!(terminal.backend_mut(), "{}", background_query())?;
     terminal.backend_mut().flush()
 }
 
-/// Classifies an OSC 11 background report by its luminance.
-pub fn background_theme(event: &Event) -> Option<ThemeMode> {
+/// Reads the color out of an OSC 11 background report.
+pub fn background_color(event: &Event) -> Option<u32> {
     match event {
         Event::Osc(Osc::ChangeDynamicColors(
             DynamicColorNumber::TextBackgroundColor,
             colors,
         )) => colors.iter().find_map(|color| match color {
-            ColorOrQuery::Color(color) => {
-                let luma = u32::from(color.red) * 299
-                    + u32::from(color.green) * 587
-                    + u32::from(color.blue) * 114;
-                Some(if luma >= 128_000 {
-                    ThemeMode::Light
-                } else {
-                    ThemeMode::Dark
-                })
-            }
+            ColorOrQuery::Color(color) => Some(
+                u32::from(color.red) << 16
+                    | u32::from(color.green) << 8
+                    | u32::from(color.blue),
+            ),
             ColorOrQuery::Query => None,
         }),
         _ => None,
@@ -169,14 +163,14 @@ fn background_query() -> Osc<'static> {
 }
 
 /// Runs asynchronous application code inside a fully restored Termina session.
-pub async fn scope<T, F>(follow_theme: bool, run: F) -> Result<T>
+pub async fn scope<T, F>(run: F) -> Result<T>
 where
     F: for<'a> AsyncFnOnce(
         &'a mut AppTerminal,
         &'a mut EventStream,
     ) -> Result<T>,
 {
-    let mut session = TerminalSession::enter(follow_theme)?;
+    let mut session = TerminalSession::enter()?;
     run(&mut session.terminal, &mut session.events).await
 }
 
@@ -229,19 +223,18 @@ struct TerminalSession {
     terminal: AppTerminal,
     events: EventStream,
     control: SharedTerminal,
-    follow_theme: bool,
 }
 
 impl TerminalSession {
-    fn enter(follow_theme: bool) -> Result<Self> {
+    fn enter() -> Result<Self> {
         let mut control = SharedTerminal::open().context("opening terminal")?;
         control.enter_raw_mode().context("enabling raw mode")?;
 
         // Termina reopens a pty and restores termios around this; the alternate
         // screen and keyboard flags are ours to undo. The session guard's `Drop`
         // never runs under `panic = "abort"`, so this is the only path back.
-        control.set_panic_hook(move |handle| {
-            let _ = restore_output(handle, follow_theme);
+        control.set_panic_hook(|handle| {
+            let _ = restore_output(handle);
         });
 
         let entered = (|| -> Result<(AppTerminal, EventStream)> {
@@ -249,19 +242,15 @@ impl TerminalSession {
 
             write!(
                 output,
-                "{}{}{}",
+                "{}{}{}{}",
                 set_mode(DecPrivateModeCode::ClearAndEnableAlternateScreen),
                 set_mode(DecPrivateModeCode::BracketedPaste),
                 Csi::Keyboard(Keyboard::PushFlags(
                     KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES
                 )),
+                set_mode(DecPrivateModeCode::Theme),
             )
             .context("configuring terminal")?;
-
-            if follow_theme {
-                write!(output, "{}", set_mode(DecPrivateModeCode::Theme))
-                    .context("enabling terminal theme notifications")?;
-            }
             output.flush().context("flushing terminal setup")?;
 
             let events = EventStream::new(control.event_reader(), |_| true);
@@ -275,7 +264,7 @@ impl TerminalSession {
         let (terminal, events) = match entered {
             Ok(session) => session,
             Err(error) => {
-                let _ = restore_output(&mut control, follow_theme);
+                let _ = restore_output(&mut control);
                 let _ = control.enter_cooked_mode();
                 return Err(error);
             }
@@ -285,35 +274,25 @@ impl TerminalSession {
             terminal,
             events,
             control,
-            follow_theme,
         })
     }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        let _ = restore_output(self.terminal.backend_mut(), self.follow_theme);
+        let _ = restore_output(self.terminal.backend_mut());
         let _ = self.control.enter_cooked_mode();
     }
 }
 
-fn restore_output(
-    output: &mut impl Write,
-    follow_theme: bool,
-) -> io::Result<()> {
+fn restore_output(output: &mut impl Write) -> io::Result<()> {
     write!(
         output,
-        "{}{}{}",
+        "{}{}{}{}{}{}",
         Csi::Keyboard(Keyboard::PopFlags(1)),
         reset_mode(DecPrivateModeCode::BracketedPaste),
         reset_mode(DecPrivateModeCode::SynchronizedOutput),
-    )?;
-    if follow_theme {
-        write!(output, "{}", reset_mode(DecPrivateModeCode::Theme))?;
-    }
-    write!(
-        output,
-        "{}{}",
+        reset_mode(DecPrivateModeCode::Theme),
         reset_mode(DecPrivateModeCode::ClearAndEnableAlternateScreen),
         set_mode(DecPrivateModeCode::ShowCursor),
     )?;
@@ -338,7 +317,7 @@ mod tests {
     use termina::style::RgbColor;
 
     #[test]
-    fn classifies_osc_11_backgrounds() {
+    fn reads_osc_11_backgrounds() {
         let report = |color| {
             Event::Osc(Osc::ChangeDynamicColors(
                 DynamicColorNumber::TextBackgroundColor,
@@ -347,12 +326,8 @@ mod tests {
         };
 
         assert_eq!(
-            background_theme(&report(RgbColor::new(13, 17, 23))),
-            Some(ThemeMode::Dark)
-        );
-        assert_eq!(
-            background_theme(&report(RgbColor::new(255, 255, 255))),
-            Some(ThemeMode::Light)
+            background_color(&report(RgbColor::new(13, 17, 23))),
+            Some(0x0d1117)
         );
     }
 

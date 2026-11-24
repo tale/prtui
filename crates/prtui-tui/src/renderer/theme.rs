@@ -1,4 +1,4 @@
-use super::Scheme;
+use super::{Scheme, Schemes};
 use ratatui::style::Color;
 
 /// The terminal background class used by both syntax and diff rendering.
@@ -10,7 +10,7 @@ pub enum ThemeMode {
 
 /// One coherent palette for the whole renderer. Syntax colors come from a
 /// matching syntect theme; these colors cover diff state and lightweight UI.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub mode: ThemeMode,
     pub background: Color,
@@ -46,24 +46,37 @@ const CYAN: usize = 6;
 const LUMA_MAX: u32 = 255_000;
 
 impl Theme {
-    pub fn for_mode(mode: ThemeMode) -> Self {
-        Self::from_scheme(&Scheme::for_mode(mode))
+    /// Picks the scheme for the terminal background and blends against it.
+    /// Without a detected background the dark scheme stands on its own.
+    pub fn new(schemes: Schemes, background: Option<u32>) -> Self {
+        let Some(background) = background else {
+            return Self::from_scheme(&schemes.dark, schemes.dark.background);
+        };
+
+        let scheme = if is_light(background) {
+            schemes.light
+        } else {
+            schemes.dark
+        };
+        Self::from_scheme(&scheme, background)
     }
 
     pub fn dark() -> Self {
-        Self::from_scheme(&Scheme::GITHUB_DARK)
+        let scheme = Schemes::github().dark;
+        Self::from_scheme(&scheme, scheme.background)
     }
 
     pub fn light() -> Self {
-        Self::from_scheme(&Scheme::GITHUB_LIGHT)
+        let scheme = Schemes::github().light;
+        Self::from_scheme(&scheme, scheme.background)
     }
 
-    pub fn from_scheme(scheme: &Scheme) -> Self {
+    pub fn from_scheme(scheme: &Scheme, background: u32) -> Self {
+        let luma = luma(background);
         let foreground = rgb(scheme.foreground);
-        let background = rgb(scheme.background);
+        let background = rgb(background);
         let ansi = |index: usize| rgb(scheme.palette[index]);
 
-        let luma = luma(scheme.background);
         let mode = if luma >= LUMA_MAX / 2 {
             ThemeMode::Light
         } else {
@@ -130,6 +143,10 @@ impl Theme {
 
 const fn rgb(hex: u32) -> Color {
     Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+const fn is_light(hex: u32) -> bool {
+    luma(hex) >= LUMA_MAX / 2
 }
 
 const fn luma(hex: u32) -> u32 {

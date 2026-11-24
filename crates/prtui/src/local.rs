@@ -5,7 +5,7 @@ use prtui_tui::{
         App,
         local::{LocalFile, Staging},
     },
-    renderer::{self, Theme},
+    renderer::{self, Schemes, Theme},
     terminal,
 };
 use std::{
@@ -15,9 +15,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{
-    AppMessage, Effect, Message, ReviewExit, ThemeChoice, viewer_loop,
-};
+use crate::{AppMessage, Effect, Message, ReviewExit, viewer_loop};
 
 struct Snapshot {
     root: PathBuf,
@@ -199,7 +197,7 @@ impl Snapshot {
     }
 }
 
-pub async fn run(choice: ThemeChoice) -> Result<()> {
+pub async fn run(schemes: Schemes) -> Result<()> {
     let directory = std::env::current_dir()?;
     let snapshot =
         tokio::task::spawn_blocking(move || Snapshot::load(&directory))
@@ -208,7 +206,7 @@ pub async fn run(choice: ThemeChoice) -> Result<()> {
         println!("No uncommitted changes.");
         return Ok(());
     }
-    let mut theme = Theme::for_mode(choice.resolve());
+    let mut theme = Theme::new(schemes, terminal::detect_background());
     let root = snapshot.root.clone();
     let app = App::local(
         theme,
@@ -218,12 +216,12 @@ pub async fn run(choice: ThemeChoice) -> Result<()> {
         snapshot.states,
     );
     std::thread::spawn(move || renderer::preload(theme.mode));
-    terminal::scope(choice.follows_terminal(), async move |terminal, events| {
+    terminal::scope(async move |terminal, events| {
         viewer_loop(
             terminal,
             events,
             &mut theme,
-            choice.follows_terminal(),
+            schemes,
             app,
             ReviewExit::Process,
             move |effect, tx, _| {

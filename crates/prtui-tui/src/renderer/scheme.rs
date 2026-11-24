@@ -1,4 +1,6 @@
-use super::ThemeMode;
+// Ghostty themes from schemes.conf, sorted by name.
+const SCHEMES: &[(&str, &str)] =
+    include!(concat!(env!("OUT_DIR"), "/schemes.rs"));
 
 /// A terminal color scheme in the shape iTerm2-Color-Schemes publishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,25 +11,13 @@ pub struct Scheme {
 }
 
 impl Scheme {
-    pub const GITHUB_DARK: Self = Self {
-        foreground: 0xe6edf3,
-        background: 0x0d1117,
-        palette: [
-            0x484f58, 0xff7b72, 0x3fb950, 0xd29922, 0x58a6ff, 0xbc8cff,
-            0x39c5cf, 0xb1bac4, 0x6e7681, 0xffa198, 0x56d364, 0xe3b341,
-            0x79c0ff, 0xd2a8ff, 0x56d4dd, 0xffffff,
-        ],
-    };
-
-    pub const GITHUB_LIGHT: Self = Self {
-        foreground: 0x1f2328,
-        background: 0xffffff,
-        palette: [
-            0x24292f, 0xcf222e, 0x116329, 0x4d2d00, 0x0969da, 0x8250df,
-            0x1b7c83, 0x6e7781, 0x57606a, 0xa40e26, 0x1a7f37, 0x633c01,
-            0x218bff, 0xa475f9, 0x3192aa, 0x8c959f,
-        ],
-    };
+    /// Finds a bundled scheme by name, ignoring case.
+    pub fn named(name: &str) -> Option<Self> {
+        SCHEMES
+            .iter()
+            .find(|(known, _)| known.eq_ignore_ascii_case(name))
+            .and_then(|(_, text)| Self::parse(text))
+    }
 
     /// Reads a scheme in Ghostty's theme format.
     pub fn parse(text: &str) -> Option<Self> {
@@ -69,12 +59,51 @@ impl Scheme {
             palette: colors,
         })
     }
+}
 
-    pub const fn for_mode(mode: ThemeMode) -> Self {
-        match mode {
-            ThemeMode::Dark => Self::GITHUB_DARK,
-            ThemeMode::Light => Self::GITHUB_LIGHT,
+/// The schemes to use on light and dark terminal backgrounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Schemes {
+    pub light: Scheme,
+    pub dark: Scheme,
+}
+
+impl Schemes {
+    pub fn github() -> Self {
+        let named = |name| Scheme::named(name).expect("GitHub is bundled");
+        Self {
+            light: named("GitHub Light Default"),
+            dark: named("GitHub Dark Default"),
         }
+    }
+
+    /// Reads `auto`, one scheme name, or Ghostty's `light:NAME,dark:NAME`.
+    pub fn parse(value: &str) -> Option<Self> {
+        if value == "auto" {
+            return Some(Self::github());
+        }
+
+        if !value.contains(',') {
+            let scheme = Scheme::named(value)?;
+            return Some(Self {
+                light: scheme,
+                dark: scheme,
+            });
+        }
+
+        let (mut light, mut dark) = (None, None);
+        for part in value.split(',') {
+            match part.trim().split_once(':') {
+                Some(("light", name)) => light = Scheme::named(name.trim()),
+                Some(("dark", name)) => dark = Scheme::named(name.trim()),
+                _ => return None,
+            }
+        }
+
+        Some(Self {
+            light: light?,
+            dark: dark?,
+        })
     }
 }
 
@@ -90,19 +119,44 @@ fn hex(value: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fmt::Write;
 
     #[test]
-    fn parses_ghostty_themes() {
-        let mut text = String::from(
-            "background = #0d1117\nforeground = #e6edf3\ncursor-color = #2f81f7\n",
-        );
-
-        for (index, color) in Scheme::GITHUB_DARK.palette.iter().enumerate() {
-            let _ = writeln!(text, "palette = {index}=#{color:06x}");
+    fn parses_every_bundled_scheme() {
+        for (name, text) in SCHEMES {
+            assert!(Scheme::parse(text).is_some(), "{name} does not parse");
         }
 
-        assert_eq!(Scheme::parse(&text), Some(Scheme::GITHUB_DARK));
+        let github = Scheme::named("github dark default").unwrap();
+        assert_eq!(github.background, 0x0d1117);
+        assert_eq!(github.palette[1], 0xff7b72);
         assert_eq!(Scheme::parse("background = #0d1117"), None);
+    }
+
+    #[test]
+    fn parses_theme_pairs() {
+        let mocha = Scheme::named("Catppuccin Mocha").unwrap();
+        let latte = Scheme::named("Catppuccin Latte").unwrap();
+
+        let pair =
+            Schemes::parse("dark:catppuccin mocha, light:Catppuccin Latte");
+        assert_eq!(
+            pair,
+            Some(Schemes {
+                light: latte,
+                dark: mocha
+            })
+        );
+
+        let single = Schemes::parse("Catppuccin Mocha");
+        assert_eq!(
+            single,
+            Some(Schemes {
+                light: mocha,
+                dark: mocha
+            })
+        );
+
+        assert_eq!(Schemes::parse("auto"), Some(Schemes::github()));
+        assert_eq!(Schemes::parse("light:Catppuccin Latte,dark:nope"), None);
     }
 }

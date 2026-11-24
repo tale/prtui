@@ -25,7 +25,7 @@ use crate::expand::{self, Gap, Place, Reveal};
 use crate::layout::rows::ThreadState;
 use crate::layout::{Content, Layout};
 use crate::overview::{self, FoldState};
-use crate::renderer::{Segment, Theme, ThemeMode};
+use crate::renderer::{Segment, Theme};
 use crate::vim::Cursor;
 use action::Action;
 use draft::{Anchor, Attachment, Draft, Sync};
@@ -767,13 +767,13 @@ impl App {
     }
 
     /// Swap the complete renderer palette and discard syntax colors produced
-    /// under the previous terminal appearance.
-    pub fn set_theme_mode(&mut self, mode: ThemeMode) -> bool {
-        if self.theme.mode == mode {
+    /// under the previous one.
+    pub fn set_theme(&mut self, theme: Theme) -> bool {
+        if self.theme == theme {
             return false;
         }
 
-        self.theme = Theme::for_mode(mode);
+        self.theme = theme;
         self.highlights.clear();
         self.runtime.effects.push(Effect::HighlightAll);
         true

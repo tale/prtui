@@ -24,6 +24,10 @@ description = "Everything CI runs"
 depends = ["lint"]
 run = ["cargo fmt --all -- --check", "cargo test --all-features"]
 
+[tasks."schemes:sync"]
+description = "Vendor the redistributable iTerm2-Color-Schemes themes"
+run = "scripts/sync-schemes.sh"
+
 [tasks.release]
 description = "Check, commit, tag, and publish a release from main"
 run = "knope release"

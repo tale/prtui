@@ -10,7 +10,7 @@ use prtui_tui::app::input::InputRouter;
 use prtui_tui::app::link::{Errand, Link};
 use prtui_tui::app::review::{Failure, Request, Sent};
 use prtui_tui::layout::Layout;
-use prtui_tui::renderer::{self, Theme, ThemeMode};
+use prtui_tui::renderer::{self, Schemes, Theme};
 use prtui_tui::ui;
 use prtui_tui::{highlighter, terminal};
 use std::{sync::Arc, time::Duration};
@@ -46,9 +46,9 @@ struct Args {
     #[arg(long, value_enum)]
     provider: Option<ProviderChoice>,
 
-    /// Color theme; auto queries the terminal's actual background
-    #[arg(long, global = true, value_enum, default_value_t = ThemeChoice::Auto)]
-    theme: ThemeChoice,
+    /// Color theme: auto, a bundled scheme, or light:NAME,dark:NAME
+    #[arg(long, global = true, default_value = "auto", value_parser = parse_theme)]
+    theme: Schemes,
 }
 
 #[derive(Subcommand)]
@@ -57,31 +57,16 @@ enum Command {
     Diff,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum ThemeChoice {
-    Auto,
-    Dark,
-    Light,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ProviderChoice {
     Github,
     Gitlab,
 }
 
-impl ThemeChoice {
-    fn resolve(self) -> ThemeMode {
-        match self {
-            Self::Auto => terminal::detect_theme(),
-            Self::Dark => ThemeMode::Dark,
-            Self::Light => ThemeMode::Light,
-        }
-    }
-
-    const fn follows_terminal(self) -> bool {
-        matches!(self, Self::Auto)
-    }
+fn parse_theme(value: &str) -> Result<Schemes, String> {
+    Schemes::parse(value).ok_or_else(|| {
+        format!("no bundled scheme or light:NAME,dark:NAME pair for {value:?}")
+    })
 }
 
 enum Message {
@@ -355,8 +340,6 @@ async fn start<P: Provider>(
     provider: P,
     slug: Option<String>,
 ) -> Result<()> {
-    let follow_terminal = args.theme.follows_terminal();
-
     let repo = slug
         .as_deref()
         .map(|slug| provider.parse_repo(slug))
@@ -371,20 +354,20 @@ async fn start<P: Provider>(
         (None, repo) => Launch::Select(repo),
     };
 
-    // Resolve the initial palette before entering the alternate screen. In
-    // auto mode the live notification can still update it inside the session.
-    let theme = Theme::for_mode(args.theme.resolve());
+    // Read the background before entering the alternate screen. A live
+    // notification can still update it inside the session.
+    let theme = Theme::new(args.theme, terminal::detect_background());
 
-    run(theme, follow_terminal, launch, provider).await
+    run(theme, args.theme, launch, provider).await
 }
 
 async fn run<P: Provider>(
     theme: Theme,
-    follow_terminal: bool,
+    schemes: Schemes,
     launch: Launch,
     provider: P,
 ) -> Result<()> {
-    terminal::scope(follow_terminal, async move |terminal, events| {
+    terminal::scope(async move |terminal, events| {
         let mut theme = theme;
         match launch {
             Launch::Review { repo, number } => {
@@ -393,7 +376,7 @@ async fn run<P: Provider>(
                     terminal,
                     events,
                     &mut theme,
-                    follow_terminal,
+                    schemes,
                     PullRequestTarget {
                         repo: Arc::new(repo),
                         number,
@@ -409,7 +392,7 @@ async fn run<P: Provider>(
 
                 loop {
                     let Some(target) = dashboard
-                        .select(terminal, events, &mut theme, follow_terminal)
+                        .select(terminal, events, &mut theme, schemes)
                         .await?
                     else {
                         break;
@@ -427,7 +410,7 @@ async fn run<P: Provider>(
                             terminal,
                             events,
                             &mut theme,
-                            follow_terminal,
+                            schemes,
                             target,
                             provider,
                             ReviewExit::Dashboard,
@@ -450,7 +433,7 @@ async fn event_loop<P: Provider>(
     terminal: &mut terminal::AppTerminal,
     events: &mut EventStream,
     theme: &mut Theme,
-    follow_terminal: bool,
+    schemes: Schemes,
     target: PullRequestTarget,
     provider: P,
     exit: ReviewExit,
@@ -464,7 +447,7 @@ async fn event_loop<P: Provider>(
         terminal,
         events,
         theme,
-        follow_terminal,
+        schemes,
         app,
         exit,
         move |effect, tx, terminal| {
@@ -545,7 +528,7 @@ async fn viewer_loop(
     terminal: &mut terminal::AppTerminal,
     events: &mut EventStream,
     theme: &mut Theme,
-    follow_terminal: bool,
+    schemes: Schemes,
     mut app: App,
     mut exit: ReviewExit,
     mut execute: impl FnMut(
@@ -653,15 +636,14 @@ async fn viewer_loop(
                     }
                     // The reported scheme can be the OS appearance rather than
                     // the terminal's own, so it only prompts a background check.
-                    Event::Csi(Csi::Mode(CsiMode::ReportTheme(_)))
-                        if follow_terminal =>
-                    {
+                    Event::Csi(Csi::Mode(CsiMode::ReportTheme(_))) => {
                         terminal::query_background(terminal)
                             .context("querying terminal background")?;
                     }
-                    Event::Osc(_) if follow_terminal => {
-                        if let Some(mode) = terminal::background_theme(&event)
-                            && app.set_theme_mode(mode)
+                    Event::Osc(_) => {
+                        if let Some(background) =
+                            terminal::background_color(&event)
+                            && app.set_theme(Theme::new(schemes, Some(background)))
                         {
                             is_dirty = true;
                         }
@@ -709,7 +691,7 @@ mod tests {
         let bare = Args::try_parse_from(["prtui"]).unwrap();
         assert_eq!(bare.number, None);
         assert!(bare.command.is_none());
-        assert!(bare.theme.follows_terminal());
+        assert_eq!(bare.theme, Schemes::github());
 
         let pull =
             Args::try_parse_from(["prtui", "123", "-R", "owner/repo"]).unwrap();
@@ -717,8 +699,8 @@ mod tests {
         assert_eq!(pull.repo.as_deref(), Some("owner/repo"));
 
         let diff =
-            Args::try_parse_from(["prtui", "diff", "--theme", "dark"]).unwrap();
+            Args::try_parse_from(["prtui", "diff", "--theme", "Nord"]).unwrap();
         assert!(matches!(diff.command, Some(Command::Diff)));
-        assert!(!diff.theme.follows_terminal());
+        assert_ne!(diff.theme, Schemes::github());
     }
 }

@@ -7,7 +7,7 @@ description: Repository selection, providers, authentication, and terminal theme
 
 ```text
 prtui [OPTIONS] [NUMBER]
-prtui diff [--theme auto|dark|light]
+prtui diff [--theme THEME]
 ```
 
 Without a number, prtui opens the request picker. Inside a repository it uses the
@@ -20,7 +20,7 @@ listing for your account.
 | ------------------------------------ | ---------------------------------------- |
 | `-R`, `--repo [HOST/]NAMESPACE/REPO` | Select a repository                      |
 | `--provider github\|gitlab`          | Override provider detection              |
-| `--theme auto\|dark\|light`          | Choose a color theme; defaults to `auto` |
+| `--theme THEME`                      | Choose a color theme; defaults to `auto` |
 | `-h`, `--help`                       | Show command help                        |
 | `-V`, `--version`                    | Show the version                         |
 
@@ -53,12 +53,14 @@ that cache. If a saved provider is wrong, remove its entry to detect it again.
 
 ## Appearance
 
-The default `auto` theme reads the terminal background and follows theme changes.
-Override it when needed:
+prtui reads the terminal background and follows it as it changes. The default
+`auto` theme uses GitHub's light or dark colors to match. Name one of the
+[bundled schemes](https://github.com/tale/prtui/blob/main/crates/prtui-tui/SCHEMES.md)
+to use it on any background, or give one scheme for each:
 
 ```sh
-prtui --theme light
-prtui diff --theme dark
+prtui --theme "Catppuccin Mocha"
+prtui diff --theme "light:Catppuccin Latte,dark:Catppuccin Mocha"
 ```
 
 ## Troubleshooting
@@ -73,4 +75,4 @@ and signed in to the correct host with access to the repository. Use
 **Cannot comment:** local diffs and selected commit ranges are read-only. For a
 remote review, press `L` and select **All changes** before writing a comment.
 
-**Unexpected colors:** try `--theme dark` or `--theme light`.
+**Unexpected colors:** name a scheme with `--theme` that suits the terminal background.
