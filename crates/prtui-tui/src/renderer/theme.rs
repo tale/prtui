@@ -75,26 +75,38 @@ impl Theme {
                 u32::from(dark) * (LUMA_MAX - luma) + u32::from(light) * luma;
             (mixed / LUMA_MAX) as u16
         };
-        let surface =
-            |hue, dark, light| mix(background, hue, strength(dark, light));
-        let text =
-            |dark, light| mix(foreground, background, strength(dark, light));
+        let surface = |hue, dark, light| {
+            fit(background, hue, strength(dark, light), foreground, 4.5)
+        };
+        // Word-level highlights only carry short spans, so 3:1 is enough.
+        let emphasis = |hue, dark, light| {
+            fit(background, hue, strength(dark, light), foreground, 3.0)
+        };
+        let text = |dark, light, minimum| {
+            fit(
+                foreground,
+                background,
+                strength(dark, light),
+                background,
+                minimum,
+            )
+        };
 
         Self {
             mode,
             background: Color::Reset,
-            add: surface(ansi(GREEN), 12, 18),
-            delete: surface(ansi(RED), 13, 12),
-            add_emphasis: surface(ansi(GREEN), 50, 40),
-            delete_emphasis: surface(ansi(RED), 45, 28),
+            add: surface(ansi(GREEN), 26, 22),
+            delete: surface(ansi(RED), 18, 12),
+            add_emphasis: emphasis(ansi(GREEN), 45, 40),
+            delete_emphasis: emphasis(ansi(RED), 35, 25),
             cursor: surface(foreground, 18, 20),
             selection: surface(ansi(BLUE), 28, 32),
             hunk: surface(ansi(BLUE), 10, 12),
             search: surface(ansi(YELLOW), 25, 30),
-            search_current: surface(ansi(YELLOW), 55, 60),
+            search_current: emphasis(ansi(YELLOW), 55, 60),
             ink: background,
-            dim: text(48, 36),
-            muted: text(40, 26),
+            dim: text(48, 36, 3.0),
+            muted: text(40, 26, 4.5),
             code: foreground,
             accent: ansi(BLUE),
             purple: ansi(MAGENTA),
@@ -122,6 +134,44 @@ const fn rgb(hex: u32) -> Color {
 
 const fn luma(hex: u32) -> u32 {
     (hex >> 16 & 0xff) * 299 + (hex >> 8 & 0xff) * 587 + (hex & 0xff) * 114
+}
+
+// Backs the blend off until the result stays legible against `against`.
+fn fit(
+    from: Color,
+    to: Color,
+    mut percent: u16,
+    against: Color,
+    minimum: f64,
+) -> Color {
+    while percent > 0 && contrast(mix(from, to, percent), against) < minimum {
+        percent -= 1;
+    }
+
+    mix(from, to, percent)
+}
+
+fn contrast(a: Color, b: Color) -> f64 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+#[allow(clippy::suboptimal_flops)]
+fn luminance(color: Color) -> f64 {
+    let Color::Rgb(r, g, b) = color else {
+        return 0.0;
+    };
+
+    let linear = |channel: u8| {
+        let value = f64::from(channel) / 255.0;
+        if value <= 0.040_45 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
 }
 
 fn mix(from: Color, to: Color, percent: u16) -> Color {

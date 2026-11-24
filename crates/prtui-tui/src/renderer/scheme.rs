@@ -29,10 +29,80 @@ impl Scheme {
         ],
     };
 
+    /// Reads a scheme in Ghostty's theme format.
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut foreground = None;
+        let mut background = None;
+        let mut palette = [None; 16];
+
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+
+            match key.trim() {
+                "foreground" => foreground = hex(value),
+                "background" => background = hex(value),
+                "palette" => {
+                    let Some((index, color)) = value.split_once('=') else {
+                        continue;
+                    };
+                    let Ok(index) = index.trim().parse::<usize>() else {
+                        continue;
+                    };
+                    if let Some(slot) = palette.get_mut(index) {
+                        *slot = hex(color);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut colors = [0; 16];
+        for (color, parsed) in colors.iter_mut().zip(palette) {
+            *color = parsed?;
+        }
+
+        Some(Self {
+            foreground: foreground?,
+            background: background?,
+            palette: colors,
+        })
+    }
+
     pub const fn for_mode(mode: ThemeMode) -> Self {
         match mode {
             ThemeMode::Dark => Self::GITHUB_DARK,
             ThemeMode::Light => Self::GITHUB_LIGHT,
         }
+    }
+}
+
+fn hex(value: &str) -> Option<u32> {
+    let digits = value.trim().strip_prefix('#')?;
+    if digits.len() != 6 {
+        return None;
+    }
+
+    u32::from_str_radix(digits, 16).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt::Write;
+
+    #[test]
+    fn parses_ghostty_themes() {
+        let mut text = String::from(
+            "background = #0d1117\nforeground = #e6edf3\ncursor-color = #2f81f7\n",
+        );
+
+        for (index, color) in Scheme::GITHUB_DARK.palette.iter().enumerate() {
+            let _ = writeln!(text, "palette = {index}=#{color:06x}");
+        }
+
+        assert_eq!(Scheme::parse(&text), Some(Scheme::GITHUB_DARK));
+        assert_eq!(Scheme::parse("background = #0d1117"), None);
     }
 }
