@@ -49,6 +49,7 @@ export default defineConfig({
       { text: "Review a pull request", link: "/reviewing" },
       { text: "Review local changes", link: "/local-diffs" },
       { text: "Keyboard reference", link: "/keys" },
+      { text: "Themes", link: "/themes" },
       { text: "CLI & configuration", link: "/cli" },
     ],
     search: { provider: "local" },

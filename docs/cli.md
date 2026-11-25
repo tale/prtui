@@ -54,14 +54,15 @@ that cache. If a saved provider is wrong, remove its entry to detect it again.
 ## Appearance
 
 prtui reads the terminal background and follows it as it changes. The default
-`auto` theme uses GitHub's light or dark colors to match. Name one of the
-[bundled Base16 schemes](https://github.com/tale/prtui/blob/main/crates/prtui-tui/SCHEMES.md)
-to use it on any background, or give one scheme for each:
+`auto` theme uses GitHub's light or dark colors to match. Pass a scheme name, or
+one scheme for each background:
 
 ```sh
 prtui --theme catppuccin-mocha
 prtui diff --theme light:catppuccin-latte,dark:catppuccin-mocha
 ```
+
+Browse the bundled schemes on the [Themes](/themes) page.
 
 ## Troubleshooting
 
@@ -75,4 +76,4 @@ and signed in to the correct host with access to the repository. Use
 **Cannot comment:** local diffs and selected commit ranges are read-only. For a
 remote review, press `L` and select **All changes** before writing a comment.
 
-**Unexpected colors:** name a scheme with `--theme` that suits the terminal background.
+**Unexpected colors:** pick a [theme](/themes) that suits the terminal background.
