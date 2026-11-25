@@ -215,7 +215,7 @@ pub async fn run(schemes: Schemes) -> Result<()> {
         snapshot.blobs,
         snapshot.states,
     );
-    std::thread::spawn(move || renderer::preload(theme.mode));
+    std::thread::spawn(renderer::preload);
     terminal::scope(async move |terminal, events| {
         viewer_loop(
             terminal,

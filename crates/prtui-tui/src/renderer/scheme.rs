@@ -1,63 +1,54 @@
-// Ghostty themes from schemes.conf, sorted by name.
-const SCHEMES: &[(&str, &str)] =
+// Base16 schemes from schemes.conf, keyed by slug.
+pub(super) const SCHEMES: &[(&str, &str)] =
     include!(concat!(env!("OUT_DIR"), "/schemes.rs"));
 
-/// A terminal color scheme in the shape iTerm2-Color-Schemes publishes.
+/// A Base16 scheme: sixteen slots from `base00` to `base0F`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Scheme {
-    pub foreground: u32,
-    pub background: u32,
-    pub palette: [u32; 16],
+    pub base: [u32; 16],
 }
 
 impl Scheme {
-    /// Finds a bundled scheme by name, ignoring case.
-    pub fn named(name: &str) -> Option<Self> {
+    /// Finds a bundled scheme by slug, ignoring case.
+    pub fn named(slug: &str) -> Option<Self> {
         SCHEMES
             .iter()
-            .find(|(known, _)| known.eq_ignore_ascii_case(name))
+            .find(|(known, _)| known.eq_ignore_ascii_case(slug))
             .and_then(|(_, text)| Self::parse(text))
     }
 
-    /// Reads a scheme in Ghostty's theme format.
+    /// Reads the palette out of a Base16 scheme file.
     pub fn parse(text: &str) -> Option<Self> {
-        let mut foreground = None;
-        let mut background = None;
-        let mut palette = [None; 16];
+        let mut base = [None; 16];
 
         for line in text.lines() {
-            let Some((key, value)) = line.split_once('=') else {
+            let Some((key, value)) = line.trim().split_once(':') else {
+                continue;
+            };
+            let Some(slot) = key.strip_prefix("base0") else {
+                continue;
+            };
+            let Ok(index) = usize::from_str_radix(slot, 16) else {
                 continue;
             };
 
-            match key.trim() {
-                "foreground" => foreground = hex(value),
-                "background" => background = hex(value),
-                "palette" => {
-                    let Some((index, color)) = value.split_once('=') else {
-                        continue;
-                    };
-                    let Ok(index) = index.trim().parse::<usize>() else {
-                        continue;
-                    };
-                    if let Some(slot) = palette.get_mut(index) {
-                        *slot = hex(color);
-                    }
-                }
-                _ => {}
-            }
+            base[index] = hex(value);
         }
 
-        let mut colors = [0; 16];
-        for (color, parsed) in colors.iter_mut().zip(palette) {
-            *color = parsed?;
+        let mut slots = [0; 16];
+        for (slot, parsed) in slots.iter_mut().zip(base) {
+            *slot = parsed?;
         }
 
-        Some(Self {
-            foreground: foreground?,
-            background: background?,
-            palette: colors,
-        })
+        Some(Self { base: slots })
+    }
+
+    pub const fn background(&self) -> u32 {
+        self.base[0x0]
+    }
+
+    pub const fn foreground(&self) -> u32 {
+        self.base[0x5]
     }
 }
 
@@ -70,14 +61,14 @@ pub struct Schemes {
 
 impl Schemes {
     pub fn github() -> Self {
-        let named = |name| Scheme::named(name).expect("GitHub is bundled");
+        let named = |slug| Scheme::named(slug).expect("GitHub is bundled");
         Self {
-            light: named("GitHub Light Default"),
-            dark: named("GitHub Dark Default"),
+            light: named("github"),
+            dark: named("github-dark"),
         }
     }
 
-    /// Reads `auto`, one scheme name, or Ghostty's `light:NAME,dark:NAME`.
+    /// Reads `auto`, one scheme, or Ghostty's `light:NAME,dark:NAME`.
     pub fn parse(value: &str) -> Option<Self> {
         if value == "auto" {
             return Some(Self::github());
@@ -107,13 +98,10 @@ impl Schemes {
     }
 }
 
+// Values look like `"#191724"`, sometimes with a trailing comment.
 fn hex(value: &str) -> Option<u32> {
-    let digits = value.trim().strip_prefix('#')?;
-    if digits.len() != 6 {
-        return None;
-    }
-
-    u32::from_str_radix(digits, 16).ok()
+    let digits = value.trim().trim_start_matches('"').strip_prefix('#')?;
+    u32::from_str_radix(digits.get(..6)?, 16).ok()
 }
 
 #[cfg(test)]
@@ -126,19 +114,19 @@ mod tests {
             assert!(Scheme::parse(text).is_some(), "{name} does not parse");
         }
 
-        let github = Scheme::named("github dark default").unwrap();
-        assert_eq!(github.background, 0x0d1117);
-        assert_eq!(github.palette[1], 0xff7b72);
-        assert_eq!(Scheme::parse("background = #0d1117"), None);
+        let github = Scheme::named("GitHub-Dark").unwrap();
+        assert_eq!(github.background(), 0x0d1117);
+        assert_eq!(github.base[0x8], 0xff7b72);
+        assert_eq!(Scheme::parse("base00: \"#0d1117\""), None);
     }
 
     #[test]
     fn parses_theme_pairs() {
-        let mocha = Scheme::named("Catppuccin Mocha").unwrap();
-        let latte = Scheme::named("Catppuccin Latte").unwrap();
+        let mocha = Scheme::named("catppuccin-mocha").unwrap();
+        let latte = Scheme::named("catppuccin-latte").unwrap();
 
         let pair =
-            Schemes::parse("dark:catppuccin mocha, light:Catppuccin Latte");
+            Schemes::parse("dark:Catppuccin-Mocha, light:catppuccin-latte");
         assert_eq!(
             pair,
             Some(Schemes {
@@ -147,7 +135,7 @@ mod tests {
             })
         );
 
-        let single = Schemes::parse("Catppuccin Mocha");
+        let single = Schemes::parse("catppuccin-mocha");
         assert_eq!(
             single,
             Some(Schemes {
@@ -157,6 +145,6 @@ mod tests {
         );
 
         assert_eq!(Schemes::parse("auto"), Some(Schemes::github()));
-        assert_eq!(Schemes::parse("light:Catppuccin Latte,dark:nope"), None);
+        assert_eq!(Schemes::parse("light:catppuccin-latte,dark:nope"), None);
     }
 }

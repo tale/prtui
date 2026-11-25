@@ -309,7 +309,7 @@ fn highlight(app: &mut App) {
     let styled = prtui_tui::renderer::highlight_file(
         &file.path,
         &file.lines,
-        app.theme().mode,
+        &app.theme().syntax,
     );
     let path = file.path.clone();
 

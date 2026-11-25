@@ -1,4 +1,4 @@
-use super::ThemeMode;
+use super::Scheme;
 use prtui_core::{DiffLine, LineKind};
 use similar::{ChangeTag, TextDiff};
 use std::ops::Range;
@@ -20,8 +20,6 @@ pub struct Segment {
 
 struct Assets {
     syntaxes: SyntaxSet,
-    dark: Theme,
-    light: Theme,
 }
 
 impl Assets {
@@ -48,13 +46,6 @@ impl Assets {
             })
             .unwrap_or_else(|| self.syntaxes.find_syntax_plain_text())
     }
-
-    const fn theme(&self, mode: ThemeMode) -> &Theme {
-        match mode {
-            ThemeMode::Dark => &self.dark,
-            ThemeMode::Light => &self.light,
-        }
-    }
 }
 
 static ASSETS: OnceLock<Assets> = OnceLock::new();
@@ -80,79 +71,65 @@ fn theme_item(scopes: &str, rgb: u32) -> ThemeItem {
     }
 }
 
-/// GitHub Light/Dark Default's semantic syntax palette, expressed as syntect
-/// scopes. The colors and token groupings follow Primer's official themes.
-fn github_theme(mode: ThemeMode) -> Theme {
-    let (
-        foreground,
-        background,
-        comment,
-        constant,
-        string,
-        entity,
-        function,
-        tag,
-        keyword,
-    ) = match mode {
-        ThemeMode::Dark => (
-            0xe6edf3, 0x0d1117, 0x8c959f, 0x79c0ff, 0xa5d6ff, 0xffa657,
-            0xd2a8ff, 0x7ee787, 0xff7b72,
-        ),
-        ThemeMode::Light => (
-            0x1f2328, 0xffffff, 0x6e7781, 0x0550ae, 0x0a3069, 0x953800,
-            0x8250df, 0x116329, 0xcf222e,
-        ),
-    };
+// Base16's TextMate styling, so every scheme colors code the same way.
+fn syntax_theme(scheme: &Scheme) -> Theme {
+    let base = |index: usize| scheme.base[index];
+    let item = |scopes, index| theme_item(scopes, base(index));
 
     Theme {
-        name: Some(
-            match mode {
-                ThemeMode::Dark => "GitHub Dark Default",
-                ThemeMode::Light => "GitHub Light Default",
-            }
-            .into(),
-        ),
-        author: Some("GitHub / Primer".into()),
         settings: ThemeSettings {
-            foreground: Some(syntax_color(foreground)),
-            background: Some(syntax_color(background)),
+            foreground: Some(syntax_color(scheme.foreground())),
+            background: Some(syntax_color(scheme.background())),
             ..ThemeSettings::default()
         },
-        // Broad rules come first; later, more specific selectors win.
         scopes: vec![
-            theme_item("comment, punctuation.definition.comment", comment),
-            theme_item(
-                "constant, support.constant, meta.module-reference",
-                constant,
+            item("comment, punctuation.definition.comment", 0x3),
+            item(
+                "keyword.operator, variable.parameter.function, punctuation.definition.string, punctuation.definition.parameters",
+                0x5,
             ),
-            theme_item("constant.numeric", constant),
-            theme_item("string, punctuation.definition.string", string),
-            theme_item(
-                "entity.name.type, entity.name.class, entity.name.namespace, entity.other.inherited-class, support.type",
-                entity,
+            item(
+                "variable, entity.name.tag, markup.deleted, markup.list, string.other.link",
+                0x8,
             ),
-            theme_item("entity.name.function, support.function", function),
-            theme_item("entity.name.tag", tag),
-            theme_item("keyword, storage, storage.type", keyword),
-            theme_item("variable, entity.name.variable", entity),
-            theme_item("invalid, invalid.illegal", keyword),
-            theme_item("markup.heading", constant),
-            theme_item("markup.inserted", tag),
-            theme_item("markup.deleted", keyword),
+            item(
+                "constant, constant.numeric, entity.other.attribute-name, keyword.other.unit",
+                0x9,
+            ),
+            item(
+                "entity.name.class, entity.name.type, support.class, markup.bold",
+                0xA,
+            ),
+            item(
+                "string, constant.other.symbol, entity.other.inherited-class, markup.raw.inline, markup.inserted",
+                0xB,
+            ),
+            item(
+                "support.function, string.regexp, constant.character.escape, constant.other.color",
+                0xC,
+            ),
+            item(
+                "entity.name.function, variable.function, support.function.any-method, meta.require, keyword.other.special-method, entity.other.attribute-name.id, markup.heading, entity.name.section",
+                0xD,
+            ),
+            item(
+                "keyword, storage, meta.selector, markup.italic, markup.changed",
+                0xE,
+            ),
+            item("punctuation.section.embedded, variable.interpolation", 0xF),
         ],
+        ..Theme::default()
     }
 }
 
 fn assets() -> &'static Assets {
     ASSETS.get_or_init(|| Assets {
         syntaxes: two_face::syntax::extra_newlines(),
-        dark: github_theme(ThemeMode::Dark),
-        light: github_theme(ThemeMode::Light),
     })
 }
 
-pub fn preload(mode: ThemeMode) {
-    let _ = assets().theme(mode);
+pub fn preload() {
+    let _ = assets();
 }
 
 /// Splits on identifier boundaries rather than whitespace, so `compute(alpha,`
@@ -378,15 +355,12 @@ const MAX_HIGHLIGHT_BYTES: usize = 16 * 1024;
 pub fn highlight_file(
     path: &str,
     lines: &[DiffLine],
-    mode: ThemeMode,
+    scheme: &Scheme,
 ) -> Vec<Vec<Segment>> {
     let assets = assets();
     let syntax = assets.syntax_for(path, lines);
-    let syntax_theme = assets.theme(mode);
-    let fallback = syntax_theme.settings.foreground.unwrap_or(match mode {
-        ThemeMode::Dark => syntax_color(0xe6edf3),
-        ThemeMode::Light => syntax_color(0x1f2328),
-    });
+    let syntax_theme = &syntax_theme(scheme);
+    let fallback = syntax_color(scheme.foreground());
 
     // Each side keeps parser state independently. A hunk boundary resets both:
     // omitted source between hunks cannot safely carry lexical state forward.
@@ -568,8 +542,11 @@ mod tests {
             new_line: Some(1),
         }];
 
-        let highlighted =
-            highlight_file("generated.js", &lines, ThemeMode::Dark);
+        let highlighted = highlight_file(
+            "generated.js",
+            &lines,
+            &Scheme::named("github-dark").unwrap(),
+        );
         assert_eq!(highlighted[0].len(), 1);
         assert_eq!(highlighted[0][0].range, 0..MAX_HIGHLIGHT_BYTES + 1);
     }

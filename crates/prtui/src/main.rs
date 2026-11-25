@@ -371,7 +371,7 @@ async fn run<P: Provider>(
         let mut theme = theme;
         match launch {
             Launch::Review { repo, number } => {
-                std::thread::spawn(move || renderer::preload(theme.mode));
+                std::thread::spawn(renderer::preload);
                 event_loop(
                     terminal,
                     events,
@@ -400,7 +400,7 @@ async fn run<P: Provider>(
 
                     if !is_preloaded {
                         std::thread::spawn(move || {
-                            renderer::preload(theme.mode);
+                            renderer::preload();
                         });
                         is_preloaded = true;
                     }
@@ -560,7 +560,7 @@ async fn viewer_loop(
                     highlighter.all(
                         view.files,
                         view.selected_file,
-                        view.theme().mode,
+                        view.theme().syntax,
                     );
                 }
                 Effect::Highlight(path) => {
@@ -568,7 +568,7 @@ async fn viewer_loop(
                     if let Some(file) =
                         view.files.iter().find(|file| file.path == path)
                     {
-                        highlighter.one(file, view.theme().mode);
+                        highlighter.one(file, view.theme().syntax);
                     }
                 }
                 effect => execute(effect, &tx, terminal)?,
@@ -594,7 +594,7 @@ async fn viewer_loop(
                     // A result colored under the previous palette is dropped:
                     // the pass that replaces it is already running.
                     Message::Highlight(output)
-                        if output.mode != app.theme().mode
+                        if output.scheme != app.theme().syntax
                             || !highlighter.accepts(&output) =>
                     {
                         false

@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::{env, fs};
 
-// Splits schemes.conf into a table of names and Ghostty theme text.
+// Splits schemes.conf into a table of slugs and Base16 scheme text.
 fn main() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("schemes.conf");
     println!("cargo:rerun-if-changed={}", source.display());

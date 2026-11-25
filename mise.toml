@@ -25,7 +25,7 @@ depends = ["lint"]
 run = ["cargo fmt --all -- --check", "cargo test --all-features"]
 
 [tasks."schemes:sync"]
-description = "Vendor the redistributable iTerm2-Color-Schemes themes"
+description = "Vendor the tinted-theming Base16 schemes"
 run = "scripts/sync-schemes.sh"
 
 [tasks.release]

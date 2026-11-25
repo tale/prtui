@@ -8,11 +8,12 @@ pub enum ThemeMode {
     Light,
 }
 
-/// One coherent palette for the whole renderer. Syntax colors come from a
-/// matching syntect theme; these colors cover diff state and lightweight UI.
+/// One coherent palette for the whole renderer. Code is colored from
+/// `syntax`; the rest covers diff state and lightweight UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub mode: ThemeMode,
+    pub syntax: Scheme,
     pub background: Color,
     pub add: Color,
     pub delete: Color,
@@ -36,12 +37,15 @@ pub struct Theme {
     pub heading: Color,
 }
 
-const RED: usize = 1;
-const GREEN: usize = 2;
-const YELLOW: usize = 3;
-const BLUE: usize = 4;
-const MAGENTA: usize = 5;
-const CYAN: usize = 6;
+const SELECTION: usize = 0x2;
+const COMMENT: usize = 0x3;
+const STATUS: usize = 0x4;
+const RED: usize = 0x8;
+const YELLOW: usize = 0xA;
+const GREEN: usize = 0xB;
+const CYAN: usize = 0xC;
+const BLUE: usize = 0xD;
+const MAGENTA: usize = 0xE;
 
 const LUMA_MAX: u32 = 255_000;
 
@@ -50,7 +54,7 @@ impl Theme {
     /// Without a detected background the dark scheme stands on its own.
     pub fn new(schemes: Schemes, background: Option<u32>) -> Self {
         let Some(background) = background else {
-            return Self::from_scheme(&schemes.dark, schemes.dark.background);
+            return Self::from_scheme(&schemes.dark, schemes.dark.background());
         };
 
         let scheme = if is_light(background) {
@@ -63,19 +67,19 @@ impl Theme {
 
     pub fn dark() -> Self {
         let scheme = Schemes::github().dark;
-        Self::from_scheme(&scheme, scheme.background)
+        Self::from_scheme(&scheme, scheme.background())
     }
 
     pub fn light() -> Self {
         let scheme = Schemes::github().light;
-        Self::from_scheme(&scheme, scheme.background)
+        Self::from_scheme(&scheme, scheme.background())
     }
 
     pub fn from_scheme(scheme: &Scheme, background: u32) -> Self {
         let luma = luma(background);
-        let foreground = rgb(scheme.foreground);
+        let foreground = rgb(scheme.foreground());
         let background = rgb(background);
-        let ansi = |index: usize| rgb(scheme.palette[index]);
+        let base = |index: usize| rgb(scheme.base[index]);
 
         let mode = if luma >= LUMA_MAX / 2 {
             ThemeMode::Light
@@ -88,45 +92,48 @@ impl Theme {
                 u32::from(dark) * (LUMA_MAX - luma) + u32::from(light) * luma;
             (mixed / LUMA_MAX) as u16
         };
+        // A scheme whose text only just clears 4.5:1 still gets some tint.
+        let legible = (contrast(foreground, background) * 0.8).min(4.5);
         let surface = |hue, dark, light| {
-            fit(background, hue, strength(dark, light), foreground, 4.5)
+            fit(background, hue, strength(dark, light), foreground, legible)
         };
         // Word-level highlights only carry short spans, so 3:1 is enough.
         let emphasis = |hue, dark, light| {
             fit(background, hue, strength(dark, light), foreground, 3.0)
         };
-        let text = |dark, light, minimum| {
-            fit(
-                foreground,
-                background,
-                strength(dark, light),
-                background,
-                minimum,
-            )
+        let text = |index, minimum| {
+            fit(foreground, base(index), 100, background, minimum)
         };
+
+        // Code stays readable on the real background, comments included.
+        let mut syntax = *scheme;
+        for index in std::iter::once(COMMENT).chain(RED..=0xF) {
+            syntax.base[index] = hex(text(index, 3.0));
+        }
 
         Self {
             mode,
+            syntax,
             background: Color::Reset,
-            add: surface(ansi(GREEN), 26, 22),
-            delete: surface(ansi(RED), 18, 12),
-            add_emphasis: emphasis(ansi(GREEN), 45, 40),
-            delete_emphasis: emphasis(ansi(RED), 35, 25),
-            cursor: surface(foreground, 18, 20),
-            selection: surface(ansi(BLUE), 28, 32),
-            hunk: surface(ansi(BLUE), 10, 12),
-            search: surface(ansi(YELLOW), 25, 30),
-            search_current: emphasis(ansi(YELLOW), 55, 60),
+            add: surface(base(GREEN), 26, 22),
+            delete: surface(base(RED), 18, 12),
+            add_emphasis: emphasis(base(GREEN), 45, 40),
+            delete_emphasis: emphasis(base(RED), 35, 25),
+            cursor: fit(background, base(SELECTION), 100, foreground, legible),
+            selection: surface(base(BLUE), 28, 32),
+            hunk: surface(base(BLUE), 10, 12),
+            search: surface(base(YELLOW), 25, 30),
+            search_current: emphasis(base(YELLOW), 55, 60),
             ink: background,
-            dim: text(48, 36, 3.0),
-            muted: text(40, 26, 4.5),
+            dim: text(COMMENT, 3.0),
+            muted: text(STATUS, 4.5),
             code: foreground,
-            accent: ansi(BLUE),
-            purple: ansi(MAGENTA),
-            cyan: ansi(CYAN),
-            success: ansi(GREEN),
-            danger: ansi(RED),
-            warning: ansi(YELLOW),
+            accent: base(BLUE),
+            purple: base(MAGENTA),
+            cyan: base(CYAN),
+            success: base(GREEN),
+            danger: base(RED),
+            warning: base(YELLOW),
             heading: foreground,
         }
     }
@@ -143,6 +150,14 @@ impl Theme {
 
 const fn rgb(hex: u32) -> Color {
     Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+fn hex(color: Color) -> u32 {
+    let Color::Rgb(r, g, b) = color else {
+        return 0;
+    };
+
+    u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
 }
 
 const fn is_light(hex: u32) -> bool {
@@ -205,4 +220,84 @@ fn mix(from: Color, to: Color, percent: u16) -> Color {
     };
 
     Color::Rgb(channel(fr, tr), channel(fg, tg), channel(fb, tb))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::scheme::SCHEMES;
+
+    // About the smallest step in OKLab that reads as a different color.
+    const NOTICEABLE: f64 = 0.02;
+
+    #[test]
+    fn every_bundled_scheme_draws_visible_rows() {
+        for (slug, text) in SCHEMES {
+            let scheme = Scheme::parse(text).unwrap();
+            let background = rgb(scheme.background());
+            let theme = Theme::from_scheme(&scheme, scheme.background());
+
+            for (label, row, against) in [
+                ("add", theme.add, background),
+                ("delete", theme.delete, background),
+                ("add and delete", theme.add, theme.delete),
+                ("cursor", theme.cursor, background),
+                ("selection", theme.selection, background),
+                ("search", theme.search, background),
+            ] {
+                let distance = distance(row, against);
+                assert!(
+                    distance >= NOTICEABLE,
+                    "{slug}: {label} differ by only {distance:.3}"
+                );
+            }
+        }
+    }
+
+    #[allow(clippy::suboptimal_flops)]
+    fn oklab(color: Color) -> [f64; 3] {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("derived colors are RGB: {color:?}");
+        };
+        let linear = |channel: u8| {
+            let value = f64::from(channel) / 255.0;
+            if value <= 0.040_45 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let (red, green, blue) = (linear(r), linear(g), linear(b));
+
+        let long = (0.412_221_470_8 * red
+            + 0.536_332_536_3 * green
+            + 0.051_445_992_9 * blue)
+            .cbrt();
+        let medium = (0.211_903_498_2 * red
+            + 0.680_699_545_1 * green
+            + 0.107_396_956_6 * blue)
+            .cbrt();
+        let short = (0.088_302_461_9 * red
+            + 0.281_718_837_6 * green
+            + 0.629_978_700_5 * blue)
+            .cbrt();
+
+        [
+            0.210_454_255_3 * long + 0.793_617_785 * medium
+                - 0.004_072_046_8 * short,
+            1.977_998_495_1 * long - 2.428_592_205 * medium
+                + 0.450_593_709_9 * short,
+            0.025_904_037_1 * long + 0.782_771_766_2 * medium
+                - 0.808_675_766 * short,
+        ]
+    }
+
+    fn distance(a: Color, b: Color) -> f64 {
+        oklab(a)
+            .iter()
+            .zip(oklab(b))
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    }
 }

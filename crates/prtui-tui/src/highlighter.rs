@@ -5,21 +5,21 @@
 //! the one task already running harmless when its file or palette changes.
 
 use crate::app::Highlight;
-use crate::renderer::{self, ThemeMode};
+use crate::renderer::{self, Scheme};
 use prtui_core::ChangedFile;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 pub struct Output {
     pub generation: u64,
-    pub mode: ThemeMode,
+    pub scheme: Scheme,
     pub path: Arc<str>,
     pub styled: Highlight,
 }
 
 struct Task {
     generation: u64,
-    mode: ThemeMode,
+    scheme: Scheme,
     file: Arc<ChangedFile>,
 }
 
@@ -130,7 +130,7 @@ impl Highlighter {
                 let styled = renderer::highlight_file(
                     &task.file.path,
                     &task.file.lines,
-                    task.mode,
+                    &task.scheme,
                 );
                 if !lock(&worker_generations)
                     .is_current(&task.file.path, task.generation)
@@ -140,7 +140,7 @@ impl Highlighter {
 
                 publish(Output {
                     generation: task.generation,
-                    mode: task.mode,
+                    scheme: task.scheme,
                     path: task.file.path.clone(),
                     styled,
                 });
@@ -159,7 +159,7 @@ impl Highlighter {
         &self,
         files: &[Arc<ChangedFile>],
         first: usize,
-        mode: ThemeMode,
+        scheme: Scheme,
     ) {
         let order = highlight_order(files.len(), first);
         let mut generations = lock(&self.generations);
@@ -169,7 +169,7 @@ impl Highlighter {
                 let file = files[index].clone();
                 Task {
                     generation: generations.advance(file.path.clone()),
-                    mode,
+                    scheme,
                     file,
                 }
             })
@@ -181,12 +181,12 @@ impl Highlighter {
 
     /// Recolors a file whose patch changed, superseding any older queued pass
     /// for the same path without allowing work to grow without bound.
-    pub fn one(&self, file: &Arc<ChangedFile>, mode: ThemeMode) {
+    pub fn one(&self, file: &Arc<ChangedFile>, scheme: Scheme) {
         let generation = lock(&self.generations).advance(file.path.clone());
 
         self.pending.prioritize(Task {
             generation,
-            mode,
+            scheme,
             file: file.clone(),
         });
     }
